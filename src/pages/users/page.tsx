@@ -21,7 +21,10 @@ import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { useConfirm } from "@/hooks/use-confirm.ts";
 import { errorMessage } from "@/lib/errors.ts";
-import { ResetPasswordMenuItem } from "@/components/reset-password-menu-item.tsx";
+import {
+  ResetPasswordDialog,
+  ResetPasswordMenuItem,
+} from "@/components/reset-password-menu-item.tsx";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -70,6 +73,7 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
 }
 
 function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+  const [resetPasswordOpen, setResetPasswordOpen] = useState(false);
   const updateAccess = useMutation(api.users.updateAccess);
 
   const save = async (status: Status, done: string) => {
@@ -133,8 +137,7 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
             <CanisterAccessToggle user={user} />
             <DropdownMenuSeparator />
             <ResetPasswordMenuItem
-              userId={user._id}
-              userLabel={user.name ?? user.email ?? "this user"}
+              onSelect={() => setResetPasswordOpen(true)}
             />
             {!isSelf && (
               <>
@@ -150,6 +153,14 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
             )}
           </DropdownMenuContent>
         </DropdownMenu>
+      )}
+      {user.status === "active" && (
+        <ResetPasswordDialog
+          open={resetPasswordOpen}
+          onOpenChange={setResetPasswordOpen}
+          userId={user._id}
+          userLabel={user.name ?? user.email ?? "this user"}
+        />
       )}
       {!isSelf && user.status !== "active" && (
         <div className="flex flex-wrap items-center gap-2">

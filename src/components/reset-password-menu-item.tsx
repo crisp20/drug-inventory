@@ -21,22 +21,34 @@ import {
   PASSWORD_REQUIREMENTS_MESSAGE,
 } from "@/convex/lib/password.ts";
 
-export function ResetPasswordMenuItem({
+export function ResetPasswordMenuItem({ onSelect }: { onSelect: () => void }) {
+  return (
+    <DropdownMenuItem onSelect={onSelect}>
+      <KeyRound />
+      Reset password
+    </DropdownMenuItem>
+  );
+}
+
+export function ResetPasswordDialog({
+  open,
+  onOpenChange,
   userId,
   userLabel,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   userId?: Id<"users">;
   userLabel: string;
 }) {
   const resetPassword = useAction(api.users.resetPassword);
-  const [open, setOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving] = useState(false);
 
   const handleOpenChange = (nextOpen: boolean) => {
-    setOpen(nextOpen);
+    onOpenChange(nextOpen);
     if (!nextOpen) {
       setNewPassword("");
       setConfirmPassword("");
@@ -63,59 +75,54 @@ export function ResetPasswordMenuItem({
   };
 
   return (
-    <>
-      <DropdownMenuItem onSelect={() => setOpen(true)}>
-        <KeyRound />
-        Reset password
-      </DropdownMenuItem>
-      <Dialog open={open} onOpenChange={handleOpenChange}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reset password</DialogTitle>
-            <DialogDescription>
-              Set a new password for {userLabel}.{" "}
-              {PASSWORD_REQUIREMENTS_MESSAGE}
-            </DialogDescription>
-          </DialogHeader>
-          <form
-            onSubmit={(event) => void handleSubmit(event)}
-            className="space-y-4"
-          >
-            <div className="space-y-2">
-              <label htmlFor="reset-password" className="text-sm font-medium">
-                New password
-              </label>
-              <div className="relative">
-                <Input
-                  id="reset-password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="new-password"
-                  minLength={MIN_PASSWORD_LENGTH}
-                  maxLength={MAX_PASSWORD_LENGTH}
-                  required
-                  value={newPassword}
-                  onChange={(event) => setNewPassword(event.target.value)}
-                  className="pr-10"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                  className="absolute top-0 right-0"
-                  onClick={() => setShowPassword((shown) => !shown)}
-                >
-                  {showPassword ? <EyeOff /> : <Eye />}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label
-                htmlFor="reset-confirm-password"
-                className="text-sm font-medium"
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Reset password</DialogTitle>
+          <DialogDescription>
+            Set a new password for {userLabel}. {PASSWORD_REQUIREMENTS_MESSAGE}
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          onSubmit={(event) => void handleSubmit(event)}
+          className="space-y-4"
+        >
+          <div className="space-y-2">
+            <label htmlFor="reset-password" className="text-sm font-medium">
+              New password
+            </label>
+            <div className="relative">
+              <Input
+                id="reset-password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="new-password"
+                minLength={MIN_PASSWORD_LENGTH}
+                maxLength={MAX_PASSWORD_LENGTH}
+                required
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                className="pr-10"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="absolute top-0 right-0"
+                onClick={() => setShowPassword((shown) => !shown)}
               >
-                Confirm new password
-              </label>
+                {showPassword ? <EyeOff /> : <Eye />}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label
+              htmlFor="reset-confirm-password"
+              className="text-sm font-medium"
+            >
+              Confirm new password
+            </label>
+            <div className="relative">
               <Input
                 id="reset-confirm-password"
                 type={showPassword ? "text" : "password"}
@@ -126,14 +133,24 @@ export function ResetPasswordMenuItem({
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
               />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                className="absolute top-0 right-0"
+                onClick={() => setShowPassword((shown) => !shown)}
+              >
+                {showPassword ? <EyeOff /> : <Eye />}
+              </Button>
             </div>
-            <Button type="submit" className="w-full" disabled={saving}>
-              {saving && <Loader2 className="size-4 animate-spin" />}
-              {saving ? "Please wait..." : "Save new password"}
-            </Button>
-          </form>
-        </DialogContent>
-      </Dialog>
-    </>
+          </div>
+          <Button type="submit" className="w-full" disabled={saving}>
+            {saving && <Loader2 className="size-4 animate-spin" />}
+            {saving ? "Please wait..." : "Save new password"}
+          </Button>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
