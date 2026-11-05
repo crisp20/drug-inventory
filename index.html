@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>ACP Stock</title>
+    <meta name="description" content="ACP drug inventory with Stock In and Stock Out tracking" />
+    <link rel="icon" href="https://hercules-cdn.com/file_1CrjBA7oz550P1YuXycIxorr" />
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Figtree:wght@300..900&family=Fira+Code:wght@300..700&family=Geist+Mono:wght@100..900&family=Geist:wght@100..900&family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Montserrat:ital,wght@0,100..900;1,100..900&family=Noto+Serif:ital,wght@0,100..900;1,100..900&display=swap"
+      rel="stylesheet"
+      crossorigin
+    />
+
+    <!-- Detect dark mode preference and set the class before next-themes loads. This avoids a flash of unstyled content (FOUC) when the page loads. -->
+    <script>
+      try {
+        let theme = localStorage.getItem("theme");
+        if (theme === "system" || !theme) {
+          let prefersDark = window.matchMedia(
+            "(prefers-color-scheme: dark)",
+          ).matches;
+          theme = prefersDark ? "dark" : "light";
+        }
+        document.documentElement.classList.add(theme);
+      } catch (e) {}
+    </script>
+
+    <!-- Old-browser check: written in old-style JavaScript so it still runs where the app itself can't.
+         The app needs about Chrome/Edge 111, Safari 16.4 or Firefox 114 (modern color features act as the test). -->
+    <script>
+      (function () {
+        var supported = false;
+        try {
+          supported =
+            !!window.CSS &&
+            CSS.supports("color", "oklch(0.5 0.1 300)") &&
+            CSS.supports("color", "color-mix(in srgb, red, blue)");
+        } catch (e) {}
+        if (supported) return;
+        window.__unsupportedBrowser = true;
+        function show() {
+          document.body.innerHTML =
+            '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f7f4fb;font-family:Arial,Helvetica,sans-serif;color:#2a1340;box-sizing:border-box">' +
+            '<div style="max-width:460px;background:#fff;border:1px solid #e3dbee;border-radius:16px;padding:32px;text-align:center">' +
+            '<img src="https://hercules-cdn.com/file_1CrjBA7oz550P1YuXycIxorr" alt="ACP" width="56" height="56" style="border-radius:12px" />' +
+            '<h1 style="font-size:22px;margin:16px 0 8px">Please update your browser</h1>' +
+            '<p style="font-size:15px;line-height:1.5;color:#5c4a70;margin:0 0 16px">ACP Stock needs a newer browser to work. Please update to the latest version of Chrome, Edge, Safari or Firefox, or use another computer, tablet or phone.</p>' +
+            '<p style="font-size:13px;line-height:1.5;color:#5c4a70;margin:0 0 16px">Minimum: Chrome / Edge 111, Safari 16.4, Firefox 114.<br />Older Mac (macOS 10.12 to 10.14)? Install Firefox from mozilla.org.</p>' +
+            '<hr style="border:none;border-top:1px solid #e3dbee;margin:16px 0" />' +
+            '<h2 style="font-size:18px;margin:0 0 8px">請更新您的瀏覽器</h2>' +
+            '<p style="font-size:14px;line-height:1.6;color:#5c4a70;margin:0">ACP Stock 需要較新版本的瀏覽器。請更新至最新版本的 Chrome、Edge、Safari 或 Firefox，或改用其他電腦、平板或手機。</p>' +
+            "</div></div>";
+        }
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", show);
+        } else {
+          show();
+        }
+      })();
+    </script>
+
+    <link href="/src/index.css" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+import { defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export const userRole = v.union(v.literal("admin"), v.literal("staff"));
+export const userStatus = v.union(
+  v.literal("pending"),
+  v.literal("active"),
+  v.literal("disabled"),
+);
+
+export const usersTable = defineTable({
+  tokenIdentifier: v.string(),
+  name: v.optional(v.string()),
+  email: v.optional(v.string()),
+  // Optional so rows created before roles existed still validate; treated as staff/pending
+  role: v.optional(userRole),
+  status: v.optional(userStatus),
+  // Early access to canister features before they are rolled out to everyone
+  canisterAccess: v.optional(v.boolean()),
+})
+  .index("by_token", ["tokenIdentifier"])
+  .index("by_status", ["status"]);

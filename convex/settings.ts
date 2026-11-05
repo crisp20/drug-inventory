@@ -1,0 +1,141 @@
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { requireActiveUser, requireAdmin } from "./lib/access";
+import { actorOf, logActivity } from "./lib/activity";
+import {
+  cleanExpiryWarningMonths,
+  DEFAULT_EXPIRY_WARNING_MONTHS,
+} from "./lib/expiry";
+import {
+  cleanLargeQuantityThreshold,
+  DEFAULT_LARGE_QUANTITY_THRESHOLD,
+} from "./lib/settings";
+
+// Current settings, with defaults filled in. Any approved user can read them.
+export const get = query({
+  args: {},
+  handler: async (ctx) => {
+    await requireActiveUser(ctx);
+    const row = await ctx.db.query("settings").first();
+    return {
+      largeQuantityThreshold:
+        row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD,
+      canisterForEveryone: row?.canisterForEveryone ?? false,
+      expiryWarningMonths:
+        row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS,
+      updatedAt: row?.updatedAt ?? null,
+      updatedByName: row?.updatedByName ?? null,
+    };
+  },
+});
+
+// Admin: show canister features to everyone, or only to people switched on in Users
+export const setCanisterRollout = mutation({
+  args: { canisterForEveryone: v.boolean() },
+  handler: async (ctx, { canisterForEveryone }) => {
+    const admin = await requireAdmin(ctx);
+    const row = await ctx.db.query("settings").first();
+    const before = row?.canisterForEveryone ?? false;
+    if (before === canisterForEveryone) return null;
+    const fields = {
+      canisterForEveryone,
+      updatedAt: new Date().toISOString(),
+      updatedByName: admin.name ?? admin.email ?? "Unknown user",
+    };
+    if (row) await ctx.db.patch("settings", row._id, fields);
+    else
+      await ctx.db.insert("settings", {
+        ...fields,
+        largeQuantityThreshold: DEFAULT_LARGE_QUANTITY_THRESHOLD,
+      });
+    const label = (on: boolean) => (on ? "Everyone" : "Selected people only");
+    await logActivity(ctx, actorOf(admin), {
+      category: "settings",
+      action: "Changed",
+      summary: canisterForEveryone
+        ? "Rolled out canister features to everyone"
+        : "Limited canister features to selected people",
+      changes: [
+        {
+          field: "Canister features",
+          before: label(before),
+          after: label(canisterForEveryone),
+        },
+      ],
+    });
+    return null;
+  },
+});
+
+// Admin: how many months ahead canister stock counts as "expiring soon"
+export const setExpiryWarning = mutation({
+  args: { expiryWarningMonths: v.number() },
+  handler: async (ctx, args) => {
+    const admin = await requireAdmin(ctx);
+    const months = cleanExpiryWarningMonths(args.expiryWarningMonths);
+    const row = await ctx.db.query("settings").first();
+    const before = row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS;
+    if (row && before === months) return null;
+    const fields = {
+      expiryWarningMonths: months,
+      updatedAt: new Date().toISOString(),
+      updatedByName: admin.name ?? admin.email ?? "Unknown user",
+    };
+    if (row) await ctx.db.patch("settings", row._id, fields);
+    else
+      await ctx.db.insert("settings", {
+        ...fields,
+        largeQuantityThreshold: DEFAULT_LARGE_QUANTITY_THRESHOLD,
+      });
+    if (before !== months) {
+      const label = (m: number) => (m === 0 ? "Off" : `${m} month(s)`);
+      await logActivity(ctx, actorOf(admin), {
+        category: "settings",
+        action: "Changed",
+        summary: "Changed the expiry warning",
+        changes: [
+          {
+            field: "Expiry warning",
+            before: label(before),
+            after: label(months),
+          },
+        ],
+      });
+    }
+    return null;
+  },
+});
+
+export const update = mutation({
+  args: { largeQuantityThreshold: v.number() },
+  handler: async (ctx, args) => {
+    const admin = await requireAdmin(ctx);
+    const fields = {
+      largeQuantityThreshold: cleanLargeQuantityThreshold(
+        args.largeQuantityThreshold,
+      ),
+      updatedAt: new Date().toISOString(),
+      updatedByName: admin.name ?? admin.email ?? "Unknown user",
+    };
+    const row = await ctx.db.query("settings").first();
+    const before =
+      row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD;
+    if (row) await ctx.db.patch("settings", row._id, fields);
+    else await ctx.db.insert("settings", fields);
+    if (before !== fields.largeQuantityThreshold) {
+      await logActivity(ctx, actorOf(admin), {
+        category: "settings",
+        action: "Changed",
+        summary: "Changed the large quantity check",
+        changes: [
+          {
+            field: "Large quantity check",
+            before: String(before),
+            after: String(fields.largeQuantityThreshold),
+          },
+        ],
+      });
+    }
+    return null;
+  },
+});
