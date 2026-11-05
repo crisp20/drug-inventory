@@ -1,0 +1,28 @@
+diff --git a/convex/drugImportSeed.ts b/convex/drugImportSeed.ts
+deleted file mode 100644
+index b3dd8fe..0000000
+--- a/convex/drugImportSeed.ts
++++ /dev/null
+@@ -1,22 +0,0 @@
+-import { internal } from "./_generated/api";
+-import { internalAction } from "./_generated/server";
+-import { SEED_DRUGS } from "./drugImportSeedData";
+-
+-const SEED_BATCH = 100;
+-
+-// One-off: adds the prepared Tablet/Capsule drugs that are not saved yet (existing ones untouched)
+-export const seedPrepared = internalAction({
+-  args: {},
+-  handler: async (ctx): Promise<{ created: number; existing: number; failures: string[] }> => {
+-    const total = { created: 0, existing: 0, failures: [] as string[] };
+-    for (let i = 0; i < SEED_DRUGS.length; i += SEED_BATCH) {
+-      const r = await ctx.runMutation(internal.drugImport.seedNewDrugs, {
+-        drugs: SEED_DRUGS.slice(i, i + SEED_BATCH),
+-      });
+-      total.created += r.created;
+-      total.existing += r.existing;
+-      total.failures.push(...r.failures);
+-    }
+-    return total;
+-  },
+-});

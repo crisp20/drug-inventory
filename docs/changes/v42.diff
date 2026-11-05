@@ -1,0 +1,1514 @@
+diff --git a/convex/canister.test.ts b/convex/canister.test.ts
+new file mode 100644
+index 0000000..3d2ddc1
+--- /dev/null
++++ b/convex/canister.test.ts
+@@ -0,0 +1,124 @@
++import { convexTest } from "convex-test";
++import { describe, expect, it } from "vitest";
++import { api } from "./_generated/api";
++import schema from "./schema";
++import { modules } from "./test.setup";
++
++const OWNER = {
++  tokenIdentifier: "iss|owner",
++  email: "hubert@activecaregroup.com",
++  name: "Hubert",
++};
++const STAFF = {
++  tokenIdentifier: "iss|staff",
++  email: "staff@example.com",
++  name: "Sam",
++};
++
++const drug = {
++  drugId: "QTP25",
++  name: "Quetiapine 25mg Tab",
++  brandName: "Seroquel",
++  manufacturer: "AZ",
++  pieceName: "tablets",
++  packages: [
++    {
++      barcode: "9312345678907",
++      qtyPerUnit: 100,
++      baseUnit: "Box" as const,
++      unitCount: 1,
++      stock: 5,
++      imageIds: [],
++    },
++  ],
++};
++
++const canister = {
++  batch: " 50803-3 ",
++  expiry: "2028-09-09",
++  quantity: 100,
++  type: 1,
++};
++
++async function setup() {
++  const t = convexTest(schema, modules);
++  const owner = t.withIdentity(OWNER);
++  const staff = t.withIdentity(STAFF);
++  await owner.mutation(api.users.updateCurrentUser, {});
++  await staff.mutation(api.users.updateCurrentUser, {});
++  const [pending] = await owner.query(api.users.listByStatus, {
++    status: "pending",
++  });
++  await owner.mutation(api.users.updateAccess, {
++    userId: pending._id,
++    role: "staff",
++    status: "active",
++  });
++  const drugRef = await owner.mutation(api.drugs.create, drug);
++  const created = await owner.query(api.drugs.get, { id: drugRef });
++  return {
++    owner,
++    staff,
++    staffId: pending._id,
++    packageId: created!.packages[0]._id,
++  };
++}
++
++const out = { quantity: 1, notes: "", reason: "Dispensed" };
++
++describe("Canister details on Stock Out", () => {
++  it("are refused while canister features are hidden for the person", async () => {
++    const { staff, packageId } = await setup();
++    await expect(
++      staff.mutation(api.stock.recordOut, { packageId, ...out, canister }),
++    ).rejects.toThrow(/not switched on/);
++    // A normal Stock Out still works
++    await staff.mutation(api.stock.recordOut, { packageId, ...out });
++  });
++
++  it("are saved once switched on for that person", async () => {
++    const { owner, staff, staffId, packageId } = await setup();
++    await owner.mutation(api.users.setCanisterAccess, {
++      userId: staffId,
++      enabled: true,
++    });
++    await staff.mutation(api.stock.recordOut, { packageId, ...out, canister });
++    const { page } = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(page[0].canister).toEqual({ ...canister, batch: "50803-3" });
++    const log = await owner.query(api.activity.list, {
++      category: "stock_out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(log.page[0].detail).toContain("Batch 50803-3");
++  });
++
++  it("work for everyone after the roll out, and only admins can roll out", async () => {
++    const { owner, staff, packageId } = await setup();
++    await expect(
++      staff.mutation(api.settings.setCanisterRollout, {
++        canisterForEveryone: true,
++      }),
++    ).rejects.toThrow();
++    await owner.mutation(api.settings.setCanisterRollout, {
++      canisterForEveryone: true,
++    });
++    await staff.mutation(api.stock.recordOut, { packageId, ...out, canister });
++  });
++
++  it("reject invalid details", async () => {
++    const { owner, packageId } = await setup();
++    await owner.mutation(api.settings.setCanisterRollout, {
++      canisterForEveryone: true,
++    });
++    await expect(
++      owner.mutation(api.stock.recordOut, {
++        packageId,
++        ...out,
++        canister: { ...canister, expiry: "2028-13-01" },
++      }),
++    ).rejects.toThrow();
++  });
++});
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index a892955..fcd21ee 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -1,6 +1,7 @@
+ import type { MutationCtx } from "../_generated/server";
+ import type { Doc, Id } from "../_generated/dataModel";
+ import { formatPackageForm } from "./barcode";
++import { formatCanister } from "./canister";
+ import type { PackageInput } from "./drugs";
+ 
+ // Filter / badge labels for each kind of activity (matches schema/activity.ts)
+@@ -321,6 +322,7 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
+         m.barcode || "No barcode",
+         `Stock ${m.stockBefore} → ${m.stockAfter}`,
+         m.reason ?? "",
++        m.canister ? formatCanister(m.canister) : "",
+         m.notes,
+       ]
+         .filter(Boolean)
+diff --git a/convex/lib/canister.test.ts b/convex/lib/canister.test.ts
+new file mode 100644
+index 0000000..095e7d1
+--- /dev/null
++++ b/convex/lib/canister.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, it } from "vitest";
++import { gs1DateToDay, parseGs1 } from "./gs1";
++import { canisterQtyFor, canUseCanister, cleanCanisterInput } from "./canister";
++
++describe("parseGs1", () => {
++  it("reads batch and expiry from bracketed codes", () => {
++    expect(parseGs1("(01)09312345678907(17)280909(10)50803-3")).toEqual({
++      gtin: "09312345678907",
++      batch: "50803-3",
++      expiry: "2028-09-09",
++    });
++  });
++
++  it("reads raw DataMatrix codes with group separators", () => {
++    expect(
++      parseGs1("]d20109312345678907172809091050803-3\u001d21SERIAL1"),
++    ).toEqual({
++      gtin: "09312345678907",
++      batch: "50803-3",
++      expiry: "2028-09-09",
++    });
++  });
++
++  it("handles batch before expiry", () => {
++    expect(parseGs1("010931234567890710AB12\u001d17261231")).toMatchObject({
++      batch: "AB12",
++      expiry: "2026-12-31",
++    });
++  });
++
++  it("reads codes typed with a Chinese keyboard (full-width)", () => {
++    expect(parseGs1("（01）09312345678907（17）280909（10）X1")).toMatchObject({
++      batch: "X1",
++      expiry: "2028-09-09",
++    });
++  });
++
++  it("returns null for plain barcodes", () => {
++    expect(parseGs1("9312345678907")).toBeNull();
++  });
++});
++
++describe("gs1DateToDay", () => {
++  it("treats day 00 as the last day of the month", () => {
++    expect(gs1DateToDay("280200")).toBe("2028-02-29");
++  });
++  it("rejects impossible dates", () => {
++    expect(gs1DateToDay("281301")).toBeUndefined();
++  });
++});
++
++describe("canister rules", () => {
++  it("calculates tablets from package forms taken out", () => {
++    expect(canisterQtyFor(1, { qtyPerUnit: 100, unitCount: 1 })).toBe(100);
++    expect(canisterQtyFor(2, { qtyPerUnit: 10, unitCount: 10 })).toBe(200);
++  });
++
++  it("is hidden unless rolled out or switched on for the person", () => {
++    expect(canUseCanister({}, false)).toBe(false);
++    expect(canUseCanister({ canisterAccess: true }, false)).toBe(true);
++    expect(canUseCanister({ canisterAccess: false }, true)).toBe(true);
++  });
++
++  it("requires batch, valid expiry, qty and a listed type", () => {
++    const ok = {
++      batch: " B1 ",
++      expiry: "2028-09-09",
++      quantity: 100,
++      type: 0.5,
++    };
++    expect(cleanCanisterInput(ok).batch).toBe("B1");
++    expect(() => cleanCanisterInput({ ...ok, batch: " " })).toThrow();
++    expect(() => cleanCanisterInput({ ...ok, expiry: "2028-02-30" })).toThrow();
++    expect(() => cleanCanisterInput({ ...ok, quantity: 0 })).toThrow();
++    expect(() => cleanCanisterInput({ ...ok, type: 0.4 })).toThrow();
++  });
++});
+diff --git a/convex/lib/canister.ts b/convex/lib/canister.ts
+new file mode 100644
+index 0000000..850698f
+--- /dev/null
++++ b/convex/lib/canister.ts
+@@ -0,0 +1,69 @@
++import { ConvexError } from "convex/values";
++import type { Doc } from "../_generated/dataModel";
++
++// Fraction of a tablet per canister slot, like the canister machine's own list
++export const CANISTER_TYPES = [1, 0.5, 0.33, 0.25, 0.125] as const;
++export const DEFAULT_CANISTER_TYPE = 1;
++export const MAX_BATCH_LENGTH = 40;
++export const MAX_CANISTER_QTY = 1_000_000;
++
++export type CanisterInput = {
++  batch: string;
++  expiry: string;
++  quantity: number;
++  type: number;
++};
++
++// Hidden until rolled out: on for everyone, or for people switched on individually
++export function canUseCanister(
++  user: Pick<Doc<"users">, "canisterAccess"> | null | undefined,
++  canisterForEveryone: boolean,
++): boolean {
++  return canisterForEveryone || user?.canisterAccess === true;
++}
++
++// Tablets/capsules going into the canister for this many package forms (e.g. 1 x 100/Box x1 = 100)
++export function canisterQtyFor(
++  quantity: number,
++  pkg: { qtyPerUnit: number; unitCount: number },
++): number {
++  return quantity * pkg.qtyPerUnit * pkg.unitCount;
++}
++
++export function isCalendarDay(value: string): boolean {
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
++  const [y, m, d] = value.split("-").map(Number);
++  const date = new Date(Date.UTC(y, m - 1, d));
++  return (
++    date.getUTCFullYear() === y &&
++    date.getUTCMonth() === m - 1 &&
++    date.getUTCDate() === d
++  );
++}
++
++function bad(message: string): never {
++  throw new ConvexError({ code: "BAD_REQUEST", message });
++}
++
++export function cleanCanisterInput(raw: CanisterInput): CanisterInput {
++  const batch = raw.batch.trim();
++  if (!batch) bad("Enter the batch number");
++  if (batch.length > MAX_BATCH_LENGTH)
++    bad(`Batch can be at most ${MAX_BATCH_LENGTH} characters`);
++  if (!isCalendarDay(raw.expiry)) bad("Enter a valid expiry date");
++  if (
++    !Number.isInteger(raw.quantity) ||
++    raw.quantity < 1 ||
++    raw.quantity > MAX_CANISTER_QTY
++  )
++    bad(
++      `Canister QTY must be a whole number from 1 to ${MAX_CANISTER_QTY.toLocaleString()}`,
++    );
++  if (!CANISTER_TYPES.some((t) => t === raw.type))
++    bad("Choose a canister type");
++  return { batch, expiry: raw.expiry, quantity: raw.quantity, type: raw.type };
++}
++
++export function formatCanister(c: CanisterInput): string {
++  return `Canister: Batch ${c.batch} · Exp ${c.expiry} · Qty ${c.quantity} · Type ${c.type}`;
++}
+diff --git a/convex/lib/gs1.ts b/convex/lib/gs1.ts
+new file mode 100644
+index 0000000..2cb3801
+--- /dev/null
++++ b/convex/lib/gs1.ts
+@@ -0,0 +1,102 @@
++// Reads batch/lot and expiry out of a GS1 code printed on medicine boxes,
++// e.g. "(01)09312345678907(17)280909(10)50803-3" or the raw DataMatrix form
++// "0109312345678907172809091050803-3".
++
++const GS = String.fromCharCode(29);
++
++// Application identifiers with a fixed data length (digits after the AI)
++const FIXED: Record<string, number> = {
++  "00": 18,
++  "01": 14,
++  "02": 14,
++  "11": 6,
++  "12": 6,
++  "13": 6,
++  "15": 6,
++  "16": 6,
++  "17": 6,
++  "20": 2,
++};
++// Variable-length AIs that can appear on pharma packs (ended by GS or end of code)
++const VARIABLE_2 = new Set(["10", "21", "22", "30", "37", "90", "91", "92"]);
++const VARIABLE_3 = new Set([
++  "240",
++  "241",
++  "242",
++  "710",
++  "711",
++  "712",
++  "713",
++  "714",
++]);
++
++export type Gs1Data = { gtin?: string; batch?: string; expiry?: string };
++
++function toHalfWidth(text: string): string {
++  return text.replace(/[\uFF01-\uFF5E]/g, (c) =>
++    String.fromCharCode(c.charCodeAt(0) - 0xfee0),
++  );
++}
++
++// GS1 YYMMDD (DD may be 00 = end of month) → YYYY-MM-DD
++export function gs1DateToDay(yymmdd: string): string | undefined {
++  if (!/^\d{6}$/.test(yymmdd)) return undefined;
++  const year = 2000 + Number(yymmdd.slice(0, 2));
++  const month = Number(yymmdd.slice(2, 4));
++  let day = Number(yymmdd.slice(4, 6));
++  if (month < 1 || month > 12) return undefined;
++  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
++  if (day === 0) day = lastDay;
++  if (day > lastDay) return undefined;
++  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
++}
++
++function parseBracketed(code: string): Record<string, string> {
++  const fields: Record<string, string> = {};
++  for (const m of code.matchAll(/\((\d{2,4})\)([^(]*)/g)) {
++    fields[m[1]] = m[2].replace(new RegExp(GS, "g"), "").trim();
++  }
++  return fields;
++}
++
++function parseRaw(code: string): Record<string, string> {
++  const fields: Record<string, string> = {};
++  let i = 0;
++  while (i < code.length) {
++    if (code[i] === GS) {
++      i++;
++      continue;
++    }
++    const ai2 = code.slice(i, i + 2);
++    const ai3 = code.slice(i, i + 3);
++    if (FIXED[ai2] !== undefined) {
++      fields[ai2] = code.slice(i + 2, i + 2 + FIXED[ai2]);
++      i += 2 + FIXED[ai2];
++    } else if (VARIABLE_2.has(ai2) || VARIABLE_3.has(ai3)) {
++      const ai = VARIABLE_2.has(ai2) ? ai2 : ai3;
++      const start = i + ai.length;
++      const end = code.indexOf(GS, start);
++      fields[ai] = code.slice(start, end === -1 ? undefined : end);
++      i = end === -1 ? code.length : end + 1;
++    } else {
++      break; // Unknown data: stop rather than guess
++    }
++  }
++  return fields;
++}
++
++export function parseGs1(raw: string): Gs1Data | null {
++  const code = toHalfWidth(raw)
++    .trim()
++    .replace(/^\][A-Za-z]\d/, "");
++  const bracketed = code.includes("(");
++  if (!(bracketed ? /\(01\)\d{14}/.test(code) : /^01\d{14}./.test(code)))
++    return null;
++  const fields = bracketed ? parseBracketed(code) : parseRaw(code);
++  const batch = fields["10"]?.trim();
++  return {
++    gtin: fields["01"],
++    batch: batch || undefined,
++    expiry: fields["17"] ? gs1DateToDay(fields["17"]) : undefined,
++  };
++}
+diff --git a/convex/schema/settings.ts b/convex/schema/settings.ts
+index 5580b01..9cf90fa 100644
+--- a/convex/schema/settings.ts
++++ b/convex/schema/settings.ts
+@@ -5,6 +5,8 @@ import { v } from "convex/values";
+ export const settingsTable = defineTable({
+   // Stock In / Stock Out amounts at or above this ask the user to confirm (guards against scan errors)
+   largeQuantityThreshold: v.number(),
++  // Canister features shown to everyone (otherwise only to people switched on)
++  canisterForEveryone: v.optional(v.boolean()),
+   updatedAt: v.string(),
+   updatedByName: v.string(),
+ });
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index 51e5dc6..95187bc 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -28,6 +28,18 @@ export const stockMovementsTable = defineTable({
+   notes: v.string(),
+   // Stock Out only (e.g. "Dispensed")
+   reason: v.optional(v.string()),
++  // Stock Out into a canister (only when "Fill canister" was switched on)
++  canister: v.optional(
++    v.object({
++      batch: v.string(),
++      // Calendar day YYYY-MM-DD
++      expiry: v.string(),
++      // Tablets/capsules put in the canister
++      quantity: v.number(),
++      // Fraction of a tablet per slot (1, 0.5, 0.33, 0.25, 0.125)
++      type: v.number(),
++    }),
++  ),
+   userRef: v.id("users"),
+   userName: v.string(),
+   occurredAt: v.string(),
+diff --git a/convex/schema/users.ts b/convex/schema/users.ts
+index 8c38ecc..4e50977 100644
+--- a/convex/schema/users.ts
++++ b/convex/schema/users.ts
+@@ -15,6 +15,8 @@ export const usersTable = defineTable({
+   // Optional so rows created before roles existed still validate; treated as staff/pending
+   role: v.optional(userRole),
+   status: v.optional(userStatus),
++  // Early access to canister features before they are rolled out to everyone
++  canisterAccess: v.optional(v.boolean()),
+ })
+   .index("by_token", ["tokenIdentifier"])
+   .index("by_status", ["status"]);
+diff --git a/convex/settings.ts b/convex/settings.ts
+index 012b3fe..67a9fb3 100644
+--- a/convex/settings.ts
++++ b/convex/settings.ts
+@@ -16,12 +16,51 @@ export const get = query({
+     return {
+       largeQuantityThreshold:
+         row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD,
++      canisterForEveryone: row?.canisterForEveryone ?? false,
+       updatedAt: row?.updatedAt ?? null,
+       updatedByName: row?.updatedByName ?? null,
+     };
+   },
+ });
+ 
++// Admin: show canister features to everyone, or only to people switched on in Users
++export const setCanisterRollout = mutation({
++  args: { canisterForEveryone: v.boolean() },
++  handler: async (ctx, { canisterForEveryone }) => {
++    const admin = await requireAdmin(ctx);
++    const row = await ctx.db.query("settings").first();
++    const before = row?.canisterForEveryone ?? false;
++    if (before === canisterForEveryone) return null;
++    const fields = {
++      canisterForEveryone,
++      updatedAt: new Date().toISOString(),
++      updatedByName: admin.name ?? admin.email ?? "Unknown user",
++    };
++    if (row) await ctx.db.patch("settings", row._id, fields);
++    else
++      await ctx.db.insert("settings", {
++        ...fields,
++        largeQuantityThreshold: DEFAULT_LARGE_QUANTITY_THRESHOLD,
++      });
++    const label = (on: boolean) => (on ? "Everyone" : "Selected people only");
++    await logActivity(ctx, actorOf(admin), {
++      category: "settings",
++      action: "Changed",
++      summary: canisterForEveryone
++        ? "Rolled out canister features to everyone"
++        : "Limited canister features to selected people",
++      changes: [
++        {
++          field: "Canister features",
++          before: label(before),
++          after: label(canisterForEveryone),
++        },
++      ],
++    });
++    return null;
++  },
++});
++
+ export const update = mutation({
+   args: { largeQuantityThreshold: v.number() },
+   handler: async (ctx, args) => {
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 211790a..0ab4503 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -4,6 +4,11 @@ import { mutation, query, type MutationCtx } from "./_generated/server";
+ import type { Id } from "./_generated/dataModel";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
+ import { logMovement, logUndo } from "./lib/activity";
++import {
++  canUseCanister,
++  cleanCanisterInput,
++  type CanisterInput,
++} from "./lib/canister";
+ import { withinPeriod } from "./lib/period";
+ import {
+   cleanMovementInput,
+@@ -28,6 +33,7 @@ async function recordMovement(
+   packageId: Id<"drugPackages">,
+   raw: MovementInput,
+   reason?: string,
++  canister?: CanisterInput,
+ ) {
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+@@ -63,6 +69,7 @@ async function recordMovement(
+     stockAfter,
+     notes: input.notes,
+     reason,
++    canister,
+     userRef: user._id,
+     userName: user.name ?? user.email ?? "Unknown user",
+     occurredAt: new Date().toISOString(),
+@@ -81,15 +88,40 @@ export const recordIn = mutation({
+ });
+ 
+ // Records stock leaving. Blocked if it would take stock below zero.
++// Canister details are only accepted from people who can use canister features.
+ export const recordOut = mutation({
+-  args: { ...movementArgs, reason: v.string() },
+-  handler: async (ctx, { packageId, reason, ...rest }) => {
++  args: {
++    ...movementArgs,
++    reason: v.string(),
++    canister: v.optional(
++      v.object({
++        batch: v.string(),
++        expiry: v.string(),
++        quantity: v.number(),
++        type: v.number(),
++      }),
++    ),
++  },
++  handler: async (ctx, { packageId, reason, canister, ...rest }) => {
++    let cleanedCanister: CanisterInput | undefined;
++    if (canister) {
++      const user = await requireActiveUser(ctx);
++      const settings = await ctx.db.query("settings").first();
++      if (!canUseCanister(user, settings?.canisterForEveryone ?? false)) {
++        throw new ConvexError({
++          code: "FORBIDDEN",
++          message: "Canister features are not switched on for you yet",
++        });
++      }
++      cleanedCanister = cleanCanisterInput(canister);
++    }
+     return await recordMovement(
+       ctx,
+       "out",
+       packageId,
+       rest,
+       cleanReason(reason),
++      cleanedCanister,
+     );
+   },
+ });
+diff --git a/convex/users.ts b/convex/users.ts
+index 8fdb8e3..c8d6df9 100644
+--- a/convex/users.ts
++++ b/convex/users.ts
+@@ -127,7 +127,11 @@ export const updateAccess = mutation({
+     });
+     const changes = [
+       { field: "Role", before: target.role ?? "staff", after: args.role },
+-      { field: "Status", before: target.status ?? "pending", after: args.status },
++      {
++        field: "Status",
++        before: target.status ?? "pending",
++        after: args.status,
++      },
+     ].filter((c) => c.before !== c.after);
+     if (changes.length > 0) {
+       const approved = target.status === "pending" && args.status === "active";
+@@ -147,3 +151,32 @@ export const updateAccess = mutation({
+     return null;
+   },
+ });
++
++// Admin: early access to canister features for one person
++export const setCanisterAccess = mutation({
++  args: { userId: v.id("users"), enabled: v.boolean() },
++  handler: async (ctx, { userId, enabled }) => {
++    const admin = await requireAdmin(ctx);
++    const target = await ctx.db.get("users", userId);
++    if (!target) {
++      throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
++    }
++    const before = target.canisterAccess === true;
++    if (before === enabled) return null;
++    await ctx.db.patch("users", userId, { canisterAccess: enabled });
++    await logActivity(ctx, actorOf(admin), {
++      category: "user",
++      action: "Access changed",
++      summary: `${enabled ? "Turned on" : "Turned off"} canister features for ${displayName(target)}`,
++      detail: target.email,
++      changes: [
++        {
++          field: "Canister features",
++          before: before ? "On" : "Off",
++          after: enabled ? "On" : "Off",
++        },
++      ],
++    });
++    return null;
++  },
++});
+diff --git a/src/components/stock/canister-section.tsx b/src/components/stock/canister-section.tsx
+new file mode 100644
+index 0000000..dd6f107
+--- /dev/null
++++ b/src/components/stock/canister-section.tsx
+@@ -0,0 +1,235 @@
++import { useState, type KeyboardEvent } from "react";
++import { useFormContext, useWatch } from "react-hook-form";
++import { Camera, Pill } from "lucide-react";
++import { toast } from "sonner";
++import { barcodesMatch } from "@/convex/lib/barcode.ts";
++import { CANISTER_TYPES } from "@/convex/lib/canister.ts";
++import { parseGs1 } from "@/convex/lib/gs1.ts";
++import { Button } from "@/components/ui/button.tsx";
++import {
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from "@/components/ui/form.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import {
++  NativeSelect,
++  NativeSelectOption,
++} from "@/components/ui/native-select.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
++import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
++import { useScannerInput } from "@/hooks/use-scanner-input.ts";
++import type {
++  MovementFormInput,
++  MovementFormValues,
++} from "./movement-form-schema.ts";
++
++type Props = {
++  // Tablets/capsules in what is being taken out (used when Canister QTY is left blank)
++  autoQty: number;
++  pieceName: string;
++  packageBarcode: string;
++};
++
++const inputClass = "h-10 bg-background";
++
++// "Fill canister" switch plus Batch, Expiry, Canister QTY and Canister Type
++export default function CanisterSection({
++  autoQty,
++  pieceName,
++  packageBarcode,
++}: Props) {
++  const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
++  const on = useWatch({ control: form.control, name: "canisterOn" });
++  // Follows the quantity taken out until the user types their own number
++  const [qtyEdited, setQtyEdited] = useState(false);
++
++  return (
++    <div className="space-y-4 rounded-xl border border-dashed border-primary/40 bg-secondary/40 p-3">
++      <FormField
++        control={form.control}
++        name="canisterOn"
++        render={({ field }) => (
++          <FormItem className="flex items-center justify-between gap-3">
++            <FormLabel className="flex cursor-pointer items-center gap-2 text-base font-semibold">
++              <Pill className="size-4 text-primary" />
++              Fill canister
++            </FormLabel>
++            <FormControl>
++              <Switch
++                checked={field.value}
++                onCheckedChange={field.onChange}
++                className="cursor-pointer"
++              />
++            </FormControl>
++          </FormItem>
++        )}
++      />
++      {on && (
++        <>
++          <Gs1ScanBox packageBarcode={packageBarcode} />
++          <div className="grid gap-3 sm:grid-cols-2">
++            <FormField
++              control={form.control}
++              name="batch"
++              render={({ field }) => (
++                <FormItem>
++                  <FormLabel>Batch</FormLabel>
++                  <FormControl>
++                    <Input
++                      {...field}
++                      placeholder="e.g. 50803-3"
++                      className={inputClass}
++                    />
++                  </FormControl>
++                  <FormMessage />
++                </FormItem>
++              )}
++            />
++            <FormField
++              control={form.control}
++              name="expiry"
++              render={({ field }) => (
++                <FormItem>
++                  <FormLabel>Expiry</FormLabel>
++                  <FormControl>
++                    <Input {...field} type="date" className={inputClass} />
++                  </FormControl>
++                  <FormMessage />
++                </FormItem>
++              )}
++            />
++            <FormField
++              control={form.control}
++              name="canisterQty"
++              render={({ field }) => (
++                <FormItem>
++                  <FormLabel>Canister QTY ({pieceName || "pieces"})</FormLabel>
++                  <FormControl>
++                    <Input
++                      {...field}
++                      inputMode="numeric"
++                      placeholder={String(autoQty)}
++                      value={qtyEdited ? field.value : String(autoQty)}
++                      onChange={(e) => {
++                        setQtyEdited(true);
++                        field.onChange(
++                          e.target.value.replace(/\D/g, "").slice(0, 7),
++                        );
++                      }}
++                      onFocus={(e) => e.target.select()}
++                      className={inputClass}
++                    />
++                  </FormControl>
++                  <FormMessage />
++                </FormItem>
++              )}
++            />
++            <FormField
++              control={form.control}
++              name="canisterType"
++              render={({ field }) => (
++                <FormItem>
++                  <FormLabel>Canister Type</FormLabel>
++                  <FormControl>
++                    <NativeSelect
++                      {...field}
++                      className="h-10 w-full cursor-pointer bg-background"
++                    >
++                      {CANISTER_TYPES.map((t) => (
++                        <NativeSelectOption key={t} value={String(t)}>
++                          {t}
++                        </NativeSelectOption>
++                      ))}
++                    </NativeSelect>
++                  </FormControl>
++                  <FormMessage />
++                </FormItem>
++              )}
++            />
++          </div>
++        </>
++      )}
++    </div>
++  );
++}
++
++// Scan the box's GS1 code here to fill Batch and Expiry
++function Gs1ScanBox({ packageBarcode }: { packageBarcode: string }) {
++  const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
++  const [value, setValue] = useState("");
++  const [camera, setCamera] = useState(false);
++  const {
++    inputRef,
++    onKeyDown: scannerKeyDown,
++    setValue: setScanned,
++    display,
++  } = useScannerInput(setValue);
++
++  const apply = (code: string) => {
++    const data = parseGs1(code);
++    setValue("");
++    if (!data || (!data.batch && !data.expiry)) {
++      toast.error("No batch or expiry found in that code", {
++        description: "Scan the GS1 code (the square DataMatrix) on the box.",
++      });
++      return;
++    }
++    if (
++      data.gtin &&
++      packageBarcode &&
++      !barcodesMatch(data.gtin, packageBarcode)
++    ) {
++      toast.error("This code is for a different product", {
++        description: "Check you scanned the box for the selected package form.",
++      });
++      return;
++    }
++    const opts = { shouldDirty: true, shouldValidate: true };
++    if (data.batch) form.setValue("batch", data.batch, opts);
++    if (data.expiry) form.setValue("expiry", data.expiry, opts);
++    toast.success("Batch and expiry filled from scan");
++  };
++
++  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
++    const rebuilt = scannerKeyDown(e);
++    if (e.key !== "Enter") return;
++    // Enter here fills the fields; it must not record the Stock Out
++    e.preventDefault();
++    const code = rebuilt ?? e.currentTarget.value;
++    if (code.trim()) apply(code);
++  };
++
++  return (
++    <div className="flex gap-2">
++      <Input
++        ref={inputRef}
++        value={display(value)}
++        onChange={(e) => setScanned(e.target.value)}
++        onKeyDown={handleKeyDown}
++        placeholder="Scan GS1 code to fill batch and expiry"
++        aria-label="Scan GS1 code to fill batch and expiry"
++        className={inputClass}
++      />
++      <Button
++        type="button"
++        variant="secondary"
++        className="h-10 shrink-0"
++        onClick={() => setCamera(true)}
++        aria-label="Scan with camera"
++      >
++        <Camera />
++      </Button>
++      <BarcodeScannerDialog
++        open={camera}
++        onOpenChange={setCamera}
++        onDetected={(code) => {
++          setCamera(false);
++          apply(code);
++        }}
++      />
++    </div>
++  );
++}
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index 48dbb15..afa3b39 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -1,4 +1,10 @@
+ import { z } from "zod";
++import {
++  CANISTER_TYPES,
++  isCalendarDay,
++  MAX_BATCH_LENGTH,
++  MAX_CANISTER_QTY,
++} from "@/convex/lib/canister.ts";
+ import {
+   MAX_MOVEMENT_QUANTITY,
+   MAX_NOTES_LENGTH,
+@@ -8,6 +14,7 @@ import {
+ 
+ // Shared by Stock In and Stock Out forms. Reason is only required for Stock Out.
+ // The package form is not editable here; it always comes from the chosen barcode.
++// Canister fields are only checked when "Fill canister" is switched on.
+ export function movementFormSchema(kind: MovementKind) {
+   const reason = z
+     .string()
+@@ -16,24 +23,69 @@ export function movementFormSchema(kind: MovementKind) {
+       MAX_REASON_LENGTH,
+       `Reason can be at most ${MAX_REASON_LENGTH} characters`,
+     );
+-  return z.object({
+-    quantity: z.coerce
+-      .number<string | number>()
+-      .int("Quantity must be a whole number")
+-      .min(1, "Quantity must be at least 1")
+-      .max(
+-        MAX_MOVEMENT_QUANTITY,
+-        `Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`,
+-      ),
+-    notes: z
+-      .string()
+-      .trim()
+-      .max(
+-        MAX_NOTES_LENGTH,
+-        `Notes can be at most ${MAX_NOTES_LENGTH} characters`,
+-      ),
+-    reason: kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
+-  });
++  return z
++    .object({
++      quantity: z.coerce
++        .number<string | number>()
++        .int("Quantity must be a whole number")
++        .min(1, "Quantity must be at least 1")
++        .max(
++          MAX_MOVEMENT_QUANTITY,
++          `Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`,
++        ),
++      notes: z
++        .string()
++        .trim()
++        .max(
++          MAX_NOTES_LENGTH,
++          `Notes can be at most ${MAX_NOTES_LENGTH} characters`,
++        ),
++      reason:
++        kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
++      canisterOn: z.boolean(),
++      batch: z.string().trim(),
++      expiry: z.string(),
++      canisterQty: z.string(),
++      canisterType: z.string(),
++    })
++    .superRefine((v, ctx) => {
++      if (!v.canisterOn) return;
++      if (!v.batch)
++        ctx.addIssue({
++          code: "custom",
++          path: ["batch"],
++          message: "Enter the batch number",
++        });
++      else if (v.batch.length > MAX_BATCH_LENGTH)
++        ctx.addIssue({
++          code: "custom",
++          path: ["batch"],
++          message: `Batch can be at most ${MAX_BATCH_LENGTH} characters`,
++        });
++      if (!isCalendarDay(v.expiry))
++        ctx.addIssue({
++          code: "custom",
++          path: ["expiry"],
++          message: "Enter the expiry date",
++        });
++      // Blank means "work it out from the quantity taken out"
++      const qty = Number(v.canisterQty);
++      if (
++        v.canisterQty !== "" &&
++        (!/^\d+$/.test(v.canisterQty) || qty < 1 || qty > MAX_CANISTER_QTY)
++      )
++        ctx.addIssue({
++          code: "custom",
++          path: ["canisterQty"],
++          message: "Enter the number of tablets/capsules",
++        });
++      if (!CANISTER_TYPES.some((t) => String(t) === v.canisterType))
++        ctx.addIssue({
++          code: "custom",
++          path: ["canisterType"],
++          message: "Choose a canister type",
++        });
++    });
+ }
+ 
+ export type MovementFormInput = z.input<ReturnType<typeof movementFormSchema>>;
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index c2b50f9..5133d1c 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -6,6 +6,11 @@ import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import {
++  canisterQtyFor,
++  DEFAULT_CANISTER_TYPE,
++} from "@/convex/lib/canister.ts";
++import { parseGs1 } from "@/convex/lib/gs1.ts";
+ import {
+   DEFAULT_LARGE_QUANTITY_THRESHOLD,
+   needsLargeQuantityConfirm,
+@@ -16,6 +21,7 @@ import {
+   type MovementKind,
+ } from "@/convex/lib/stock.ts";
+ import { useConfirm } from "@/hooks/use-confirm.ts";
++import { useCanisterEnabled } from "@/hooks/use-canister-enabled.ts";
+ import { useScanGuard } from "@/hooks/use-scan-guard.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+@@ -40,6 +46,7 @@ import {
+   type MovementFormInput,
+   type MovementFormValues,
+ } from "./movement-form-schema.ts";
++import CanisterSection from "./canister-section.tsx";
+ import PackageFormSummary from "./package-form-summary.tsx";
+ import ReasonField from "./reason-field.tsx";
+ import type { StockSelection } from "./stock-drug-finder.tsx";
+@@ -47,6 +54,8 @@ import type { StockSelection } from "./stock-drug-finder.tsx";
+ type Props = {
+   kind: MovementKind;
+   selection: StockSelection;
++  // The barcode/GS1 code that picked this package form, if it was scanned
++  scannedCode?: string;
+   onDone: () => void;
+ };
+ 
+@@ -79,17 +88,30 @@ function toNumber(value: string | number | undefined): number {
+ }
+ 
+ // Quantity, editable package form, notes (and reason for Stock Out) for one package form
+-export default function MovementForm({ kind, selection, onDone }: Props) {
++export default function MovementForm({
++  kind,
++  selection,
++  scannedCode,
++  onDone,
++}: Props) {
+   const { drug, pkg } = selection;
+   const copy = COPY[kind];
+   const recordIn = useMutation(api.stock.recordIn);
+   const recordOut = useMutation(api.stock.recordOut);
++  const canisterEnabled = useCanisterEnabled() && kind === "out";
++  // A scanned GS1 code already carries the batch and expiry
++  const scanned = scannedCode ? parseGs1(scannedCode) : null;
+   const form = useForm<MovementFormInput, unknown, MovementFormValues>({
+     resolver: zodResolver(movementFormSchema(kind)),
+     defaultValues: {
+       quantity: 1,
+       notes: "",
+       reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
++      canisterOn: false,
++      batch: scanned?.batch ?? "",
++      expiry: scanned?.expiry ?? "",
++      canisterQty: "",
++      canisterType: String(DEFAULT_CANISTER_TYPE),
+     },
+   });
+   const watched = useWatch({ control: form.control });
+@@ -128,7 +150,15 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+     ),
+   );
+ 
+-  const onSubmit = async ({ reason, ...values }: MovementFormValues) => {
++  const onSubmit = async ({
++    reason,
++    canisterOn,
++    batch,
++    expiry,
++    canisterQty,
++    canisterType,
++    ...values
++  }: MovementFormValues) => {
+     // Large amounts are often a barcode scanned into the quantity box, so ask again
+     if (needsLargeQuantityConfirm(values.quantity, threshold)) {
+       const ok = await confirm({
+@@ -144,10 +174,22 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+     }
+     try {
+       const args = { packageId: pkg._id, ...values };
++      const canister =
++        canisterEnabled && canisterOn
++          ? {
++              batch,
++              expiry,
++              quantity:
++                canisterQty === ""
++                  ? canisterQtyFor(values.quantity, pkg)
++                  : Number(canisterQty),
++              type: Number(canisterType),
++            }
++          : undefined;
+       const result =
+         kind === "in"
+           ? await recordIn(args)
+-          : await recordOut({ ...args, reason });
++          : await recordOut({ ...args, reason, canister });
+       toast.success(
+         `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
+         {
+@@ -208,6 +250,14 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+ 
+         {kind === "out" && <ReasonField control={form.control} />}
+ 
++        {canisterEnabled && (
++          <CanisterSection
++            autoQty={canisterQtyFor(Math.max(1, quantity), pkg)}
++            pieceName={drug.pieceName}
++            packageBarcode={pkg.barcode}
++          />
++        )}
++
+         <FormField
+           control={form.control}
+           name="notes"
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index c3c1b34..adcd550 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -155,6 +155,16 @@ export default function MovementLog({
+                 )}{" "}
+                 · Stock {m.stockBefore} → {m.stockAfter}
+               </div>
++              {m.canister && (
++                <p className="text-xs font-medium text-primary">
++                  Canister · Batch {m.canister.batch} · Exp{" "}
++                  {format(
++                    new Date(`${m.canister.expiry}T00:00:00`),
++                    "d MMM yyyy",
++                  )}{" "}
++                  · Qty {m.canister.quantity} · Type {m.canister.type}
++                </p>
++              )}
+               {m.notes && (
+                 <p className="whitespace-pre-line text-sm">{m.notes}</p>
+               )}
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index 9f29855..0ababef 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -24,6 +24,8 @@ export type FinderState = {
+   selection: StockSelection | null;
+   // True when the selection came from typing or scanning that package form's barcode
+   barcodeMatched: boolean;
++  // What was searched or scanned (a GS1 code also carries batch and expiry)
++  term: string;
+   reset: () => void;
+ };
+ 
+@@ -138,7 +140,7 @@ export default function StockDrugFinder({ children }: Props) {
+           )}
+         </div>
+       )}
+-      {children({ selection, barcodeMatched: !!match && selection?.pkg._id === match.pkg._id, reset })}
++      {children({ selection, barcodeMatched: !!match && selection?.pkg._id === match.pkg._id, term, reset })}
+     </div>
+   );
+ }
+diff --git a/src/components/stock/stock-movement-page.tsx b/src/components/stock/stock-movement-page.tsx
+index 6364b2f..cd56ea4 100644
+--- a/src/components/stock/stock-movement-page.tsx
++++ b/src/components/stock/stock-movement-page.tsx
+@@ -7,12 +7,14 @@ import StockDrugFinder from "./stock-drug-finder.tsx";
+ const COPY = {
+   in: {
+     title: "Stock In",
+-    description: "Scan or search a drug, choose the package form, and record what arrived.",
++    description:
++      "Scan or search a drug, choose the package form, and record what arrived.",
+     logTitle: "Recent Stock In",
+   },
+   out: {
+     title: "Stock Out",
+-    description: "Scan or search a drug, choose the package form, and record what is going out.",
++    description:
++      "Scan or search a drug, choose the package form, and record what is going out.",
+     logTitle: "Recent Stock Out",
+   },
+ } as const;
+@@ -24,12 +26,23 @@ export default function StockMovementPage({ kind }: { kind: MovementKind }) {
+     <div className="mx-auto max-w-3xl p-4 md:p-8">
+       <PageHeader title={copy.title} description={copy.description} />
+       <StockDrugFinder key={kind}>
+-        {({ selection, barcodeMatched, reset }) => (
++        {({ selection, barcodeMatched, term, reset }) => (
+           <>
+             {selection && (
+-              <MovementForm key={selection.pkg._id} kind={kind} selection={selection} onDone={reset} />
++              <MovementForm
++                key={selection.pkg._id}
++                kind={kind}
++                selection={selection}
++                scannedCode={barcodeMatched ? term : undefined}
++                onDone={reset}
++              />
+             )}
+-            <MovementLogSection kind={kind} title={copy.logTitle} selection={selection} barcodeMatched={barcodeMatched} />
++            <MovementLogSection
++              kind={kind}
++              title={copy.logTitle}
++              selection={selection}
++              barcodeMatched={barcodeMatched}
++            />
+           </>
+         )}
+       </StockDrugFinder>
+diff --git a/src/hooks/use-canister-enabled.ts b/src/hooks/use-canister-enabled.ts
+new file mode 100644
+index 0000000..23a5a4c
+--- /dev/null
++++ b/src/hooks/use-canister-enabled.ts
+@@ -0,0 +1,13 @@
++import { useConvexAuth, useQuery } from "convex/react";
++import { api } from "@/convex/_generated/api.js";
++import { canUseCanister } from "@/convex/lib/canister.ts";
++import { useCurrentUser } from "./use-current-user.ts";
++
++// Canister features stay hidden until an admin switches them on for this person or everyone
++export function useCanisterEnabled(): boolean {
++  const { isAuthenticated } = useConvexAuth();
++  const me = useCurrentUser();
++  const settings = useQuery(api.settings.get, isAuthenticated ? {} : "skip");
++  if (!me || !settings) return false;
++  return canUseCanister(me, settings.canisterForEveryone);
++}
+diff --git a/src/pages/settings/page.tsx b/src/pages/settings/page.tsx
+index 1a97f0c..fe615b9 100644
+--- a/src/pages/settings/page.tsx
++++ b/src/pages/settings/page.tsx
+@@ -2,7 +2,7 @@ import { useState } from "react";
+ import { useMutation, useQuery } from "convex/react";
+ import { Navigate } from "react-router-dom";
+ import { format } from "date-fns";
+-import { ShieldAlert } from "lucide-react";
++import { Pill, ShieldAlert } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { MAX_MOVEMENT_QUANTITY } from "@/convex/lib/stock.ts";
+@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input.tsx";
+ import { Label } from "@/components/ui/label.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
+ import PageHeader from "@/components/page-header.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -25,11 +26,65 @@ export default function SettingsPage() {
+         title="Settings"
+         description="App-wide options for everyone using ACP Stock."
+       />
+-      <LargeQuantitySetting />
++      <div className="space-y-6">
++        <LargeQuantitySetting />
++        <CanisterRolloutSetting />
++      </div>
+     </div>
+   );
+ }
+ 
++function CanisterRolloutSetting() {
++  const settings = useQuery(api.settings.get, {});
++  const setRollout = useMutation(api.settings.setCanisterRollout);
++  const [saving, setSaving] = useState(false);
++  if (settings === undefined)
++    return <Skeleton className="h-32 w-full rounded-xl" />;
++  const toggle = async (on: boolean) => {
++    setSaving(true);
++    try {
++      await setRollout({ canisterForEveryone: on });
++      toast.success(
++        on
++          ? "Canister features rolled out to everyone"
++          : "Canister features limited to selected people",
++      );
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not save setting"));
++    } finally {
++      setSaving(false);
++    }
++  };
++  return (
++    <section className="space-y-3 rounded-xl border bg-card p-5">
++      <div className="flex items-start gap-3">
++        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
++          <Pill className="size-5" />
++        </div>
++        <div className="flex-1">
++          <h2 className="font-bold">Canister features</h2>
++          <p className="text-sm text-muted-foreground">
++            The Canister section on Stock Out. While this is off, only people
++            you switch on in the Users page can see it.
++          </p>
++        </div>
++        <Switch
++          checked={settings.canisterForEveryone}
++          disabled={saving}
++          onCheckedChange={(v) => void toggle(v)}
++          aria-label="Roll out canister features to everyone"
++          className="mt-1 cursor-pointer"
++        />
++      </div>
++      <p className="text-sm font-medium">
++        {settings.canisterForEveryone
++          ? "Rolled out: everyone can use it."
++          : "Not rolled out: selected people only."}
++      </p>
++    </section>
++  );
++}
++
+ function LargeQuantitySetting() {
+   const settings = useQuery(api.settings.get, {});
+   if (settings === undefined)
+diff --git a/src/pages/users/page.tsx b/src/pages/users/page.tsx
+index 57e2755..8638c96 100644
+--- a/src/pages/users/page.tsx
++++ b/src/pages/users/page.tsx
+@@ -1,7 +1,7 @@
+ import { useState } from "react";
+ import { useMutation, useQuery } from "convex/react";
+ import { Navigate } from "react-router-dom";
+-import { UserCheck, UserX, Users } from "lucide-react";
++import { Pill, UserCheck, UserX, Users } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import type { Doc } from "@/convex/_generated/dataModel.d.ts";
+@@ -22,6 +22,7 @@ import {
+   SelectValue,
+ } from "@/components/ui/select.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
+ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
+ import PageHeader from "@/components/page-header.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+@@ -31,13 +32,54 @@ import { errorMessage } from "@/lib/errors.ts";
+ type Status = "pending" | "active" | "disabled";
+ type Role = "admin" | "staff";
+ 
++function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
++  const setAccess = useMutation(api.users.setCanisterAccess);
++  const settings = useQuery(api.settings.get, {});
++  const forEveryone = settings?.canisterForEveryone ?? false;
++  const on = user.canisterAccess === true;
++  const toggle = async (enabled: boolean) => {
++    try {
++      await setAccess({ userId: user._id, enabled });
++      toast.success(
++        `Canister features ${enabled ? "on" : "off"} for ${user.name ?? "this user"}`,
++      );
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not update canister access"));
++    }
++  };
++  return (
++    <label
++      className="flex cursor-pointer items-center gap-2 rounded-lg bg-muted px-2.5 py-1.5 text-sm"
++      title={
++        forEveryone
++          ? "Canister features are rolled out to everyone in Settings"
++          : undefined
++      }
++    >
++      <Pill className="size-4 text-primary" />
++      Canister
++      <Switch
++        checked={forEveryone || on}
++        disabled={forEveryone}
++        onCheckedChange={(v) => void toggle(v)}
++        aria-label="Canister features"
++        className="cursor-pointer"
++      />
++    </label>
++  );
++}
++
+ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+   const updateAccess = useMutation(api.users.updateAccess);
+   const role: Role = user.role ?? "staff";
+ 
+   const save = async (next: { role?: Role; status?: Status }, done: string) => {
+     try {
+-      await updateAccess({ userId: user._id, role: next.role ?? role, status: next.status ?? user.status ?? "pending" });
++      await updateAccess({
++        userId: user._id,
++        role: next.role ?? role,
++        status: next.status ?? user.status ?? "pending",
++      });
+       toast.success(done);
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not update user"));
+@@ -48,26 +90,46 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+   const removeAccess = async () => {
+     const rejecting = user.status === "pending";
+     const ok = await confirm({
+-      title: rejecting ? `Reject ${user.name ?? "this user"}?` : `Remove access for ${user.name ?? "this user"}?`,
+-      description: "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
++      title: rejecting
++        ? `Reject ${user.name ?? "this user"}?`
++        : `Remove access for ${user.name ?? "this user"}?`,
++      description:
++        "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
+       confirmLabel: rejecting ? "Reject" : "Remove access",
+       destructive: true,
+     });
+-    if (ok) await save({ status: "disabled" }, rejecting ? "User rejected" : "Access removed");
++    if (ok)
++      await save(
++        { status: "disabled" },
++        rejecting ? "User rejected" : "Access removed",
++      );
+   };
+ 
+   return (
+     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
+       <div className="min-w-0 flex-1">
+         <div className="flex items-center gap-2">
+-          <span className="truncate font-semibold">{user.name ?? "Unnamed"}</span>
++          <span className="truncate font-semibold">
++            {user.name ?? "Unnamed"}
++          </span>
+           {isSelf && <Badge variant="secondary">You</Badge>}
+         </div>
+-        <div className="truncate text-sm text-muted-foreground">{user.email ?? "No email"}</div>
++        <div className="truncate text-sm text-muted-foreground">
++          {user.email ?? "No email"}
++        </div>
+       </div>
++      {user.status === "active" && <CanisterAccessToggle user={user} />}
+       {!isSelf && (
+         <div className="flex flex-wrap items-center gap-2">
+-          <Select value={role} onValueChange={(v) => void save({ role: v === "admin" ? "admin" : "staff" }, "Role updated")}>
++          <Select
++            value={role}
++            onValueChange={(v) =>
++              void save(
++                { role: v === "admin" ? "admin" : "staff" },
++                "Role updated",
++              )
++            }
++          >
+             <SelectTrigger className="w-28" aria-label="Role">
+               <SelectValue />
+             </SelectTrigger>
+@@ -77,12 +139,20 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+             </SelectContent>
+           </Select>
+           {user.status !== "active" && (
+-            <Button size="sm" onClick={() => void save({ status: "active" }, "User approved")}>
++            <Button
++              size="sm"
++              onClick={() => void save({ status: "active" }, "User approved")}
++            >
+               <UserCheck /> Approve
+             </Button>
+           )}
+           {user.status !== "disabled" && (
+-            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void removeAccess()}>
++            <Button
++              size="sm"
++              variant="ghost"
++              className="text-destructive"
++              onClick={() => void removeAccess()}
++            >
+               <UserX /> {user.status === "pending" ? "Reject" : "Remove access"}
+             </Button>
+           )}
+@@ -110,9 +180,13 @@ function UserList({ status, selfId }: { status: Status; selfId: string }) {
+           <EmptyMedia variant="icon">
+             <Users />
+           </EmptyMedia>
+-          <EmptyTitle>No {status === "active" ? "active" : status} users</EmptyTitle>
++          <EmptyTitle>
++            No {status === "active" ? "active" : status} users
++          </EmptyTitle>
+           <EmptyDescription>
+-            {status === "pending" ? "New people appear here after they sign in for the first time." : "Nobody here right now."}
++            {status === "pending"
++              ? "New people appear here after they sign in for the first time."
++              : "Nobody here right now."}
+           </EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+@@ -135,8 +209,17 @@ export default function UsersPage() {
+ 
+   return (
+     <div className="mx-auto max-w-4xl p-4 md:p-8">
+-      <PageHeader title="Users" description="Approve new staff and choose who can manage inventory." />
+-      <Tabs value={tab} onValueChange={(v) => setTab(v === "active" || v === "disabled" ? v : "pending")} className="space-y-4">
++      <PageHeader
++        title="Users"
++        description="Approve new staff and choose who can manage inventory."
++      />
++      <Tabs
++        value={tab}
++        onValueChange={(v) =>
++          setTab(v === "active" || v === "disabled" ? v : "pending")
++        }
++        className="space-y-4"
++      >
+         <TabsList>
+           <TabsTrigger value="pending">Waiting approval</TabsTrigger>
+           <TabsTrigger value="active">Active</TabsTrigger>

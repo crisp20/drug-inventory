@@ -1,0 +1,139 @@
+diff --git a/convex/drugs.test.ts b/convex/drugs.test.ts
+index 553ca80..cf32440 100644
+--- a/convex/drugs.test.ts
++++ b/convex/drugs.test.ts
+@@ -80,3 +80,27 @@ describe("drugs", () => {
+     expect(await owner.query(api.drugs.search, { term: "B2" })).toHaveLength(1);
+   });
+ });
++
++describe("search", () => {
++  const make = (drugId: string, name: string, brandName: string, barcode: string) => ({
++    ...drug,
++    drugId,
++    name,
++    brandName,
++    packages: [{ ...drug.packages[0], barcode }],
++  });
++
++  it("requires every typed word to match", async () => {
++    const { owner } = await setup();
++    await owner.mutation(api.drugs.create, make("68", "Aripiprazole 10mg Tab", "Abilify 10mg Tab", "1111111111116"));
++    await owner.mutation(api.drugs.create, make("69", "Aripiprazole 5mg Tab", "Abilify 5mg Tab", "2222222222222"));
++    await owner.mutation(api.drugs.create, make("70", "Solifenacin 10mg Tab", "Vesicare", "3333333333338"));
++
++    const names = async (term: string) =>
++      (await owner.query(api.drugs.search, { term })).map((d) => d.drugId).sort();
++
++    expect(await names("Abilify 10mg")).toEqual(["68"]);
++    expect(await names("abilify 10")).toEqual(["68"]);
++    expect(await names("Abilify")).toEqual(["68", "69"]);
++  });
++});
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 6e32ac4..a843d3b 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -13,11 +13,17 @@ import {
+   deleteFiles,
+   filesOf,
+   getPackages,
++  matchesAllWords,
++  searchWords,
+   withDetails,
+   type PackageInput,
+ } from "./lib/drugs";
+ import { baseUnit } from "./schema/drugs";
+ 
++const MAX_SEARCH_WORDS = 5;
++const SEARCH_POOL = 150;
++const MAX_TEXT_RESULTS = 30;
++
+ const packageArg = v.object({
+   packageId: v.optional(v.id("drugPackages")),
+   barcode: v.string(),
+@@ -97,11 +103,25 @@ export const search = query({
+       .first();
+     if (byId) found.set(byId._id, byId);
+ 
+-    const textMatches = await ctx.db
+-      .query("drugs")
+-      .withSearchIndex("search_text", (q) => q.search("searchText", term))
+-      .take(30);
+-    for (const d of textMatches) found.set(d._id, d);
++    // The search index matches ANY word, so gather candidates for the full term and
++    // each word, then keep only drugs where EVERY typed word matches
++    const words = searchWords(term).slice(0, MAX_SEARCH_WORDS);
++    const queries = [term, ...words.filter((w) => w !== term.toLowerCase())];
++    const candidates = await Promise.all(
++      queries.map((q) =>
++        ctx.db
++          .query("drugs")
++          .withSearchIndex("search_text", (s) => s.search("searchText", q))
++          .take(SEARCH_POOL),
++      ),
++    );
++    let textCount = 0;
++    for (const d of candidates.flat()) {
++      if (textCount >= MAX_TEXT_RESULTS) break;
++      if (found.has(d._id) || !matchesAllWords(d.searchText, term)) continue;
++      found.set(d._id, d);
++      textCount++;
++    }
+ 
+     return await Promise.all([...found.values()].map((d) => withDetails(ctx, d)));
+   },
+diff --git a/convex/lib/drugs.test.ts b/convex/lib/drugs.test.ts
+new file mode 100644
+index 0000000..2311e79
+--- /dev/null
++++ b/convex/lib/drugs.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from "vitest";
++import { matchesAllWords, searchWords } from "./drugs";
++
++describe("searchWords", () => {
++  it("splits on spaces and punctuation, lowercased", () => {
++    expect(searchWords("Abilify 10mg/Tab (Otsuka)")).toEqual(["abilify", "10mg", "tab", "otsuka"]);
++  });
++});
++
++describe("matchesAllWords", () => {
++  const text = "68 Aripiprazole 10mg Tab Abilify 10mg Tab";
++
++  it("matches when every word is a prefix of some drug word", () => {
++    expect(matchesAllWords(text, "Abilify 10mg")).toBe(true);
++    expect(matchesAllWords(text, "abil 10")).toBe(true);
++  });
++
++  it("rejects when any word is missing", () => {
++    expect(matchesAllWords(text, "Abilify 5mg")).toBe(false);
++    expect(matchesAllWords("70 Solifenacin 10mg Tab Vesicare", "Abilify 10mg")).toBe(false);
++  });
++
++  it("does not match a word in the middle of another word", () => {
++    expect(matchesAllWords(text, "ify")).toBe(false);
++  });
++});
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index f384cac..b74bc93 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -79,6 +79,17 @@ export function buildSearchText(d: Pick<DrugInput, "drugId" | "name" | "brandNam
+   return [d.drugId, d.name, d.brandName].join(" ");
+ }
+ 
++// Splits text into lowercase words, treating punctuation ("10mg/tab", "(Abilify)") as breaks
++export function searchWords(text: string) {
++  return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
++}
++
++// True when every typed word starts one of the drug's words, so "abil 10" finds "Abilify 10mg"
++export function matchesAllWords(searchText: string, term: string) {
++  const tokens = searchWords(searchText);
++  return searchWords(term).every((w) => tokens.some((t) => t.startsWith(w)));
++}
++
+ export async function assertDrugIdFree(ctx: QueryCtx, drugId: string, exceptId?: Id<"drugs">) {
+   const existing = await ctx.db
+     .query("drugs")

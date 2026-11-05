@@ -1,0 +1,79 @@
+diff --git a/convex/lib/canister.test.ts b/convex/lib/canister.test.ts
+index e095ce4..077bb48 100644
+--- a/convex/lib/canister.test.ts
++++ b/convex/lib/canister.test.ts
+@@ -52,6 +52,23 @@ describe("parseGs1", () => {
+     });
+   });
+ 
++  it("treats a typed 029 before a known field as the separator", () => {
++    expect(
++      parseGs1("0104897133761542211030496280425602910RC430402917281130"),
++    ).toEqual({
++      gtin: "04897133761542",
++      batch: "RC4304",
++      expiry: "2028-11-30",
++    });
++  });
++
++  it("keeps 029 that is really part of the batch", () => {
++    expect(parseGs1("010489713376154217281130" + "10AB029")).toMatchObject({
++      batch: "AB029",
++      expiry: "2028-11-30",
++    });
++  });
++
+   it("still uses separators when they are sent", () => {
+     expect(
+       parseGs1(
+diff --git a/convex/lib/gs1.ts b/convex/lib/gs1.ts
+index e25ec58..f461de8 100644
+--- a/convex/lib/gs1.ts
++++ b/convex/lib/gs1.ts
+@@ -40,6 +40,8 @@ const VARIABLE: Record<string, number> = {
+ const DATE_AIS = new Set(["11", "12", "13", "15", "16", "17"]);
+ // Fields that usually follow one another on medicine boxes
+ const COMMON = new Set(["01", "10", "11", "17", "21"]);
++// The separator's Alt code, as some scanners type it on a Mac
++const TYPED_GS = "029";
+ 
+ export type Gs1Data = { gtin?: string; batch?: string; expiry?: string };
+ 
+@@ -81,20 +83,33 @@ function validFixed(ai: string, value: string): boolean {
+ function parseRaw(code: string): Record<string, string> {
+   const failed = new Set<number>();
+ 
+-  // Try the end of the code and ends followed by a common medicine-box field first
++  // Some scanners type the separator as the digits "029" (its Alt code)
++  // instead of the invisible character. Only treat it as one before a known field.
++  const typedSeparatorAt = (i: number) =>
++    code.startsWith(TYPED_GS, i) &&
++    COMMON.has(code.slice(i + TYPED_GS.length, i + TYPED_GS.length + 2));
++
++  // Try ends marked by a typed "029" first, then the end of the code and ends
++  // followed by a common medicine-box field, then everything else
+   const candidateEnds = (start: number, limit: number): number[] => {
+     const all = Array.from({ length: limit - start }, (_, k) => start + 1 + k);
++    const marked = all.filter(typedSeparatorAt);
+     const likely = all.filter(
+-      (end) => end === code.length || COMMON.has(code.slice(end, end + 2)),
++      (end) =>
++        !marked.includes(end) &&
++        (end === code.length || COMMON.has(code.slice(end, end + 2))),
+     );
+-    return [...likely, ...all.filter((end) => !likely.includes(end))];
++    const first = [...marked, ...likely];
++    return [...first, ...all.filter((end) => !first.includes(end))];
+   };
+ 
+   const solve = (i: number): Record<string, string> | null => {
+     if (i >= code.length) return {};
+     if (failed.has(i)) return null;
+     if (code[i] === GS) return solve(i + 1);
+-    const result = solveField(i);
++    const result =
++      (typedSeparatorAt(i) ? solve(i + TYPED_GS.length) : null) ??
++      solveField(i);
+     if (!result) failed.add(i);
+     return result;
+   };

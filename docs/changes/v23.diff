@@ -1,0 +1,179 @@
+diff --git a/convex/drugPhotos.ts b/convex/drugPhotos.ts
+new file mode 100644
+index 0000000..f9ef0bf
+--- /dev/null
++++ b/convex/drugPhotos.ts
+@@ -0,0 +1,73 @@
++import { ConvexError, v } from "convex/values";
++import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
++import type { Id } from "./_generated/dataModel";
++import { requireAdmin } from "./lib/access";
++import { deleteFiles } from "./lib/drugs";
++import { MAX_PHOTO_BATCH, MAX_PHOTO_CHECK } from "./lib/drugPhotos";
++
++const photoItem = v.object({ drugId: v.string(), storageId: v.id("_storage") });
++
++async function findDrug(ctx: MutationCtx, drugId: string) {
++  return await ctx.db
++    .query("drugs")
++    .withIndex("by_drugId", (q) => q.eq("drugId", drugId.trim()))
++    .first();
++}
++
++// Sets each drug's main picture, replacing (and deleting) the old one.
++// Uploads for unknown Drug IDs are deleted so no orphan files are left behind.
++async function applyPhotos(ctx: MutationCtx, items: { drugId: string; storageId: Id<"_storage"> }[]) {
++  let applied = 0;
++  const notFound: string[] = [];
++  for (const { drugId, storageId } of items) {
++    const drug = await findDrug(ctx, drugId);
++    if (!drug) {
++      notFound.push(drugId);
++      await deleteFiles(ctx, [storageId]);
++      continue;
++    }
++    if (drug.imageId && drug.imageId !== storageId) await deleteFiles(ctx, [drug.imageId]);
++    await ctx.db.patch("drugs", drug._id, { imageId: storageId, updatedAt: new Date().toISOString() });
++    applied += 1;
++  }
++  return { applied, notFound };
++}
++
++// Tells the upload screen which Drug IDs exist and which already have a picture
++export const checkPhotos = query({
++  args: { drugIds: v.array(v.string()) },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    if (args.drugIds.length > MAX_PHOTO_CHECK) {
++      throw new ConvexError({ code: "BAD_REQUEST", message: `Check at most ${MAX_PHOTO_CHECK} photos at a time` });
++    }
++    return await Promise.all(
++      args.drugIds.map(async (drugId) => {
++        const drug = await ctx.db
++          .query("drugs")
++          .withIndex("by_drugId", (q) => q.eq("drugId", drugId.trim()))
++          .first();
++        return drug
++          ? { drugId, found: true as const, name: drug.name, hasPhoto: !!drug.imageId }
++          : { drugId, found: false as const, name: "", hasPhoto: false };
++      }),
++    );
++  },
++});
++
++export const setPhotos = mutation({
++  args: { items: v.array(photoItem) },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    if (args.items.length > MAX_PHOTO_BATCH) {
++      throw new ConvexError({ code: "BAD_REQUEST", message: `Send at most ${MAX_PHOTO_BATCH} photos at a time` });
++    }
++    return await applyPhotos(ctx, args.items);
++  },
++});
++
++// One-off loads run by the builder
++export const setPhotosInternal = internalMutation({
++  args: { items: v.array(photoItem) },
++  handler: async (ctx, args) => await applyPhotos(ctx, args.items),
++});
+diff --git a/convex/drugPhotosSeed.ts b/convex/drugPhotosSeed.ts
+new file mode 100644
+index 0000000..288d190
+--- /dev/null
++++ b/convex/drugPhotosSeed.ts
+@@ -0,0 +1,35 @@
++import { v } from "convex/values";
++import { unzipSync } from "fflate";
++import { internal } from "./_generated/api";
++import { internalAction } from "./_generated/server";
++import type { Id } from "./_generated/dataModel";
++import { MAX_PHOTO_BATCH, dedupePhotos, parsePhotoName } from "./lib/drugPhotos";
++
++// Temporary one-off: loads a hosted zip of photos named by Drug ID
++export const loadZip = internalAction({
++  args: { url: v.string() },
++  handler: async (ctx, args): Promise<{ applied: number; notFound: string[]; duplicates: string[] }> => {
++    if (!args.url.startsWith("https://hercules-cdn.com/")) throw new Error("Only Hercules file links are allowed");
++    const res = await fetch(args.url);
++    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
++    // unzipSync avoids fflate's Worker-based async path, which the backend runtime lacks
++    const entries = unzipSync(new Uint8Array(await res.arrayBuffer()));
++    const parsed = Object.entries(entries).flatMap(([fileName, data]) => {
++      const name = parsePhotoName(fileName);
++      return name ? [{ ...name, fileName, data }] : [];
++    });
++    const { photos, duplicates } = dedupePhotos(parsed);
++    const total = { applied: 0, notFound: [] as string[], duplicates };
++    for (let i = 0; i < photos.length; i += MAX_PHOTO_BATCH) {
++      const items: { drugId: string; storageId: Id<"_storage"> }[] = [];
++      for (const p of photos.slice(i, i + MAX_PHOTO_BATCH)) {
++        const storageId = await ctx.storage.store(new Blob([p.data], { type: p.contentType }));
++        items.push({ drugId: p.drugId, storageId });
++      }
++      const r = await ctx.runMutation(internal.drugPhotos.setPhotosInternal, { items });
++      total.applied += r.applied;
++      total.notFound.push(...r.notFound);
++    }
++    return total;
++  },
++});
+diff --git a/convex/lib/drugPhotos.ts b/convex/lib/drugPhotos.ts
+new file mode 100644
+index 0000000..19311b5
+--- /dev/null
++++ b/convex/lib/drugPhotos.ts
+@@ -0,0 +1,41 @@
++// Shared by the browser upload and the backend: photo files are named by Drug ID (e.g. "25.jpg")
++
++export const MAX_PHOTO_BATCH = 50;
++export const MAX_PHOTO_CHECK = 200;
++export const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
++
++const IMAGE_TYPES: Record<string, string> = {
++  jpg: "image/jpeg",
++  jpeg: "image/jpeg",
++  png: "image/png",
++  webp: "image/webp",
++  gif: "image/gif",
++};
++
++export type PhotoName = { drugId: string; contentType: string };
++
++// Returns the Drug ID and image type for a photo path, or null for non-photos and system files
++export function parsePhotoName(path: string): PhotoName | null {
++  const parts = path.split(/[\\/]/);
++  // macOS zips add "__MACOSX/._name" copies that are not real images
++  if (parts.some((p) => p === "__MACOSX")) return null;
++  const file = parts[parts.length - 1] ?? "";
++  if (!file || file.startsWith(".")) return null;
++  const dot = file.lastIndexOf(".");
++  if (dot <= 0) return null;
++  const contentType = IMAGE_TYPES[file.slice(dot + 1).toLowerCase()];
++  if (!contentType) return null;
++  const drugId = file.slice(0, dot).trim();
++  return drugId ? { drugId, contentType } : null;
++}
++
++// Keeps one photo per Drug ID (the last one wins) and reports the duplicates
++export function dedupePhotos<T extends { drugId: string; fileName: string }>(photos: T[]) {
++  const byId = new Map<string, T>();
++  const duplicates: string[] = [];
++  for (const p of photos) {
++    if (byId.has(p.drugId)) duplicates.push(p.fileName);
++    byId.set(p.drugId, p);
++  }
++  return { photos: [...byId.values()], duplicates };
++}
+diff --git a/package.json b/package.json
+index b301d3c..68f8a1a 100644
+--- a/package.json
++++ b/package.json
+@@ -26,6 +26,7 @@
+     "convex": "^1.47.0",
+     "date-fns": "^4.4.0",
+     "embla-carousel-react": "^8.6.0",
++    "fflate": "^0.8.3",
+     "input-otp": "^1.5.0",
+     "lucide-react": "^1.59.0",
+     "motion": "^14.3.0",

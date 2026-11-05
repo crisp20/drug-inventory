@@ -1,0 +1,121 @@
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 9631763..73b84a1 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -3,7 +3,7 @@ import { ConvexError, v } from "convex/values";
+ import { mutation, query } from "./_generated/server";
+ import type { Doc, Id } from "./_generated/dataModel";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
+-import { normalizeBarcode } from "./lib/barcode";
++import { normalizeBarcode, toStoredBarcode } from "./lib/barcode";
+ import {
+   assertBarcodesFree,
+   assertDrugIdFree,
+@@ -39,7 +39,7 @@ const drugArgs = {
+ 
+ function packageFields(p: PackageInput) {
+   return {
+-    barcode: p.barcode,
++    barcode: toStoredBarcode(p.barcode),
+     barcodeKey: p.barcode ? normalizeBarcode(p.barcode) : "",
+     qtyPerUnit: p.qtyPerUnit,
+     baseUnit: p.baseUnit,
+diff --git a/convex/lib/barcode.test.ts b/convex/lib/barcode.test.ts
+index 2499f19..cd3690b 100644
+--- a/convex/lib/barcode.test.ts
++++ b/convex/lib/barcode.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import { barcodesMatch, extractGtin, formatPackageForm, normalizeBarcode } from "./barcode";
++import { barcodesMatch, extractGtin, formatPackageForm, normalizeBarcode, toStoredBarcode } from "./barcode";
+ 
+ describe("normalizeBarcode", () => {
+   it("pads EAN-13 to GTIN-14 so it matches the GS1 form", () => {
+@@ -30,6 +30,23 @@ describe("barcodesMatch", () => {
+   });
+ });
+ 
++describe("toStoredBarcode", () => {
++  it("stores the GTIN (as printed EAN-13) when a GS1 code is entered", () => {
++    expect(toStoredBarcode("(01)09312345678907(17)261231(10)AB12")).toBe("9312345678907");
++    expect(toStoredBarcode("]d201093123456789071726123110AB12\u001d21XYZ")).toBe("9312345678907");
++    expect(toStoredBarcode("0109312345678907")).toBe("9312345678907");
++  });
++
++  it("keeps a full GTIN-14 that does not start with 0", () => {
++    expect(toStoredBarcode("0119312345678904172612")).toBe("19312345678904");
++  });
++
++  it("leaves plain barcodes and non-GS1 strings untouched", () => {
++    expect(toStoredBarcode(" 4897042582313 ")).toBe("4897042582313");
++    expect(toStoredBarcode("1727043010LC82683")).toBe("1727043010LC82683");
++  });
++});
++
+ describe("formatPackageForm", () => {
+   it("formats qty/unit x count", () => {
+     expect(formatPackageForm({ qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10 })).toBe("10/Strip x10");
+diff --git a/convex/lib/barcode.ts b/convex/lib/barcode.ts
+index 9f6f570..df4a3a7 100644
+--- a/convex/lib/barcode.ts
++++ b/convex/lib/barcode.ts
+@@ -20,6 +20,23 @@ export function normalizeBarcode(raw: string): string {
+   return extractGtin(raw) ?? raw.trim().toUpperCase();
+ }
+ 
++// True for GS1 element strings that carry extra data (expiry, batch...) after the GTIN
++export function isGs1String(raw: string): boolean {
++  const code = raw.trim().replace(SYMBOLOGY_PREFIX, "").replace(GS1_SEPARATOR, "");
++  return /\(01\)\s*\d{14}/.test(code) || (/^01\d{14}/.test(code) && code.length >= 16);
++}
++
++// What we save as the package form's barcode. GS1 codes are reduced to their GTIN,
++// shown as the 13-digit EAN printed on the box when the GTIN-14 starts with 0.
++// Plain barcodes are kept exactly as scanned.
++export function toStoredBarcode(raw: string): string {
++  const trimmed = raw.trim();
++  if (!isGs1String(trimmed)) return trimmed;
++  const gtin = extractGtin(trimmed);
++  if (!gtin) return trimmed;
++  return gtin.startsWith("0") ? gtin.slice(1) : gtin;
++}
++
+ // True when two scans refer to the same product (e.g. plain barcode vs GS1 code)
+ export function barcodesMatch(a: string, b: string): boolean {
+   if (!a.trim() || !b.trim()) return false;
+diff --git a/src/pages/inventory/_components/barcode-confirm-entry.tsx b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+index 1368f20..830fa8a 100644
+--- a/src/pages/inventory/_components/barcode-confirm-entry.tsx
++++ b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+@@ -13,7 +13,8 @@ import {
+   AlertDialogTitle,
+ } from "@/components/ui/alert-dialog.tsx";
+ import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
+-import { barcodesMatch, normalizeBarcode } from "@/convex/lib/barcode.ts";
++import { barcodesMatch, isGs1String, normalizeBarcode, toStoredBarcode } from "@/convex/lib/barcode.ts";
++import { toast } from "sonner";
+ import { cn } from "@/lib/utils.ts";
+ 
+ type Slot = "first" | "second";
+@@ -67,7 +68,8 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+       setError("This barcode is already listed below.");
+       return;
+     }
+-    onAdd(first.trim());
++    onAdd(toStoredBarcode(first));
++    if (isGs1String(first)) toast.success(`GS1 code detected. Saved GTIN ${toStoredBarcode(first)}`);
+     reset();
+   };
+ 
+@@ -144,7 +146,10 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+           </span>
+         ) : bothFilled && matched && !isDuplicate ? (
+           <span className="flex items-center gap-1 font-medium text-green-700 dark:text-green-400">
+-            <CheckCircle2 className="size-3.5" /> Barcodes match. Press Add.
++            <CheckCircle2 className="size-3.5" />
++            {isGs1String(first)
++              ? `GS1 code read. GTIN ${toStoredBarcode(first)} will be saved. Press Add.`
++              : "Barcodes match. Press Add."}
+           </span>
+         ) : bothFilled && !matched ? (
+           <span className="flex items-center gap-1 text-destructive">

@@ -1,0 +1,271 @@
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index 34c62b3..17e1c36 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -34,4 +34,6 @@ export const stockMovementsTable = defineTable({
+ })
+   .index("by_kind_and_occurredAt", ["kind", "occurredAt"])
+   .index("by_kind_and_drug_and_occurredAt", ["kind", "drugRef", "occurredAt"])
+-  .index("by_kind_and_package_and_occurredAt", ["kind", "packageRef", "occurredAt"]);
++  .index("by_kind_and_package_and_occurredAt", ["kind", "packageRef", "occurredAt"])
++  // Full In + Out history of one package form (Inventory detail view)
++  .index("by_package_and_occurredAt", ["packageRef", "occurredAt"]);
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index 20e9c48..9fc8b3a 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -163,4 +163,18 @@ describe("Filtered log", () => {
+     });
+     expect(outByDrug.page).toHaveLength(0);
+   });
++
++  it("returns Stock In and Stock Out together for one package form, newest first", async () => {
++    const { owner, packageId } = await setup();
++    await owner.mutation(api.stock.recordIn, { packageId, ...entry });
++    await owner.mutation(api.stock.recordOut, { packageId, ...entry, reason: "Dispensed" });
++    const page = { numItems: 10, cursor: null };
++    const history = await owner.query(api.stock.listMovements, {
++      filter: { type: "package", packageId },
++      paginationOpts: page,
++    });
++    expect(history.page.map((m) => m.kind)).toEqual(["out", "in"]);
++    // Mixed history is only allowed for a single package form
++    await expect(owner.query(api.stock.listMovements, { paginationOpts: page })).rejects.toThrow();
++  });
+ });
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 2ebbf91..a4b1e62 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -83,12 +83,22 @@ const movementFilter = v.optional(
+   ),
+ );
+ 
+-// Newest first
++// Newest first. Leaving out `kind` returns both Stock In and Stock Out,
++// which is only supported for a single package form.
+ export const listMovements = query({
+-  args: { kind: movementKind, filter: movementFilter, paginationOpts: paginationOptsValidator },
++  args: { kind: v.optional(movementKind), filter: movementFilter, paginationOpts: paginationOptsValidator },
+   handler: async (ctx, { kind, filter, paginationOpts }) => {
+     await requireActiveUser(ctx);
+     const table = ctx.db.query("stockMovements");
++    if (kind === undefined) {
++      if (filter?.type !== "package") {
++        throw new ConvexError({ code: "BAD_REQUEST", message: "Choose Stock In or Stock Out" });
++      }
++      return await table
++        .withIndex("by_package_and_occurredAt", (q) => q.eq("packageRef", filter.packageId))
++        .order("desc")
++        .paginate(paginationOpts);
++    }
+     const scoped =
+       filter?.type === "drug"
+         ? table.withIndex("by_kind_and_drug_and_occurredAt", (q) => q.eq("kind", kind).eq("drugRef", filter.drugId))
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index e0bf761..c656e8b 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -15,6 +15,7 @@ import {
+   EmptyTitle,
+ } from "@/components/ui/empty.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { cn } from "@/lib/utils.ts";
+ 
+ const PAGE_SIZE = 25;
+ 
+@@ -22,7 +23,12 @@ export type MovementLogFilter =
+   | { type: "drug"; drugId: Id<"drugs"> }
+   | { type: "package"; packageId: Id<"drugPackages"> };
+ 
+-type Props = { kind: MovementKind; filter?: MovementLogFilter };
++// Leaving out `kind` shows Stock In and Stock Out together (package form filter only)
++type Props =
++  | { kind: MovementKind; filter?: MovementLogFilter }
++  | { kind?: undefined; filter: Extract<MovementLogFilter, { type: "package" }> };
++
++const KIND_LABEL: Record<MovementKind, string> = { in: "Stock In", out: "Stock Out" };
+ 
+ // Who recorded what, and when. Newest first.
+ export default function MovementLog({ kind, filter }: Props) {
+@@ -31,8 +37,8 @@ export default function MovementLog({ kind, filter }: Props) {
+     { kind, filter },
+     { initialNumItems: PAGE_SIZE },
+   );
+-  const sign = kind === "in" ? "+" : "−";
+-  const label = kind === "in" ? "Stock In" : "Stock Out";
++  const mixed = kind === undefined;
++  const label = kind ? KIND_LABEL[kind] : "Stock In or Stock Out";
+ 
+   if (status === "LoadingFirstPage") {
+     return (
+@@ -66,19 +72,22 @@ export default function MovementLog({ kind, filter }: Props) {
+       <ul className="divide-y rounded-xl border bg-card">
+         {results.map((m) => (
+           <li key={m._id} className="flex gap-3 p-3">
+-            <div className="w-14 shrink-0 pt-0.5 text-center text-lg font-extrabold text-primary">
+-              {sign}
++            <div
++              className={cn(
++                "w-14 shrink-0 pt-0.5 text-center text-lg font-extrabold",
++                m.kind === "in" ? "text-primary" : "text-chart-3",
++              )}
++            >
++              {m.kind === "in" ? "+" : "−"}
+               {m.quantity}
+             </div>
+             <div className="min-w-0 flex-1 space-y-0.5">
+               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
++                {mixed && (
++                  <Badge variant={m.kind === "in" ? "default" : "secondary"}>{KIND_LABEL[m.kind]}</Badge>
++                )}
+                 <span className="truncate font-semibold">{m.drugName}</span>
+                 <span className="text-sm text-muted-foreground">{formatPackageForm(m)}</span>
+-                {m.formChanged && (
+-                  <Badge variant="secondary" className="text-[10px]">
+-                    Form edited
+-                  </Badge>
+-                )}
+                 {m.reason && <Badge variant="secondary">{m.reason}</Badge>}
+               </div>
+               <div className="truncate text-xs text-muted-foreground">
+diff --git a/src/pages/inventory/_components/drug-detail-sheet.tsx b/src/pages/inventory/_components/drug-detail-sheet.tsx
+index 5d573b7..6dbe197 100644
+--- a/src/pages/inventory/_components/drug-detail-sheet.tsx
++++ b/src/pages/inventory/_components/drug-detail-sheet.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from "react";
+ import { useMutation } from "convex/react";
+-import { Barcode, Factory, Pencil, Trash2 } from "lucide-react";
++import { Barcode, ChevronRight, Factory, History, Pencil, Trash2 } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+@@ -23,7 +23,8 @@ import {
+   SheetTitle,
+ } from "@/components/ui/sheet.tsx";
+ import DrugImage from "@/components/drug-image.tsx";
+-import type { DrugWithDetails } from "@/lib/drug-types.ts";
++import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
++import PackageHistoryDialog from "./package-history-dialog.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
+ type Props = {
+@@ -36,6 +37,7 @@ type Props = {
+ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Props) {
+   const remove = useMutation(api.drugs.remove);
+   const [confirming, setConfirming] = useState(false);
++  const [historyPkg, setHistoryPkg] = useState<DrugPackage | null>(null);
+ 
+   const handleDelete = async () => {
+     if (!drug) return;
+@@ -70,7 +72,12 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+                 <div className="divide-y rounded-xl border">
+                   {drug.packages.map((p) => (
+                     <div key={p._id} className="space-y-3 p-3">
+-                      <div className="flex items-center justify-between gap-3">
++                      <button
++                        type="button"
++                        onClick={() => setHistoryPkg(p)}
++                        aria-label={`View Stock In and Stock Out history for ${formatPackageForm(p)}`}
++                        className="-m-2 flex w-[calc(100%+1rem)] cursor-pointer items-center justify-between gap-3 rounded-lg p-2 text-left transition-colors hover:bg-muted active:bg-muted"
++                      >
+                         <div className="min-w-0">
+                           <div className="truncate font-mono text-sm">
+                             {p.barcode || <span className="font-sans italic text-muted-foreground">No barcode</span>}
+@@ -78,12 +85,18 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+                           <div className="text-sm text-muted-foreground">
+                             {formatPackageForm(p)} · {p.qtyPerUnit * p.unitCount} {drug.pieceName} each
+                           </div>
++                          <div className="flex items-center gap-1 pt-1 text-xs font-medium text-primary">
++                            <History className="size-3.5" /> View history
++                          </div>
+                         </div>
+-                        <div className="text-right">
+-                          <div className="text-2xl font-extrabold leading-none">{p.stock}</div>
+-                          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">in stock</div>
++                        <div className="flex items-center gap-2">
++                          <div className="text-right">
++                            <div className="text-2xl font-extrabold leading-none">{p.stock}</div>
++                            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">in stock</div>
++                          </div>
++                          <ChevronRight className="size-4 text-muted-foreground" />
+                         </div>
+-                      </div>
++                      </button>
+                       {p.images.length > 0 && (
+                         <div className="flex flex-wrap gap-2">
+                           {p.images.map((img) =>
+@@ -123,6 +136,7 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+           </>
+         )}
+       </SheetContent>
++      {drug && <PackageHistoryDialog drug={drug} pkg={historyPkg} onClose={() => setHistoryPkg(null)} />}
+       <AlertDialog open={confirming} onOpenChange={setConfirming}>
+         <AlertDialogContent>
+           <AlertDialogHeader>
+diff --git a/src/pages/inventory/_components/package-history-dialog.tsx b/src/pages/inventory/_components/package-history-dialog.tsx
+new file mode 100644
+index 0000000..a23e128
+--- /dev/null
++++ b/src/pages/inventory/_components/package-history-dialog.tsx
+@@ -0,0 +1,59 @@
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import MovementLog from "@/components/stock/movement-log.tsx";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.tsx";
++import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
++import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
++
++type Props = {
++  drug: DrugWithDetails;
++  pkg: DrugPackage | null;
++  onClose: () => void;
++};
++
++// Every Stock In and Stock Out recorded against one package form (barcode)
++export default function PackageHistoryDialog({ drug, pkg, onClose }: Props) {
++  return (
++    <Dialog open={!!pkg} onOpenChange={(o) => !o && onClose()}>
++      <DialogContent className="flex max-h-[90vh] flex-col gap-4 sm:max-w-2xl">
++        {pkg && (
++          <>
++            <DialogHeader>
++              <DialogTitle>
++                {drug.name} · {formatPackageForm(pkg)}
++              </DialogTitle>
++              <DialogDescription>
++                {pkg.barcode ? <span className="font-mono">{pkg.barcode}</span> : "No barcode"} · {pkg.stock} in
++                stock
++              </DialogDescription>
++            </DialogHeader>
++            {/* Inactive tabs unmount, so only one list is loaded at a time */}
++            <Tabs defaultValue="all" className="min-h-0 flex-1">
++              <TabsList className="grid w-full grid-cols-3">
++                <TabsTrigger value="all" className="cursor-pointer">All</TabsTrigger>
++                <TabsTrigger value="in" className="cursor-pointer">Stock In</TabsTrigger>
++                <TabsTrigger value="out" className="cursor-pointer">Stock Out</TabsTrigger>
++              </TabsList>
++              <div className="min-h-0 flex-1 overflow-y-auto pt-2">
++                <TabsContent value="all">
++                  <MovementLog filter={{ type: "package", packageId: pkg._id }} />
++                </TabsContent>
++                <TabsContent value="in">
++                  <MovementLog kind="in" filter={{ type: "package", packageId: pkg._id }} />
++                </TabsContent>
++                <TabsContent value="out">
++                  <MovementLog kind="out" filter={{ type: "package", packageId: pkg._id }} />
++                </TabsContent>
++              </div>
++            </Tabs>
++          </>
++        )}
++      </DialogContent>
++    </Dialog>
++  );
++}

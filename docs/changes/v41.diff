@@ -1,0 +1,123 @@
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 37f5696..4231e44 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -187,6 +187,7 @@ function PackagingPictures({
+               alt={drugName}
+               slides={slides}
+               startIndex={offset + i}
++              hoverPreview
+               className="size-24 border sm:size-28"
+             />
+           ))}
+diff --git a/src/components/zoomable-drug-image.tsx b/src/components/zoomable-drug-image.tsx
+index 1f50776..523dc0a 100644
+--- a/src/components/zoomable-drug-image.tsx
++++ b/src/components/zoomable-drug-image.tsx
+@@ -13,6 +13,11 @@ import {
+   type CarouselApi,
+ } from "@/components/ui/carousel.tsx";
+ import { Button } from "@/components/ui/button.tsx";
++import {
++  HoverCard,
++  HoverCardContent,
++  HoverCardTrigger,
++} from "@/components/ui/hover-card.tsx";
+ import { cn } from "@/lib/utils.ts";
+ import DrugImage from "./drug-image.tsx";
+ 
+@@ -27,8 +32,12 @@ type Props = {
+   startIndex?: number;
+   // Optional button shown in the large view (e.g. "Use this package form"); closes the view when pressed
+   action?: { label: string; onClick: () => void };
++  // Show a large preview after a short hover (mouse only; touch still taps to open)
++  hoverPreview?: boolean;
+ };
+ 
++const HOVER_DELAY_MS = 500;
++
+ // Picture thumbnail that opens a swipeable large view when pressed
+ export default function ZoomableDrugImage({
+   url,
+@@ -37,34 +46,63 @@ export default function ZoomableDrugImage({
+   slides,
+   startIndex = 0,
+   action,
++  hoverPreview = false,
+ }: Props) {
+   const [open, setOpen] = useState(false);
++  const [hovering, setHovering] = useState(false);
+   const gallery = slides ?? (url ? [{ url, caption: alt }] : []);
+   if (gallery.length === 0)
+     return (
+       <DrugImage url={null} alt={alt} className={cn("shrink-0", className)} />
+     );
+ 
++  const thumbnail = (
++    <button
++      type="button"
++      onClick={() => setOpen(true)}
++      className={cn(
++        "group relative shrink-0 cursor-zoom-in overflow-hidden rounded-lg",
++        className,
++      )}
++      aria-label={`Enlarge picture of ${alt}`}
++    >
++      <DrugImage
++        url={url ?? null}
++        alt={alt}
++        className="size-full transition-transform group-hover:scale-105"
++      />
++      <span className="absolute bottom-1 right-1 flex size-6 items-center justify-center rounded-full bg-black/55 text-white">
++        <ZoomIn className="size-3.5" />
++      </span>
++    </button>
++  );
++
+   return (
+     <>
+-      <button
+-        type="button"
+-        onClick={() => setOpen(true)}
+-        className={cn(
+-          "group relative shrink-0 cursor-zoom-in overflow-hidden rounded-lg",
+-          className,
+-        )}
+-        aria-label={`Enlarge picture of ${alt}`}
+-      >
+-        <DrugImage
+-          url={url ?? null}
+-          alt={alt}
+-          className="size-full transition-transform group-hover:scale-105"
+-        />
+-        <span className="absolute bottom-1 right-1 flex size-6 items-center justify-center rounded-full bg-black/55 text-white">
+-          <ZoomIn className="size-3.5" />
+-        </span>
+-      </button>
++      {hoverPreview && url ? (
++        <HoverCard
++          open={hovering && !open}
++          onOpenChange={setHovering}
++          openDelay={HOVER_DELAY_MS}
++          closeDelay={100}
++        >
++          <HoverCardTrigger asChild>{thumbnail}</HoverCardTrigger>
++          <HoverCardContent
++            side="right"
++            align="start"
++            collisionPadding={16}
++            className="pointer-events-none w-auto p-1.5"
++          >
++            <img
++              src={url}
++              alt={alt}
++              className="max-h-[min(70vh,32rem)] max-w-[min(80vw,32rem)] rounded-md bg-muted object-contain"
++            />
++          </HoverCardContent>
++        </HoverCard>
++      ) : (
++        thumbnail
++      )}
+       <Dialog open={open} onOpenChange={setOpen}>
+         <DialogContent className="max-w-[calc(100vw-2rem)] gap-3 p-3 sm:max-w-2xl">
+           <DialogTitle className="pr-8 text-base">{alt}</DialogTitle>

@@ -1,0 +1,384 @@
+diff --git a/src/lib/manufacturers.ts b/src/lib/manufacturers.ts
+new file mode 100644
+index 0000000..edc078a
+--- /dev/null
++++ b/src/lib/manufacturers.ts
+@@ -0,0 +1,271 @@
++// Manufacturer list supplied by ACP (all with status "A"). Sorted as provided.
++export const MANUFACTURERS: readonly string[] = [
++  "3M",
++  "A. Menarini Hong Kong Limited",
++  "Abbott Lab Ltd",
++  "ABBVIE LIMITED",
++  "Accord Healthcare HK Limited",
++  "Actavis (China) Holding Limited",
++  "Actavis Hong Kong O/B Actavis Hong Kong Limited",
++  "Advance Pharm Co Ltd.",
++  "Aglowmed Ltd",
++  "Alcon Hong Kong Ltd",
++  "Aliment Industry Co Ltd",
++  "Allergan Hong Kong Ltd",
++  "Altana Pharma HK",
++  "Alvogen Emerging Markets Holdings Limited",
++  "Amdipharm Mercury (Hong Kong) Limited",
++  "AMGEN HONG KONG LIMITED",
++  "Anderson International Co Ltd",
++  "Apotex Pharmaceutical Ltd",
++  "APT Pharma Limited",
++  "Arnet Pharmaceutical Corp., USA",
++  "Arrow Pharmaceuticals",
++  "ASANA",
++  "Ascent Pharmahealth Hong Kong Limited",
++  "Ashford Pharmaceuticals Ltd",
++  "ASIA CHEM IND LTD",
++  "Aspen (Hong Kong) Pty Limited",
++  "Associated Medical Supplies Co Ltd",
++  "Astellas Pharma Hong Kong Company Limited",
++  "Astrazeneca HK Ltd",
++  "ATLANTIC PHARM LTD",
++  "Aurobindo Pharma Limited",
++  "BATOU LIMITED",
++  "Bausch and Lomb",
++  "BAXTER HEALTHCARE LTD",
++  "Bayer Healthcare Ltd",
++  "Beaufour Ipsen International (Hong Kong) Limited",
++  "Best United Marketing Limited",
++  "Bioiberica",
++  "BIOLAB",
++  "Boehringer Ingelheim (HK) Ltd",
++  "Bright Future Pharmaceuticals Factory O/B Bright Future Pharmaceutical Laboratories Limited",
++  "BRISTOL-MYERS SQUIBB PHARMA (HK) LTD",
++  "Celltrion Healthcare Hong Kong Limited",
++  "CEUTICAL TRADING CO LTD",
++  "CH TRADING COMPANY",
++  "CHARIOT PHARMAR LIMITED",
++  "Charmaine Pharm Co",
++  "Chemillennium International (HK) Limited",
++  "Chong Lap (HK) Co Ltd",
++  "CHRISTO PHARM LTD",
++  "CNW (HK) LTD",
++  "CNW FAR EAST LIMITED",
++  "CONTROLLED MEDICATIONS LTD",
++  "CP Pharmacetuicals Ltd",
++  "DAIICHI SANKYO HONG KONG LIMITED",
++  "DCH Auriga (Hong Kong) Limited - Healthcare Division",
++  "DELTAPHARM LIMITED",
++  "Denk Pharma",
++  "DEUTSCH CHINESISCHE APOTHEKE (MAPLE INC)",
++  "DKSH HONG KONG LIMITED",
++  "Drug Houses of Australia",
++  "EEC Marketing",
++  "Ego Pharmaceuticals Hong Kong Limited",
++  "Eisai (Hong Kong) Co Ltd",
++  "Eisai Pharmaceuticals India Private Limited",
++  "Eli Lilly Asia, Inc.",
++  "Eng An Trading Company Limited",
++  "EUGENPHARM INTERNATIONAL LTD",
++  "Europharm Lab Co Ltd",
++  "EVERCARE PHARMACEUTICAL CO. LTD.",
++  "Ferring Pharmaceuticals Ltd",
++  "Fortune National (Hong Kong) Limited",
++  "Fortune Pharmacal Co Ltd",
++  "FOSUN INDUSTRIAL CO., LIMITED",
++  "FP HEALTHCARE LIMITED",
++  "FRANKIN PHARM LAB CO LTD",
++  "Fresenius Kabi Hong Kong Limited",
++  "Gaily Pharmaceutical Company Limited",
++  "Galderma Hong Kong Ltd",
++  "GILEAD SCIENCES HONG KONG LIMITED",
++  "Glaxosmithkline Ltd",
++  "GNC",
++  "Goodwill Trading Co",
++  "GREAT EASTERN HEALTHCARE LTD.",
++  "HANG LUNG TRADING (H.K.) CO",
++  "HEALTH ALLIANCE INTERNATIONAL CO LTD",
++  "Health Vision Enterprise Limited",
++  "Healthcare Pharma Limited",
++  "HEALTHCARE PHARMASCIENCE LIMITED",
++  "Hexal AG",
++  "HIND WING CO LTD",
++  "HING AH PHARMA CO LTD",
++  "Hisamitsu Pharmaceutical (Hong Kong) Co., Limited",
++  "HITPHARM PHARMACEUTICAL CO LTD",
++  "HOEPHARMA (HK) LIMITED",
++  "Hong Kong Medical Ltd",
++  "HONG KONG MEDICAL SUPPLIES LTD",
++  "HONG KONG PUI'S PHARMACEUTICALS COMPANY LIMITED",
++  "HONG WO PHARMACEUTICAL",
++  "HOVID LIMITED",
++  "Hutchmed (Hong Kong) Limited O/B Hutchmed (Hong Kong) Limited",
++  "I & C (HONG KONG) LIMITED",
++  "IDS (HONG KONG) LIMITED - HEALTHCARE DIVISION",
++  "Ignis Therapeutics (HK) Limited",
++  "INNOLEDGE INTERNATIONAL LTD",
++  "INOVA PHARMACEUTICALS (HONG KONG) LIMITED",
++  "INTAS",
++  "INVIDA (HONG KONG) LIMITED",
++  "Jacobson Marketing Limited",
++  "JACOBSON MEDICAL (HONG KONG) LTD",
++  "Jamieson Laboratories",
++  "Janssen Pharmaceutica",
++  "Janssen-Cilag",
++  "Jean-Marie Pharmacal co Ltd",
++  "Jen Sheng Pharmaceutical Co., Ltd",
++  "JINDUN PHARMA (H.K.) LIMITED",
++  "Johnson & Johnson (Hong Kong) Ltd.",
++  "JOHNSON AND JOHNSON CONSUMER (HONG KONG) LTD",
++  "JULIUS CHEN & CO (HK) LTD",
++  "Kaeru Pharmaceutical (HK) Limited",
++  "KAI YUEN PHARMACEUTICAL CO",
++  "Karen Laboratories O/B Karen Pharmaceutical Co Ltd",
++  "Keneric Healthcare",
++  "KOTRA PHARMA (HONG KONG) COMPANY",
++  "KYOWA HAKKO KIRIN (HONG KONG) CO., LIMITED",
++  "Laboratoires Bailleul Limited",
++  "LAFARGE CO., LIMITED",
++  "LANWAY LTD",
++  "LEAMYK INVESTMENT LIMITED",
++  "Lee's Pharmaceutical (H.K) Limited",
++  "Leepharm Enterprises Ltd",
++  "LEO Pharmaceutical Products",
++  "LEON MEDICAL SUPPLIES LIMITED",
++  "LF ASIA (HONG KONG) LIMITED - HEALTHCARE DIVISION",
++  "Lision Hong Ltd",
++  "Lotus Pharmaceutical Hk Limited",
++  "LSB (HK) LTD.",
++  "LUEN CHEONG HONG LTD",
++  "Lundbeck HK",
++  "Luqa Ventures Co., Limited",
++  "Luxembourg Medicine Co Ltd",
++  "MAIN LIFE CORP LTD",
++  "MARCHING PHARM LTD",
++  "Meda Pharmaceutical Hong Kong Limited",
++  "Medexrom Ltd",
++  "Mediline (Hong Kong) Company Limited",
++  "MEDIPHARMA LTD",
++  "Medochemie Ltd",
++  "Medreich Far East Ltd",
++  "MEKIM LTD",
++  "Mentholatum (Asia Pacific) Limited",
++  "Merck Pharmaceutical (HK) Ltd",
++  "Merck Sharp & Dohme (Asia) Ltd",
++  "Meyer BPC Pharmaceuticals Limited",
++  "MEYER PHARMACEUTICALS LTD",
++  "Millimed Co Ltd",
++  "Ming Tai Pharmaceuticals Company O/B Sure Brilliant Industrial Limited",
++  "Mount View Limited",
++  "MSD Italia S.r.l.",
++  "Mundipharma (Hong Kong) Limited",
++  "Mylan Pharmaceutical Hong Kong Limited",
++  "NAL PHARMACEUTICALS LIMITED",
++  "NATIONAL PHARMACEUTICAL CO LTD",
++  "NATURAL HEALTH RESOURCES COMPANY",
++  "NEOCHEM Pharmaceutical Laboratioies Ltd",
++  "NICE LAB LTD",
++  "NIDOWAY INVESTMENT LTD",
++  "North China Pharmaceutical Kangxin Co Ltd",
++  "NOVARTIS PHARMACEUTICAL (HK) LTD",
++  "NOVO NORDISK HONG KONG LTD",
++  "Now Foods (USA)",
++  "Nutrilite",
++  "Nycomed (Hong Kong) Limited",
++  "Organon Hong Kong Limited",
++  "ORIENTAL INT'L HEALTH PRODUCTS CO LTD",
++  "Otsuka Pharmaceutical (HK) Ltd",
++  "Paigeland Health Products(華晶國際)",
++  "PERFECT GROUPS LTD",
++  "Pfizer Corp HK Ltd",
++  "Pharmareg Consulting Company Limited",
++  "PHARMASKY & CO. O/B PHARMASKY HONG KONG LIMITED",
++  "Pharmason Company Limited",
++  "Pharmeng Technology Limited",
++  "PRIMAL CHEMICAL CO LTD",
++  "Prudentlink Limited",
++  "Quality Pharm Lab Ltd",
++  "Quality Pharmaceutical Lab Ltd",
++  "R. MANSTIEN (AUSTRALIA) LIMITED",
++  "RECKITT BENCKISER HONG KONG LTD",
++  "REICH PHARM LIMITED",
++  "Reliancemedi (U.S.A.) Pharmaceuticals Limited",
++  "REMEDICA LTD",
++  "RICH FARM TRADING LIMITED",
++  "Roche Hong Kong Limited",
++  "Roco International Medical Company Limited",
++  "Rxilient Medical (Hong Kong) Limited",
++  "Sandoz Hong Kong Limited",
++  "Sanofi Hong Kong Limited",
++  "SANOFI-AVENTIS HONG KONG LIMITED",
++  "Sanofi-Synthelabo Ltd-UK",
++  "Santen Pharmaceutical (Hong Kong) Limited",
++  "Sato Pharmaceutical (HK) Co Ltd",
++  "SB Pharma Limited",
++  "Schering-Plough SOL Ltd",
++  "Schwarz Pharma Hong Kong Ltd",
++  "Servier HK Ltd",
++  "Silroc International (HK) Ltd",
++  "Simcere Pharmaceutical Group Limited",
++  "SINCERITY (ASIA) COMPANY LIMITED",
++  "Sino Pacific Pharma Company Limited",
++  "Sino-Asia Pharmaceutical Supplies Ltd",
++  "Sky United Trading Limited",
++  "SMITH & NEPHEW LTD",
++  "Solvay Pharma",
++  "Stada Pharmaceuticals (Asia) Ltd",
++  "STAR MEDICAL SUPPLIES LTD",
++  "Strides Pharma Science Ltd, India",
++  "Strides Pharma UK Ltd",
++  "Sui Cheong Medical Co. Limited",
++  "Suntol Medical Limited",
++  "Surepharm Services Limited",
++  "SWEDISH TRADING COMPANY LIMITED",
++  "Swiss Pharmaceutical Co. Limited",
++  "Synco (HK) Ltd",
++  "Synmosa Biopharma (Hong Kong) Company Limited",
++  "TACK FUNG MEDICAL SUPPLIES CO",
++  "Taisho Pharmaceutical (HK) Ltd",
++  "TAKEDA PHARMACEUTICALS (HONG KONG) LIMITED",
++  "TCM Healthcare (London) Ltd",
++  "Teva Pharmaceutical Hong Kong O/B Teva Pharmaceutical Hong Kong Limited",
++  "THE BASE DEVELOPMENT LTD",
++  "THE INTERNATIONAL MEDICAL CO LTD",
++  "TODAY PHARMA COMPANY LIMITED",
++  "Tong Jum Chew PTE LTD",
++  "TONSWAY LIMITED",
++  "TREASURE MOUNTAIN DEVELOPMENT CO LTD",
++  "TRENTON-BOMA LTD",
++  "Troikaa Pharmaceutical Ltd",
++  "U.S. SUMMIT CO LTD",
++  "UCB Pharma Ltd",
++  "Unam Corp Ltd",
++  "UNAM CORPORATION LTD",
++  "Unicorn Laboratories O/B American Unicorn Laboratories Limited",
++  "UNIPHARM (HONG KONG) LIMITED",
++  "UNIPHARM TRADING CO",
++  "UNITED ITALIAN CORP (HK) LTD",
++  "UNIVERSAL PHARMACEUTICAL LABORATORIES LIMITED",
++  "Usana Health Sciences, Inc.",
++  "VAST RESOURCES PHARMACEUTICAL LTD",
++  "Viatris Healthcare Hong Kong Limited",
++  "VICKMANS LAB LTD",
++  "VIDA LABORATORIES LTD",
++  "VIEWBEST HOLDINGS LTD",
++  "VIMTECK INTERNATIONAL CO",
++  "WAH KIN PHARM PRODUCTS CO LTD",
++  "WAI LUN TRADING CO",
++  "WEIJIAN MEDICAL COMPANY LIMITED",
++  "WELL FAVOURED LTD",
++  "WELLDONE PHARMACEUTICALS LTD",
++  "WILCOME PHARMACEUTICAL CO LTD",
++  "WILSON TRADING CO LTD",
++  "Wings Pharmaceutical Ltd",
++  "WYETH (HK) LTD",
++  "YAT SENG TRADING CO",
++  "Yik Kwan Pharmaceuticals Co Ltd",
++  "Yiu Tak Pharmaceutical Trading Ltd",
++  "YUNG SHIN CO LTD",
++  "ZENFIELDS (H.K.) LIMITED",
++];
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 219dc7a..add94d1 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -21,7 +21,7 @@ import {
+   FormMessage,
+ } from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+-import { Textarea } from "@/components/ui/textarea.tsx";
++import ManufacturerPicker from "./manufacturer-picker.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -121,9 +121,9 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+           name="manufacturer"
+           render={({ field }) => (
+             <FormItem>
+-              <FormLabel>Manufacturer details</FormLabel>
++              <FormLabel>Manufacturer</FormLabel>
+               <FormControl>
+-                <Textarea {...field} rows={2} placeholder="Name, address, contact" />
++                <ManufacturerPicker value={field.value} onChange={field.onChange} />
+               </FormControl>
+               <FormMessage />
+             </FormItem>
+diff --git a/src/pages/inventory/_components/manufacturer-picker.tsx b/src/pages/inventory/_components/manufacturer-picker.tsx
+new file mode 100644
+index 0000000..19f8d5f
+--- /dev/null
++++ b/src/pages/inventory/_components/manufacturer-picker.tsx
+@@ -0,0 +1,76 @@
++import { useState } from "react";
++import { Check, ChevronsUpDown, Plus } from "lucide-react";
++import { Button } from "@/components/ui/button.tsx";
++import {
++  Command,
++  CommandEmpty,
++  CommandGroup,
++  CommandInput,
++  CommandItem,
++  CommandList,
++} from "@/components/ui/command.tsx";
++import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover.tsx";
++import { MANUFACTURERS } from "@/lib/manufacturers.ts";
++import { cn } from "@/lib/utils.ts";
++
++type Props = {
++  value: string;
++  onChange: (value: string) => void;
++};
++
++// Searchable list of known manufacturers. A name that isn't listed can still be used.
++export default function ManufacturerPicker({ value, onChange }: Props) {
++  const [open, setOpen] = useState(false);
++  const [search, setSearch] = useState("");
++  const typed = search.trim();
++  const exactMatch = MANUFACTURERS.some((m) => m.toLowerCase() === typed.toLowerCase());
++
++  const choose = (name: string) => {
++    onChange(name === value ? "" : name);
++    setSearch("");
++    setOpen(false);
++  };
++
++  return (
++    // modal keeps scrolling working inside the drug form dialog
++    <Popover open={open} onOpenChange={setOpen} modal>
++      <PopoverTrigger asChild>
++        <Button
++          type="button"
++          variant="secondary"
++          role="combobox"
++          aria-expanded={open}
++          className="h-auto min-h-9 w-full justify-between whitespace-normal text-left font-normal"
++        >
++          <span className={cn("min-w-0 flex-1", !value && "text-muted-foreground")}>
++            {value || "Search and select a manufacturer"}
++          </span>
++          <ChevronsUpDown className="shrink-0 opacity-50" />
++        </Button>
++      </PopoverTrigger>
++      <PopoverContent className="w-(--radix-popover-trigger-width) min-w-72 p-0" align="start">
++        <Command>
++          <CommandInput placeholder="Type to search…" value={search} onValueChange={setSearch} />
++          <CommandList className="max-h-72">
++            <CommandEmpty>No manufacturer found.</CommandEmpty>
++            {typed && !exactMatch && (
++              <CommandGroup>
++                <CommandItem value={`__custom__ ${typed}`} onSelect={() => choose(typed)} className="cursor-pointer">
++                  <Plus /> Use “{typed}”
++                </CommandItem>
++              </CommandGroup>
++            )}
++            <CommandGroup>
++              {MANUFACTURERS.map((name) => (
++                <CommandItem key={name} value={name} onSelect={() => choose(name)} className="cursor-pointer">
++                  <Check className={cn(value === name ? "opacity-100" : "opacity-0")} />
++                  {name}
++                </CommandItem>
++              ))}
++            </CommandGroup>
++          </CommandList>
++        </Command>
++      </PopoverContent>
++    </Popover>
++  );
++}

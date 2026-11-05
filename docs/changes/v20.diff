@@ -1,0 +1,40 @@
+diff --git a/convex/drugImportSeed.ts b/convex/drugImportSeed.ts
+index ba68e0c..b3dd8fe 100644
+--- a/convex/drugImportSeed.ts
++++ b/convex/drugImportSeed.ts
+@@ -1,26 +1,18 @@
+-import { v } from "convex/values";
+-import readXlsxFile from "read-excel-file/universal";
+ import { internal } from "./_generated/api";
+ import { internalAction } from "./_generated/server";
+-import { buildImportDrugs, sheetToRecords } from "./lib/drugImport";
++import { SEED_DRUGS } from "./drugImportSeedData";
+ 
+ const SEED_BATCH = 100;
+ 
+-// One-off: loads a hosted spreadsheet and adds drugs that are not saved yet (existing ones untouched)
+-export const seedFromUrl = internalAction({
+-  args: { url: v.string(), forms: v.array(v.string()) },
+-  handler: async (ctx, args): Promise<{ created: number; existing: number; failures: string[] }> => {
+-    if (!args.url.startsWith("https://hercules-cdn.com/")) throw new Error("Only Hercules file links are allowed");
+-    const res = await fetch(args.url);
+-    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+-    const sheets = await readXlsxFile(await res.arrayBuffer());
+-    const { records, missingColumns } = sheetToRecords(sheets[0]?.data ?? []);
+-    if (missingColumns.length > 0) throw new Error(`Missing columns: ${missingColumns.join(", ")}`);
+-    const { drugs } = buildImportDrugs(records, args.forms);
+-
++// One-off: adds the prepared Tablet/Capsule drugs that are not saved yet (existing ones untouched)
++export const seedPrepared = internalAction({
++  args: {},
++  handler: async (ctx): Promise<{ created: number; existing: number; failures: string[] }> => {
+     const total = { created: 0, existing: 0, failures: [] as string[] };
+-    for (let i = 0; i < drugs.length; i += SEED_BATCH) {
+-      const r = await ctx.runMutation(internal.drugImport.seedNewDrugs, { drugs: drugs.slice(i, i + SEED_BATCH) });
++    for (let i = 0; i < SEED_DRUGS.length; i += SEED_BATCH) {
++      const r = await ctx.runMutation(internal.drugImport.seedNewDrugs, {
++        drugs: SEED_DRUGS.slice(i, i + SEED_BATCH),
++      });
+       total.created += r.created;
+       total.existing += r.existing;
+       total.failures.push(...r.failures);

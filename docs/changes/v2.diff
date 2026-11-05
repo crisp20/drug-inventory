@@ -1,0 +1,568 @@
+diff --git a/convex/drugs.test.ts b/convex/drugs.test.ts
+index 6c34f4b..e8c1d7c 100644
+--- a/convex/drugs.test.ts
++++ b/convex/drugs.test.ts
+@@ -72,4 +72,12 @@ describe("drugs", () => {
+       owner.mutation(api.drugs.create, { ...drug, packages: [{ ...drug.packages[0], stock: -1 }] }),
+     ).rejects.toThrow(/Stock/);
+   });
++
++  it("allows package forms without a barcode on different drugs", async () => {
++    const { owner } = await setup();
++    const noBarcode = { ...drug.packages[0], barcode: "" };
++    await owner.mutation(api.drugs.create, { ...drug, packages: [noBarcode] });
++    await owner.mutation(api.drugs.create, { ...drug, drugId: "B2", packages: [noBarcode, noBarcode] });
++    expect(await owner.query(api.drugs.search, { term: "B2" })).toHaveLength(1);
++  });
+ });
+diff --git a/convex/lib/barcode.test.ts b/convex/lib/barcode.test.ts
+index 157a40d..2499f19 100644
+--- a/convex/lib/barcode.test.ts
++++ b/convex/lib/barcode.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import { extractGtin, formatPackageForm, normalizeBarcode } from "./barcode";
++import { barcodesMatch, extractGtin, formatPackageForm, normalizeBarcode } from "./barcode";
+ 
+ describe("normalizeBarcode", () => {
+   it("pads EAN-13 to GTIN-14 so it matches the GS1 form", () => {
+@@ -19,6 +19,17 @@ describe("normalizeBarcode", () => {
+   });
+ });
+ 
++describe("barcodesMatch", () => {
++  it("matches the plain barcode against its GS1 scan", () => {
++    expect(barcodesMatch("9312345678907", "(01)09312345678907(17)261231")).toBe(true);
++  });
++
++  it("rejects different codes and empty scans", () => {
++    expect(barcodesMatch("9312345678907", "9312345678914")).toBe(false);
++    expect(barcodesMatch("", "")).toBe(false);
++  });
++});
++
+ describe("formatPackageForm", () => {
+   it("formats qty/unit x count", () => {
+     expect(formatPackageForm({ qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10 })).toBe("10/Strip x10");
+diff --git a/convex/lib/barcode.ts b/convex/lib/barcode.ts
+index 2bc7b8d..d09a354 100644
+--- a/convex/lib/barcode.ts
++++ b/convex/lib/barcode.ts
+@@ -20,6 +20,12 @@ export function normalizeBarcode(raw: string): string {
+   return extractGtin(raw) ?? raw.trim().toUpperCase();
+ }
+ 
++// True when two scans refer to the same product (e.g. plain barcode vs GS1 code)
++export function barcodesMatch(a: string, b: string): boolean {
++  if (!a.trim() || !b.trim()) return false;
++  return normalizeBarcode(a) === normalizeBarcode(b);
++}
++
+ export const BASE_UNITS = ["Strip", "Box", "Bottle", "Bag"] as const;
+ export type BaseUnit = (typeof BASE_UNITS)[number];
+ 
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index 20ad236..9d7d95a 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -51,11 +51,13 @@ export function cleanDrugInput(input: DrugInput): DrugInput {
+ 
+   const seen = new Set<string>();
+   const packages = input.packages.map((p) => {
++    // An empty barcode means the medicine has no barcode (confirmed by the user)
+     const barcode = p.barcode.trim();
+-    if (!barcode) bad("Every package form needs a barcode");
+-    const key = normalizeBarcode(barcode);
+-    if (seen.has(key)) bad(`Barcode ${barcode} is listed twice`);
+-    seen.add(key);
++    if (barcode) {
++      const key = normalizeBarcode(barcode);
++      if (seen.has(key)) bad(`Barcode ${barcode} is listed twice`);
++      seen.add(key);
++    }
+     if (!isPositiveInt(p.qtyPerUnit)) bad("Quantity per base unit must be a whole number above 0");
+     if (!isPositiveInt(p.unitCount)) bad("Number of base units must be a whole number above 0");
+     if (!Number.isInteger(p.stock) || p.stock < 0) bad("Stock amount must be a whole number, 0 or more");
+@@ -93,6 +95,7 @@ export async function assertBarcodesFree(
+   drugRef?: Id<"drugs">,
+ ) {
+   for (const p of packages) {
++    if (!p.barcode) continue;
+     const existing = await ctx.db
+       .query("drugPackages")
+       .withIndex("by_barcodeKey", (q) => q.eq("barcodeKey", normalizeBarcode(p.barcode)))
+diff --git a/convex/schema/drugs.ts b/convex/schema/drugs.ts
+index ae70e00..a4e35f2 100644
+--- a/convex/schema/drugs.ts
++++ b/convex/schema/drugs.ts
+@@ -30,8 +30,9 @@ export const drugsTable = defineTable({
+ // One row per barcode. Each barcode has its own package form and stock amount.
+ export const drugPackagesTable = defineTable({
+   drugRef: v.id("drugs"),
++  // Empty string when the medicine has no barcode
+   barcode: v.string(),
+-  // Normalized lookup key (GTIN-14 for numeric codes)
++  // Normalized lookup key (GTIN-14 for numeric codes); empty when no barcode
+   barcodeKey: v.string(),
+   qtyPerUnit: v.number(),
+   baseUnit: baseUnit,
+diff --git a/src/pages/inventory/_components/barcode-confirm-entry.tsx b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+new file mode 100644
+index 0000000..1368f20
+--- /dev/null
++++ b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+@@ -0,0 +1,194 @@
++import { useCallback, useRef, useState, type KeyboardEvent } from "react";
++import { CheckCircle2, CircleAlert, Plus, ScanLine } from "lucide-react";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import {
++  AlertDialog,
++  AlertDialogAction,
++  AlertDialogCancel,
++  AlertDialogContent,
++  AlertDialogDescription,
++  AlertDialogFooter,
++  AlertDialogHeader,
++  AlertDialogTitle,
++} from "@/components/ui/alert-dialog.tsx";
++import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
++import { barcodesMatch, normalizeBarcode } from "@/convex/lib/barcode.ts";
++import { cn } from "@/lib/utils.ts";
++
++type Slot = "first" | "second";
++
++type Props = {
++  existingBarcodes: string[];
++  onAdd: (barcode: string) => void;
++};
++
++// Barcode must be scanned twice and match before a package form can be added.
++// Medicines without a barcode can be added after confirming a reminder.
++export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props) {
++  const [first, setFirst] = useState("");
++  const [second, setSecond] = useState("");
++  const [scanSlot, setScanSlot] = useState<Slot | null>(null);
++  const [askNoBarcode, setAskNoBarcode] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const firstRef = useRef<HTMLInputElement>(null);
++  const secondRef = useRef<HTMLInputElement>(null);
++
++  const bothFilled = first.trim() !== "" && second.trim() !== "";
++  const matched = barcodesMatch(first, second);
++  const isDuplicate =
++    matched && existingBarcodes.some((b) => b && normalizeBarcode(b) === normalizeBarcode(first));
++
++  const reset = () => {
++    setFirst("");
++    setSecond("");
++    setError(null);
++    firstRef.current?.focus();
++  };
++
++  const tryAdd = () => {
++    if (!first.trim()) {
++      setError("Scan the barcode first.");
++      firstRef.current?.focus();
++      return;
++    }
++    if (!second.trim()) {
++      setError("Scan the barcode a second time to confirm.");
++      secondRef.current?.focus();
++      return;
++    }
++    if (!matched) {
++      setError("The two scans do not match. Please scan again.");
++      setSecond("");
++      secondRef.current?.focus();
++      return;
++    }
++    if (isDuplicate) {
++      setError("This barcode is already listed below.");
++      return;
++    }
++    onAdd(first.trim());
++    reset();
++  };
++
++  // Barcode scanners type the code then press Enter; move along instead of submitting the form
++  const onKeyDown = (slot: Slot) => (e: KeyboardEvent<HTMLInputElement>) => {
++    if (e.key !== "Enter") return;
++    e.preventDefault();
++    if (slot === "first" && first.trim()) secondRef.current?.focus();
++    else if (slot === "second") tryAdd();
++  };
++
++  const handleDetected = useCallback(
++    (code: string) => {
++      setError(null);
++      if (scanSlot === "first") {
++        setFirst(code);
++        setTimeout(() => secondRef.current?.focus(), 0);
++      } else {
++        setSecond(code);
++      }
++      setScanSlot(null);
++    },
++    [scanSlot],
++  );
++
++  const scanField = (slot: Slot, value: string, setValue: (v: string) => void, label: string) => (
++    <div className="flex flex-1 gap-1.5">
++      <div className="relative flex-1">
++        <ScanLine className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-accent-foreground/70" />
++        <Input
++          ref={slot === "first" ? firstRef : secondRef}
++          value={value}
++          onChange={(e) => {
++            setValue(e.target.value);
++            setError(null);
++          }}
++          onKeyDown={onKeyDown(slot)}
++          placeholder={label}
++          aria-label={label}
++          className={cn(
++            "h-11 border-accent-foreground/20 bg-accent pl-9 font-mono text-accent-foreground placeholder:text-accent-foreground/60",
++            bothFilled && matched && !isDuplicate && "border-green-600 dark:border-green-400",
++            bothFilled && !matched && "border-destructive",
++          )}
++        />
++      </div>
++      <Button
++        type="button"
++        variant="secondary"
++        size="icon"
++        className="size-11"
++        onClick={() => setScanSlot(slot)}
++        aria-label={`Use camera for ${label.toLowerCase()}`}
++      >
++        <ScanLine />
++      </Button>
++    </div>
++  );
++
++  return (
++    <div className="space-y-2 rounded-xl border border-dashed p-3">
++      <div className="flex flex-col gap-2 sm:flex-row">
++        {scanField("first", first, setFirst, "Scan barcode")}
++        {scanField("second", second, setSecond, "Scan again to confirm")}
++        <Button type="button" className="h-11" onClick={tryAdd} disabled={!bothFilled}>
++          <Plus /> Add
++        </Button>
++      </div>
++
++      <div className="flex min-h-5 flex-wrap items-center justify-between gap-2 text-xs">
++        {error ? (
++          <span className="flex items-center gap-1 text-destructive">
++            <CircleAlert className="size-3.5" /> {error}
++          </span>
++        ) : bothFilled && matched && !isDuplicate ? (
++          <span className="flex items-center gap-1 font-medium text-green-700 dark:text-green-400">
++            <CheckCircle2 className="size-3.5" /> Barcodes match. Press Add.
++          </span>
++        ) : bothFilled && !matched ? (
++          <span className="flex items-center gap-1 text-destructive">
++            <CircleAlert className="size-3.5" /> The two scans do not match.
++          </span>
++        ) : (
++          <span className="text-muted-foreground">Scan the same barcode twice so we know it was read correctly.</span>
++        )}
++        <button
++          type="button"
++          onClick={() => setAskNoBarcode(true)}
++          className="cursor-pointer font-medium text-primary underline-offset-4 hover:underline"
++        >
++          No barcode?
++        </button>
++      </div>
++
++      <BarcodeScannerDialog
++        open={scanSlot !== null}
++        onOpenChange={(open) => !open && setScanSlot(null)}
++        onDetected={handleDetected}
++      />
++
++      <AlertDialog open={askNoBarcode} onOpenChange={setAskNoBarcode}>
++        <AlertDialogContent>
++          <AlertDialogHeader>
++            <AlertDialogTitle>Add without a barcode?</AlertDialogTitle>
++            <AlertDialogDescription>
++              Please check the packaging carefully. Only continue if this medicine has no barcode or GS1 code. Staff will need to find it by name or Drug ID instead of scanning.
++            </AlertDialogDescription>
++          </AlertDialogHeader>
++          <AlertDialogFooter>
++            <AlertDialogCancel>No, go back</AlertDialogCancel>
++            <AlertDialogAction
++              onClick={() => {
++                onAdd("");
++                reset();
++              }}
++            >
++              Yes, add without barcode
++            </AlertDialogAction>
++          </AlertDialogFooter>
++        </AlertDialogContent>
++      </AlertDialog>
++    </div>
++  );
++}
+diff --git a/src/pages/inventory/_components/drug-detail-sheet.tsx b/src/pages/inventory/_components/drug-detail-sheet.tsx
+index d8c3a60..dd7f441 100644
+--- a/src/pages/inventory/_components/drug-detail-sheet.tsx
++++ b/src/pages/inventory/_components/drug-detail-sheet.tsx
+@@ -71,7 +71,9 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+                   {drug.packages.map((p) => (
+                     <div key={p._id} className="flex items-center justify-between gap-3 p-3">
+                       <div className="min-w-0">
+-                        <div className="truncate font-mono text-sm">{p.barcode}</div>
++                        <div className="truncate font-mono text-sm">
++                          {p.barcode || <span className="font-sans italic text-muted-foreground">No barcode</span>}
++                        </div>
+                         <div className="text-sm text-muted-foreground">
+                           {formatPackageForm(p)} · {p.qtyPerUnit * p.unitCount} {drug.pieceName} each
+                         </div>
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 736e8a7..d15829e 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -26,7 +26,6 @@ import { Spinner } from "@/components/ui/spinner.tsx";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+ import {
+-  EMPTY_PACKAGE,
+   drugFormSchema,
+   type DrugFormInput,
+   type DrugFormValues,
+@@ -44,7 +43,7 @@ type Props = {
+ 
+ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+   if (!drug) {
+-    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: "tablets", packages: [{ ...EMPTY_PACKAGE }] };
++    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: "tablets", packages: [] };
+   }
+   return {
+     drugId: drug.drugId,
+@@ -142,9 +141,14 @@ function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void
+         <div className="space-y-2">
+           <div className="text-sm font-medium">Barcodes, package forms and stock</div>
+           <p className="text-xs text-muted-foreground">
+-            Package form is quantity per base unit x number of base units, e.g. 10/Strip x10. Stock is how many of that package form you hold.
++            Scan each barcode twice to confirm it, then fill in its package form (quantity per base unit x number of base units, e.g. 10/Strip x10) and how many you hold.
+           </p>
+           <PackageRowsEditor control={form.control} />
++          {form.formState.errors.packages?.root?.message || form.formState.errors.packages?.message ? (
++            <p className="text-sm text-destructive">
++              {form.formState.errors.packages?.root?.message ?? form.formState.errors.packages?.message}
++            </p>
++          ) : null}
+         </div>
+         <DialogFooter>
+           <Button type="button" variant="ghost" onClick={onDone}>
+diff --git a/src/pages/inventory/_components/package-rows-editor.tsx b/src/pages/inventory/_components/package-rows-editor.tsx
+index 6b1d2f1..dacdc74 100644
+--- a/src/pages/inventory/_components/package-rows-editor.tsx
++++ b/src/pages/inventory/_components/package-rows-editor.tsx
+@@ -1,5 +1,5 @@
+-import { useFieldArray, type Control } from "react-hook-form";
+-import { Plus, Trash2 } from "lucide-react";
++import { useFieldArray, useWatch, type Control } from "react-hook-form";
++import { Barcode, Trash2 } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+ import { FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+@@ -12,61 +12,72 @@ import {
+ } from "@/components/ui/select.tsx";
+ import { BASE_UNITS } from "@/convex/lib/barcode.ts";
+ import {
+-  EMPTY_PACKAGE,
++  newPackage,
+   type DrugFormInput,
+   type DrugFormValues,
+ } from "../_lib/drug-form-schema.ts";
++import BarcodeConfirmEntry from "./barcode-confirm-entry.tsx";
+ 
+ type Props = { control: Control<DrugFormInput, unknown, DrugFormValues> };
+ 
++const numberField = "h-10 bg-card text-center";
++const GRID = "sm:grid sm:grid-cols-[minmax(0,1fr)_4.5rem_6.5rem_4.5rem_5rem_2.5rem] sm:items-start sm:gap-2";
++
++function ColumnHeaders() {
++  return (
++    <div className={`hidden px-3 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground ${GRID}`}>
++      <span>Barcode</span>
++      <span className="text-center">Qty per</span>
++      <span>Base unit</span>
++      <span className="text-center">No. of</span>
++      <span className="text-center">Stock</span>
++      <span />
++    </div>
++  );
++}
++
+ export default function PackageRowsEditor({ control }: Props) {
+   const { fields, append, remove } = useFieldArray({ control, name: "packages" });
++  const barcodes = useWatch({ control, name: "packages" }).map((p) => p.barcode);
+ 
+   return (
+     <div className="space-y-3">
+-      {fields.map((field, index) => (
+-        <div key={field.id} className="space-y-3 rounded-xl border bg-muted/40 p-3">
+-          <div className="flex items-start gap-2">
+-            <FormField
+-              control={control}
+-              name={`packages.${index}.barcode`}
+-              render={({ field: f }) => (
+-                <FormItem className="flex-1">
+-                  <FormControl>
+-                    <Input {...f} placeholder="Barcode / GTIN e.g. 09312345678907" className="bg-card font-mono" />
+-                  </FormControl>
+-                  <FormMessage />
+-                </FormItem>
++      <BarcodeConfirmEntry existingBarcodes={barcodes} onAdd={(barcode) => append(newPackage(barcode))} />
++
++      {fields.length > 0 && <ColumnHeaders />}
++      <div className="space-y-2">
++        {fields.map((field, index) => (
++          <div key={field.id} className={`grid grid-cols-4 gap-2 rounded-xl border bg-muted/40 p-3 ${GRID}`}>
++            <div className="col-span-3 flex h-10 min-w-0 items-center gap-2 sm:col-span-1">
++              <Barcode className="size-4 shrink-0 text-muted-foreground" />
++              {field.barcode ? (
++                <span className="truncate font-mono text-sm">{field.barcode}</span>
++              ) : (
++                <span className="truncate text-sm italic text-muted-foreground">No barcode</span>
+               )}
+-            />
++            </div>
+             <Button
+               type="button"
+               variant="ghost"
+               size="icon"
+-              disabled={fields.length === 1}
++              className="justify-self-end sm:hidden"
+               onClick={() => remove(index)}
+-              aria-label="Remove barcode"
++              aria-label="Remove package form"
+             >
+               <Trash2 />
+             </Button>
+-          </div>
+-          <div className="flex flex-wrap items-start gap-2 text-sm">
+-            <span className="pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+-              Package form
+-            </span>
+             <FormField
+               control={control}
+               name={`packages.${index}.qtyPerUnit`}
+               render={({ field: f }) => (
+                 <FormItem>
+                   <FormControl>
+-                    <Input {...f} value={String(f.value)} inputMode="numeric" className="w-20 bg-card" aria-label="Quantity per base unit" />
++                    <Input {...f} value={String(f.value)} inputMode="numeric" className={numberField} aria-label="Quantity per base unit" />
+                   </FormControl>
+                   <FormMessage />
+                 </FormItem>
+               )}
+             />
+-            <span className="pt-2">/</span>
+             <FormField
+               control={control}
+               name={`packages.${index}.baseUnit`}
+@@ -74,7 +85,7 @@ export default function PackageRowsEditor({ control }: Props) {
+                 <FormItem>
+                   <Select value={f.value} onValueChange={f.onChange}>
+                     <FormControl>
+-                      <SelectTrigger className="w-28 bg-card" aria-label="Base unit">
++                      <SelectTrigger className="h-10 w-full bg-card" aria-label="Base unit">
+                         <SelectValue />
+                       </SelectTrigger>
+                     </FormControl>
+@@ -89,40 +100,43 @@ export default function PackageRowsEditor({ control }: Props) {
+                 </FormItem>
+               )}
+             />
+-            <span className="pt-2">x</span>
+             <FormField
+               control={control}
+               name={`packages.${index}.unitCount`}
+               render={({ field: f }) => (
+                 <FormItem>
+                   <FormControl>
+-                    <Input {...f} value={String(f.value)} inputMode="numeric" className="w-20 bg-card" aria-label="Number of base units" />
++                    <Input {...f} value={String(f.value)} inputMode="numeric" className={numberField} aria-label="Number of base units" />
+                   </FormControl>
+                   <FormMessage />
+                 </FormItem>
+               )}
+             />
+-            <span className="pl-2 pt-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+-              Stock
+-            </span>
+             <FormField
+               control={control}
+               name={`packages.${index}.stock`}
+               render={({ field: f }) => (
+                 <FormItem>
+                   <FormControl>
+-                    <Input {...f} value={String(f.value)} inputMode="numeric" className="w-24 bg-card" aria-label="Stock amount" />
++                    <Input {...f} value={String(f.value)} inputMode="numeric" className={`${numberField} font-bold`} aria-label="Stock amount" />
+                   </FormControl>
+                   <FormMessage />
+                 </FormItem>
+               )}
+             />
++            <Button
++              type="button"
++              variant="ghost"
++              size="icon"
++              className="hidden sm:inline-flex"
++              onClick={() => remove(index)}
++              aria-label="Remove package form"
++            >
++              <Trash2 />
++            </Button>
+           </div>
+-        </div>
+-      ))}
+-      <Button type="button" variant="secondary" size="sm" onClick={() => append({ ...EMPTY_PACKAGE })}>
+-        <Plus /> Add another barcode
+-      </Button>
++        ))}
++      </div>
+     </div>
+   );
+ }
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index bd12c8f..786dc3b 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -7,7 +7,8 @@ const wholeNumber = (min: number, label: string) =>
+ 
+ export const packageSchema = z.object({
+   packageId: z.custom<Id<"drugPackages">>().optional(),
+-  barcode: z.string().trim().min(1, "Barcode is required"),
++  // Empty when the medicine has no barcode (user confirmed via prompt)
++  barcode: z.string().trim(),
+   qtyPerUnit: wholeNumber(1, "Quantity"),
+   baseUnit: z.enum(BASE_UNITS),
+   unitCount: wholeNumber(1, "Units"),
+@@ -20,16 +21,12 @@ export const drugFormSchema = z.object({
+   brandName: z.string().trim(),
+   manufacturer: z.string().trim(),
+   pieceName: z.string().trim(),
+-  packages: z.array(packageSchema).min(1, "Add at least one barcode"),
++  packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });
+ 
+ export type DrugFormInput = z.input<typeof drugFormSchema>;
+ export type DrugFormValues = z.output<typeof drugFormSchema>;
+ 
+-export const EMPTY_PACKAGE: DrugFormInput["packages"][number] = {
+-  barcode: "",
+-  qtyPerUnit: 10,
+-  baseUnit: "Strip",
+-  unitCount: 10,
+-  stock: 0,
+-};
++export function newPackage(barcode: string): DrugFormInput["packages"][number] {
++  return { barcode, qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10, stock: 0 };
++}

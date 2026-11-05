@@ -1,0 +1,876 @@
+diff --git a/convex/activity.test.ts b/convex/activity.test.ts
+new file mode 100644
+index 0000000..7d828e9
+--- /dev/null
++++ b/convex/activity.test.ts
+@@ -0,0 +1,143 @@
++import { convexTest } from "convex-test";
++import { describe, expect, it } from "vitest";
++import { api } from "./_generated/api";
++import schema from "./schema";
++import { modules } from "./test.setup";
++
++const OWNER = {
++  tokenIdentifier: "iss|owner",
++  email: "hubert@activecaregroup.com",
++  name: "Hubert",
++};
++const STAFF = {
++  tokenIdentifier: "iss|staff",
++  email: "staff@example.com",
++  name: "Sam",
++};
++
++const drug = {
++  drugId: "PCM500",
++  name: "Paracetamol 500mg",
++  brandName: "Panadol",
++  manufacturer: "GSK",
++  pieceName: "tablets",
++  packages: [
++    {
++      barcode: "9312345678907",
++      qtyPerUnit: 10,
++      baseUnit: "Strip" as const,
++      unitCount: 10,
++      stock: 3,
++      imageIds: [],
++    },
++  ],
++};
++
++const PAGE = { numItems: 100, cursor: null };
++
++async function setup() {
++  const t = convexTest(schema, modules);
++  const owner = t.withIdentity(OWNER);
++  const staff = t.withIdentity(STAFF);
++  await owner.mutation(api.users.updateCurrentUser, {});
++  await staff.mutation(api.users.updateCurrentUser, {});
++  const [pending] = await owner.query(api.users.listByStatus, {
++    status: "pending",
++  });
++  await owner.mutation(api.users.updateAccess, {
++    userId: pending._id,
++    role: "staff",
++    status: "active",
++  });
++  const drugRef = await owner.mutation(api.drugs.create, drug);
++  const created = await owner.query(api.drugs.get, { id: drugRef });
++  return {
++    owner,
++    staff,
++    drugRef,
++    packageId: created!.packages[0]._id,
++    staffId: pending._id,
++  };
++}
++
++describe("Activity log", () => {
++  it("is only visible to admins", async () => {
++    const { staff } = await setup();
++    await expect(
++      staff.query(api.activity.list, { paginationOpts: PAGE }),
++    ).rejects.toThrow();
++  });
++
++  it("records added medicines and field edits with old and new values", async () => {
++    const { owner, drugRef, packageId } = await setup();
++    await owner.mutation(api.drugs.update, {
++      id: drugRef,
++      ...drug,
++      name: "Paracetamol 650mg",
++      packages: [{ ...drug.packages[0], packageId }],
++    });
++    const { page } = await owner.query(api.activity.list, {
++      category: "medicine",
++      paginationOpts: PAGE,
++    });
++    const edit = page.find((e) => e.changes?.some((c) => c.field === "Name"));
++    expect(edit?.changes).toContainEqual({
++      field: "Name",
++      before: "Paracetamol 500mg",
++      after: "Paracetamol 650mg",
++    });
++    expect(edit?.userName).toBe("Hubert");
++    expect(page.some((e) => e.action.toLowerCase().includes("add"))).toBe(true);
++  });
++
++  it("records stock movements and undos, filterable by user and medicine", async () => {
++    const { owner, staff, drugRef, packageId, staffId } = await setup();
++    await staff.mutation(api.stock.recordIn, {
++      packageId,
++      quantity: 4,
++      notes: "",
++    });
++    const movements = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: PAGE,
++    });
++    await owner.mutation(api.stock.undoMovement, {
++      movementId: movements.page[0]._id,
++      reason: "Wrong medicine",
++    });
++
++    const byStaff = await owner.query(api.activity.list, {
++      userId: staffId,
++      paginationOpts: PAGE,
++    });
++    expect(byStaff.page.map((e) => e.category)).toContain("stock_in");
++    expect(byStaff.page.every((e) => e.userName === "Sam")).toBe(true);
++
++    const undos = await owner.query(api.activity.list, {
++      drugId: drugRef,
++      category: "undo",
++      paginationOpts: PAGE,
++    });
++    expect(undos.page).toHaveLength(1);
++    expect(undos.page[0].userName).toBe("Hubert");
++  });
++
++  it("keeps the medicine name after the medicine is deleted", async () => {
++    const { owner, drugRef } = await setup();
++    await owner.mutation(api.drugs.remove, { id: drugRef });
++    const { page } = await owner.query(api.activity.list, {
++      category: "medicine",
++      paginationOpts: PAGE,
++    });
++    expect(page[0].drugName).toBe("Paracetamol 500mg");
++  });
++
++  it("filters by time period", async () => {
++    const { owner } = await setup();
++    const { page } = await owner.query(api.activity.list, {
++      until: "2000-01-01T00:00:00.000Z",
++      paginationOpts: PAGE,
++    });
++    expect(page).toHaveLength(0);
++  });
++});
+diff --git a/convex/activity.ts b/convex/activity.ts
+index 37300f1..c88a4c7 100644
+--- a/convex/activity.ts
++++ b/convex/activity.ts
+@@ -18,16 +18,23 @@ export const list = query({
+     until: v.optional(v.string()),
+     paginationOpts: paginationOptsValidator,
+   },
+-  handler: async (ctx, { category, drugId, userId, since, until, paginationOpts }) => {
++  handler: async (
++    ctx,
++    { category, drugId, userId, since, until, paginationOpts },
++  ) => {
+     await requireAdmin(ctx);
+     const table = ctx.db.query("activityLog");
+     const scoped = drugId
+-      ? table.withIndex("by_drug_and_occurredAt", (q) => withinPeriod(q.eq("drugRef", drugId), since, until))
++      ? table.withIndex("by_drug_and_occurredAt", (q) =>
++          withinPeriod(q.eq("drugRef", drugId), since, until),
++        )
+       : category
+         ? table.withIndex("by_category_and_occurredAt", (q) =>
+             withinPeriod(q.eq("category", category), since, until),
+           )
+-        : table.withIndex("by_occurredAt", (q) => withinPeriod(q, since, until));
++        : table.withIndex("by_occurredAt", (q) =>
++            withinPeriod(q, since, until),
++          );
+     return await scoped
+       .order("desc")
+       .filter((q) =>
+@@ -46,7 +53,10 @@ const BACKFILL_BATCH = 200;
+ // Skips entries already logged, so it is safe to run again.
+ export const backfillMovements = internalMutation({
+   args: { cursor: v.union(v.string(), v.null()) },
+-  handler: async (ctx, { cursor }): Promise<{ added: number; done: boolean }> => {
++  handler: async (
++    ctx,
++    { cursor },
++  ): Promise<{ added: number; done: boolean }> => {
+     const page = await ctx.db
+       .query("stockMovements")
+       .paginate({ numItems: BACKFILL_BATCH, cursor });
+@@ -66,7 +76,9 @@ export const backfillMovements = internalMutation({
+       }
+     }
+     if (!page.isDone) {
+-      await ctx.scheduler.runAfter(0, internal.activity.backfillMovements, { cursor: page.continueCursor });
++      await ctx.scheduler.runAfter(0, internal.activity.backfillMovements, {
++        cursor: page.continueCursor,
++      });
+     }
+     return { added, done: page.isDone };
+   },
+diff --git a/src/App.tsx b/src/App.tsx
+index 0b4b4ee..b7a60ea 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -3,6 +3,7 @@ import AppLayout from "./components/app-layout.tsx";
+ import { DefaultProviders } from "./components/providers/default.tsx";
+ import AuthCallback from "./pages/auth/Callback.tsx";
+ import Index from "./pages/Index.tsx";
++import LogPage from "./pages/log/page.tsx";
+ import NotFound from "./pages/NotFound.tsx";
+ import SettingsPage from "./pages/settings/page.tsx";
+ import StockInPage from "./pages/stock-in/page.tsx";
+@@ -21,6 +22,7 @@ export default function App() {
+             <Route path="/stock-out" element={<StockOutPage />} />
+             <Route path="/users" element={<UsersPage />} />
+             <Route path="/settings" element={<SettingsPage />} />
++            <Route path="/log" element={<LogPage />} />
+           </Route>
+           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+           <Route path="*" element={<NotFound />} />
+diff --git a/src/components/app-layout.tsx b/src/components/app-layout.tsx
+index 7154439..1e28669 100644
+--- a/src/components/app-layout.tsx
++++ b/src/components/app-layout.tsx
+@@ -1,7 +1,15 @@
+ import type { MouseEvent } from "react";
+ import { NavLink, Outlet, useNavigate } from "react-router-dom";
+ import { AuthLoading, Authenticated, Unauthenticated } from "convex/react";
+-import { ArrowDownToLine, ArrowUpFromLine, Boxes, Settings, Users, type LucideIcon } from "lucide-react";
++import {
++  ArrowDownToLine,
++  ArrowUpFromLine,
++  Boxes,
++  ScrollText,
++  Settings,
++  Users,
++  type LucideIcon,
++} from "lucide-react";
+ import { toast } from "sonner";
+ import { SignInButton } from "@/components/ui/signin.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+@@ -12,13 +20,19 @@ import { AwaitingApprovalScreen, SignedOutScreen } from "./access-screens.tsx";
+ import BrandLogo from "./brand-logo.tsx";
+ import { RootErrorBoundary } from "./root-error-boundary.tsx";
+ 
+-type NavItem = { label: string; icon: LucideIcon; to?: string; adminOnly?: boolean };
++type NavItem = {
++  label: string;
++  icon: LucideIcon;
++  to?: string;
++  adminOnly?: boolean;
++};
+ 
+ const NAV: NavItem[] = [
+   { label: "Inventory", icon: Boxes, to: "/" },
+   { label: "Stock In", icon: ArrowDownToLine, to: "/stock-in" },
+   { label: "Stock Out", icon: ArrowUpFromLine, to: "/stock-out" },
+   { label: "Users", icon: Users, to: "/users", adminOnly: true },
++  { label: "Log", icon: ScrollText, to: "/log", adminOnly: true },
+   { label: "Settings", icon: Settings, to: "/settings", adminOnly: true },
+ ];
+ 
+@@ -33,7 +47,11 @@ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
+       <button
+         type="button"
+         onClick={() => toast("Coming soon in a future milestone!")}
+-        className={cn(base, "cursor-pointer opacity-70 hover:opacity-100", !compact && "hover:bg-sidebar-accent")}
++        className={cn(
++          base,
++          "cursor-pointer opacity-70 hover:opacity-100",
++          !compact && "hover:bg-sidebar-accent",
++        )}
+       >
+         <item.icon className="size-5" />
+         {item.label}
+@@ -91,16 +109,27 @@ function Shell() {
+         </nav>
+         <div className="space-y-3 border-t border-sidebar-border pt-4">
+           <div className="px-2">
+-            <div className="truncate text-sm font-semibold">{user.name ?? user.email}</div>
++            <div className="truncate text-sm font-semibold">
++              {user.name ?? user.email}
++            </div>
+             <div className="text-xs capitalize opacity-70">{user.role}</div>
+           </div>
+-          <SignInButton variant="ghost" size="sm" className="w-full justify-start hover:bg-sidebar-accent hover:text-sidebar-foreground" />
++          <SignInButton
++            variant="ghost"
++            size="sm"
++            className="w-full justify-start hover:bg-sidebar-accent hover:text-sidebar-foreground"
++          />
+         </div>
+       </aside>
+       <div className="flex min-w-0 flex-1 flex-col">
+         <header className="flex items-center justify-between border-b bg-sidebar px-4 py-3 text-sidebar-foreground md:hidden">
+           <BrandLogo />
+-          <SignInButton variant="ghost" size="sm" showIcon={false} className="hover:bg-sidebar-accent hover:text-sidebar-foreground" />
++          <SignInButton
++            variant="ghost"
++            size="sm"
++            showIcon={false}
++            className="hover:bg-sidebar-accent hover:text-sidebar-foreground"
++          />
+         </header>
+         <main className="flex-1 overflow-auto pb-20 md:pb-0">
+           <RootErrorBoundary>
+diff --git a/src/pages/log/_components/activity-entry.tsx b/src/pages/log/_components/activity-entry.tsx
+new file mode 100644
+index 0000000..3f3c6f3
+--- /dev/null
++++ b/src/pages/log/_components/activity-entry.tsx
+@@ -0,0 +1,98 @@
++import { format } from "date-fns";
++import {
++  ArrowDownToLine,
++  ArrowUpFromLine,
++  FileUp,
++  Image,
++  Package,
++  Pill,
++  Settings,
++  Undo2,
++  Users,
++  type LucideIcon,
++} from "lucide-react";
++import type { Doc } from "@/convex/_generated/dataModel.d.ts";
++import type { ActivityCategory } from "@/convex/lib/activity.ts";
++import { cn } from "@/lib/utils.ts";
++import { categoryLabel } from "../_lib/export-log.ts";
++
++const ICONS: Record<ActivityCategory, LucideIcon> = {
++  medicine: Pill,
++  package: Package,
++  photo: Image,
++  import: FileUp,
++  stock_in: ArrowDownToLine,
++  stock_out: ArrowUpFromLine,
++  undo: Undo2,
++  user: Users,
++  settings: Settings,
++};
++
++const TONES: Partial<Record<ActivityCategory, string>> = {
++  stock_in: "bg-primary/10 text-primary",
++  stock_out: "bg-chart-3/15 text-chart-3",
++  undo: "bg-destructive/10 text-destructive",
++};
++
++export default function ActivityEntry({
++  entry,
++}: {
++  entry: Doc<"activityLog">;
++}) {
++  const Icon = ICONS[entry.category];
++  const when = new Date(entry.occurredAt);
++  return (
++    <li className="flex gap-3 px-4 py-3">
++      <div
++        className={cn(
++          "flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground",
++          TONES[entry.category],
++        )}
++      >
++        <Icon className="size-4" />
++      </div>
++      <div className="min-w-0 flex-1 space-y-1">
++        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
++          <p className="min-w-0 break-words font-semibold">{entry.summary}</p>
++          <time
++            dateTime={entry.occurredAt}
++            className="shrink-0 text-xs text-muted-foreground"
++          >
++            {format(when, "d MMM yyyy, h:mm a")}
++          </time>
++        </div>
++        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
++          <span className="rounded-md bg-muted px-1.5 py-0.5 font-medium text-foreground">
++            {categoryLabel(entry.category)}
++          </span>
++          {entry.drugName && (
++            <span className="min-w-0 break-words">
++              {entry.drugCode ? `${entry.drugCode} · ` : ""}
++              {entry.drugName}
++            </span>
++          )}
++          <span>by {entry.userName}</span>
++        </div>
++        {entry.detail && (
++          <p className="break-words text-sm text-muted-foreground">
++            {entry.detail}
++          </p>
++        )}
++        {entry.changes && entry.changes.length > 0 && (
++          <ul className="space-y-0.5 rounded-lg bg-muted/50 p-2 text-sm">
++            {entry.changes.map((c, i) => (
++              <li key={`${c.field}-${i}`} className="break-words">
++                <span className="font-medium">{c.field}:</span>{" "}
++                <span className="text-muted-foreground line-through decoration-muted-foreground/50">
++                  {c.before || "(empty)"}
++                </span>{" "}
++                <span className="text-muted-foreground">→</span>{" "}
++                <span>{c.after || "(empty)"}</span>
++              </li>
++            ))}
++          </ul>
++        )}
++      </div>
++    </li>
++  );
++}
+diff --git a/src/pages/log/_components/log-filter-bar.tsx b/src/pages/log/_components/log-filter-bar.tsx
+new file mode 100644
+index 0000000..99151d9
+--- /dev/null
++++ b/src/pages/log/_components/log-filter-bar.tsx
+@@ -0,0 +1,134 @@
++import { useQuery } from "convex/react";
++import { RotateCcw } from "lucide-react";
++import { api } from "@/convex/_generated/api.js";
++import { ACTIVITY_CATEGORIES } from "@/convex/lib/activity.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import {
++  NativeSelect,
++  NativeSelectOption,
++} from "@/components/ui/native-select.tsx";
++import MedicineFilter from "@/components/stock/medicine-filter.tsx";
++import { PERIODS } from "@/components/stock/movement-period.ts";
++import type { LogFilters } from "../_lib/log-filters.ts";
++
++type Props = {
++  value: LogFilters;
++  onChange: (next: LogFilters) => void;
++  onReset: () => void;
++  isFiltered: boolean;
++};
++
++const selectClass = "h-9 cursor-pointer bg-card";
++
++export default function LogFilterBar({
++  value,
++  onChange,
++  onReset,
++  isFiltered,
++}: Props) {
++  const people = useQuery(api.users.listPeople, {});
++  const set = (patch: Partial<LogFilters>) => onChange({ ...value, ...patch });
++  const { period } = value;
++
++  return (
++    <div className="space-y-2 rounded-xl border bg-muted/40 p-2">
++      <div className="flex flex-wrap items-center gap-2">
++        <NativeSelect
++          aria-label="Time period"
++          className={selectClass}
++          value={period.value}
++          onChange={(e) => {
++            const next = PERIODS.find((p) => p.value === e.target.value);
++            if (next) set({ period: { ...period, value: next.value } });
++          }}
++        >
++          {PERIODS.map((p) => (
++            <NativeSelectOption key={p.value} value={p.value}>
++              {p.label}
++            </NativeSelectOption>
++          ))}
++        </NativeSelect>
++
++        <NativeSelect
++          aria-label="Activity type"
++          className={selectClass}
++          value={value.category}
++          onChange={(e) => {
++            const c = ACTIVITY_CATEGORIES.find(
++              (x) => x.value === e.target.value,
++            );
++            set({ category: c?.value ?? "all" });
++          }}
++        >
++          <NativeSelectOption value="all">All activity</NativeSelectOption>
++          {ACTIVITY_CATEGORIES.map((c) => (
++            <NativeSelectOption key={c.value} value={c.value}>
++              {c.label}
++            </NativeSelectOption>
++          ))}
++        </NativeSelect>
++
++        <NativeSelect
++          aria-label="User"
++          className={selectClass}
++          value={value.userId}
++          onChange={(e) => {
++            const id = people?.find((p) => p._id === e.target.value)?._id;
++            set({ userId: id ?? "all" });
++          }}
++        >
++          <NativeSelectOption value="all">Everyone</NativeSelectOption>
++          {(people ?? []).map((p) => (
++            <NativeSelectOption key={p._id} value={p._id}>
++              {p.name}
++            </NativeSelectOption>
++          ))}
++        </NativeSelect>
++
++        <MedicineFilter
++          value={value.medicine}
++          onChange={(drug) => set({ medicine: drug })}
++        />
++
++        {isFiltered && (
++          <Button
++            type="button"
++            variant="ghost"
++            size="sm"
++            className="h-9 gap-1.5"
++            onClick={onReset}
++          >
++            <RotateCcw className="size-3.5" />
++            Clear filters
++          </Button>
++        )}
++      </div>
++
++      {period.value === "custom" && (
++        <div className="flex flex-wrap items-center gap-2 text-sm">
++          <span className="text-muted-foreground">From</span>
++          <Input
++            type="date"
++            aria-label="From date"
++            className="h-9 w-auto bg-card"
++            value={period.from}
++            max={period.to || undefined}
++            onChange={(e) =>
++              set({ period: { ...period, from: e.target.value } })
++            }
++          />
++          <span className="text-muted-foreground">to</span>
++          <Input
++            type="date"
++            aria-label="To date"
++            className="h-9 w-auto bg-card"
++            value={period.to}
++            min={period.from || undefined}
++            onChange={(e) => set({ period: { ...period, to: e.target.value } })}
++          />
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/pages/log/_lib/export-log.ts b/src/pages/log/_lib/export-log.ts
+new file mode 100644
+index 0000000..809a8bc
+--- /dev/null
++++ b/src/pages/log/_lib/export-log.ts
+@@ -0,0 +1,82 @@
++import Papa from "papaparse";
++import { format } from "date-fns";
++import type { ConvexReactClient } from "convex/react";
++import { api } from "@/convex/_generated/api.js";
++import type { Doc } from "@/convex/_generated/dataModel.d.ts";
++import { ACTIVITY_CATEGORIES } from "@/convex/lib/activity.ts";
++import type { LogQueryArgs } from "./log-filters.ts";
++
++const PAGE_SIZE = 500;
++// Safety cap so a huge export cannot run forever
++export const MAX_EXPORT_ROWS = 50_000;
++
++export function categoryLabel(value: string): string {
++  return ACTIVITY_CATEGORIES.find((c) => c.value === value)?.label ?? value;
++}
++
++export function formatChanges(entry: Doc<"activityLog">): string {
++  return (entry.changes ?? [])
++    .map(
++      (c) => `${c.field}: ${c.before || "(empty)"} → ${c.after || "(empty)"}`,
++    )
++    .join("; ");
++}
++
++// Spreadsheet formulas in cells are an injection risk; prefix them
++function safeCell(value: string): string {
++  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
++}
++
++function toRow(e: Doc<"activityLog">) {
++  return {
++    Date: format(new Date(e.occurredAt), "yyyy-MM-dd HH:mm:ss"),
++    Type: categoryLabel(e.category),
++    Action: e.action,
++    Summary: e.summary,
++    "Drug ID": e.drugCode ?? "",
++    Medicine: e.drugName ?? "",
++    Details: e.detail ?? "",
++    Changes: formatChanges(e),
++    User: e.userName,
++  };
++}
++
++export async function fetchAllEntries(
++  convex: ConvexReactClient,
++  args: LogQueryArgs,
++): Promise<{ entries: Doc<"activityLog">[]; truncated: boolean }> {
++  const entries: Doc<"activityLog">[] = [];
++  let cursor: string | null = null;
++  while (entries.length < MAX_EXPORT_ROWS) {
++    const res: {
++      page: Doc<"activityLog">[];
++      isDone: boolean;
++      continueCursor: string;
++    } = await convex.query(api.activity.list, {
++      ...args,
++      paginationOpts: { numItems: PAGE_SIZE, cursor },
++    });
++    entries.push(...res.page);
++    if (res.isDone) return { entries, truncated: false };
++    cursor = res.continueCursor;
++  }
++  return { entries: entries.slice(0, MAX_EXPORT_ROWS), truncated: true };
++}
++
++export function downloadLogCsv(entries: Doc<"activityLog">[]) {
++  const rows = entries.map((e) => {
++    const row = toRow(e);
++    return Object.fromEntries(
++      Object.entries(row).map(([k, v]) => [k, safeCell(v)]),
++    );
++  });
++  // BOM so Excel reads Chinese characters correctly
++  const csv = "\uFEFF" + Papa.unparse(rows);
++  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
++  const url = URL.createObjectURL(blob);
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = `acp-log-${format(new Date(), "yyyy-MM-dd")}.csv`;
++  a.click();
++  URL.revokeObjectURL(url);
++}
+diff --git a/src/pages/log/_lib/log-filters.ts b/src/pages/log/_lib/log-filters.ts
+new file mode 100644
+index 0000000..c6e2845
+--- /dev/null
++++ b/src/pages/log/_lib/log-filters.ts
+@@ -0,0 +1,56 @@
++import { useState } from "react";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import type { ActivityCategory } from "@/convex/lib/activity.ts";
++import {
++  ALL_TIME,
++  periodRange,
++  type Period,
++} from "@/components/stock/movement-period.ts";
++import type { DrugWithDetails } from "@/lib/drug-types.ts";
++
++export type LogFilters = {
++  period: Period;
++  userId: Id<"users"> | "all";
++  category: ActivityCategory | "all";
++  medicine: DrugWithDetails | null;
++};
++
++export type LogQueryArgs = {
++  category?: ActivityCategory;
++  drugId?: Id<"drugs">;
++  userId?: Id<"users">;
++  since?: string;
++  until?: string;
++};
++
++const CLEARED: LogFilters = {
++  period: ALL_TIME,
++  userId: "all",
++  category: "all",
++  medicine: null,
++};
++
++export function toQueryArgs(f: LogFilters): LogQueryArgs {
++  return {
++    ...periodRange(f.period),
++    category: f.category === "all" ? undefined : f.category,
++    drugId: f.medicine?._id,
++    userId: f.userId === "all" ? undefined : f.userId,
++  };
++}
++
++export function useLogFilters() {
++  const [filters, setFilters] = useState(CLEARED);
++  const isFiltered =
++    filters.period.value !== "all" ||
++    filters.userId !== "all" ||
++    filters.category !== "all" ||
++    filters.medicine !== null;
++  return {
++    filters,
++    setFilters,
++    reset: () => setFilters(CLEARED),
++    isFiltered,
++    args: toQueryArgs(filters),
++  };
++}
+diff --git a/src/pages/log/page.tsx b/src/pages/log/page.tsx
+new file mode 100644
+index 0000000..0fc5821
+--- /dev/null
++++ b/src/pages/log/page.tsx
+@@ -0,0 +1,167 @@
++import { useState } from "react";
++import { useConvex, usePaginatedQuery } from "convex/react";
++import { Navigate } from "react-router-dom";
++import { Download, ScrollText } from "lucide-react";
++import { toast } from "sonner";
++import { api } from "@/convex/_generated/api.js";
++import { Button } from "@/components/ui/button.tsx";
++import {
++  Empty,
++  EmptyDescription,
++  EmptyHeader,
++  EmptyMedia,
++  EmptyTitle,
++} from "@/components/ui/empty.tsx";
++import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import PageHeader from "@/components/page-header.tsx";
++import { useCurrentUser } from "@/hooks/use-current-user.ts";
++import { errorMessage } from "@/lib/errors.ts";
++import ActivityEntry from "./_components/activity-entry.tsx";
++import LogFilterBar from "./_components/log-filter-bar.tsx";
++import {
++  downloadLogCsv,
++  fetchAllEntries,
++  MAX_EXPORT_ROWS,
++} from "./_lib/export-log.ts";
++import { useLogFilters, type LogQueryArgs } from "./_lib/log-filters.ts";
++
++const PAGE = 50;
++
++export default function LogPage() {
++  const me = useCurrentUser();
++  if (me === undefined) return null;
++  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
++  return <LogView />;
++}
++
++function LogView() {
++  const { filters, setFilters, reset, isFiltered, args } = useLogFilters();
++  return (
++    <div className="mx-auto max-w-4xl space-y-4 p-4 md:p-8">
++      <div className="flex flex-wrap items-start justify-between gap-3">
++        <PageHeader
++          title="Log"
++          description="Every change made in ACP Stock, newest first."
++        />
++        <ExportButton args={args} />
++      </div>
++      <LogFilterBar
++        value={filters}
++        onChange={setFilters}
++        onReset={reset}
++        isFiltered={isFiltered}
++      />
++      <LogList args={args} isFiltered={isFiltered} onReset={reset} />
++    </div>
++  );
++}
++
++function ExportButton({ args }: { args: LogQueryArgs }) {
++  const convex = useConvex();
++  const [busy, setBusy] = useState(false);
++  const handleExport = async () => {
++    setBusy(true);
++    try {
++      const { entries, truncated } = await fetchAllEntries(convex, args);
++      if (entries.length === 0) {
++        toast("Nothing to download for these filters");
++        return;
++      }
++      downloadLogCsv(entries);
++      if (truncated) {
++        toast.warning(
++          `Only the newest ${MAX_EXPORT_ROWS.toLocaleString()} entries were included. Narrow the time period to get the rest.`,
++        );
++      }
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not download the log"));
++    } finally {
++      setBusy(false);
++    }
++  };
++  return (
++    <Button
++      type="button"
++      variant="secondary"
++      onClick={() => void handleExport()}
++      disabled={busy}
++    >
++      {busy ? <Spinner /> : <Download className="size-4" />}
++      Download CSV
++    </Button>
++  );
++}
++
++type ListProps = {
++  args: LogQueryArgs;
++  isFiltered: boolean;
++  onReset: () => void;
++};
++
++function LogList({ args, isFiltered, onReset }: ListProps) {
++  const { results, status, loadMore } = usePaginatedQuery(
++    api.activity.list,
++    args,
++    { initialNumItems: PAGE },
++  );
++
++  if (status === "LoadingFirstPage") {
++    return (
++      <div className="space-y-2">
++        {Array.from({ length: 5 }).map((_, i) => (
++          <Skeleton key={i} className="h-20 w-full rounded-xl" />
++        ))}
++      </div>
++    );
++  }
++
++  if (status === "Exhausted" && results.length === 0) {
++    return (
++      <Empty className="rounded-xl border">
++        <EmptyHeader>
++          <EmptyMedia variant="icon">
++            <ScrollText />
++          </EmptyMedia>
++          <EmptyTitle>
++            {isFiltered ? "No matching activity" : "No activity yet"}
++          </EmptyTitle>
++          <EmptyDescription>
++            {isFiltered
++              ? "Try a longer time period or clear the filters."
++              : "Changes to medicines, stock and users will appear here."}
++          </EmptyDescription>
++        </EmptyHeader>
++        {isFiltered && (
++          <Button size="sm" variant="secondary" onClick={onReset}>
++            Clear filters
++          </Button>
++        )}
++      </Empty>
++    );
++  }
++
++  return (
++    <div className="space-y-3">
++      {results.length > 0 && (
++        <ul className="divide-y overflow-hidden rounded-xl border bg-card">
++          {results.map((e) => (
++            <ActivityEntry key={e._id} entry={e} />
++          ))}
++        </ul>
++      )}
++      {(status === "CanLoadMore" || status === "LoadingMore") && (
++        <div className="flex justify-center">
++          <Button
++            variant="secondary"
++            disabled={status === "LoadingMore"}
++            onClick={() => loadMore(PAGE)}
++          >
++            {status === "LoadingMore" && <Spinner />}
++            Load more
++          </Button>
++        </div>
++      )}
++    </div>
++  );
++}

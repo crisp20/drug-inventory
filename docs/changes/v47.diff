@@ -1,0 +1,337 @@
+diff --git a/convex/canister.test.ts b/convex/canister.test.ts
+index f8eaa6a..81e106f 100644
+--- a/convex/canister.test.ts
++++ b/convex/canister.test.ts
+@@ -107,6 +107,28 @@ describe("Batch and expiry on any Stock Out", () => {
+       }),
+     ).rejects.toThrow(/valid expiry/);
+   });
++
++  it("save a mismatched scan readably in the history and Log", async () => {
++    const { owner, staff, packageId } = await setup();
++    await staff.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++      batch: "PW5322",
++      mismatchedScan: "\u001d0103838957097319\u001d10PW5322\u001d",
++    });
++    const { page } = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(page[0].mismatchedScan).toBe("0103838957097319 | 10PW5322");
++    const log = await owner.query(api.activity.list, {
++      category: "stock_out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(log.page[0].detail).toContain(
++      "Scanned code did not match: 0103838957097319 | 10PW5322",
++    );
++  });
+ });
+ 
+ describe("Canister details on Stock Out", () => {
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index bcaf9b3..971091e 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -1,7 +1,11 @@
+ import type { MutationCtx } from "../_generated/server";
+ import type { Doc, Id } from "../_generated/dataModel";
+ import { formatPackageForm } from "./barcode";
+-import { formatBatchExpiry, formatCanister } from "./canister";
++import {
++  formatBatchExpiry,
++  formatCanister,
++  formatMismatchedScan,
++} from "./canister";
+ import type { PackageInput } from "./drugs";
+ 
+ // Filter / badge labels for each kind of activity (matches schema/activity.ts)
+@@ -336,6 +340,7 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
+         `Stock ${m.stockBefore} → ${m.stockAfter}`,
+         m.reason ?? "",
+         m.canister ? formatCanister(m.canister) : formatBatchExpiry(m),
++        formatMismatchedScan(m.mismatchedScan),
+         m.notes,
+       ]
+         .filter(Boolean)
+diff --git a/convex/lib/canister.ts b/convex/lib/canister.ts
+index b8303ab..a7d0073 100644
+--- a/convex/lib/canister.ts
++++ b/convex/lib/canister.ts
+@@ -87,6 +87,28 @@ export function cleanBatchExpiry(raw: BatchExpiry): BatchExpiry {
+   return { batch, expiry };
+ }
+ 
++export const MAX_SCANNED_CODE_LENGTH = 200;
++
++// A GS1 code whose product didn't match the package form but was used anyway.
++// Hidden separators become " | " so the saved text is readable in the Log and CSV.
++export function cleanMismatchedScan(raw?: string): string | undefined {
++  const readable = [...(raw ?? "")]
++    .map((c) => (c.charCodeAt(0) < 0x20 ? " | " : c))
++    .join("");
++  const code = readable
++    .trim()
++    .replace(/^\|\s*|\s*\|$/g, "")
++    .replace(/(\s*\|\s*)+/g, " | ");
++  if (!code) return undefined;
++  if (code.length > MAX_SCANNED_CODE_LENGTH)
++    bad(`Scanned code can be at most ${MAX_SCANNED_CODE_LENGTH} characters`);
++  return code;
++}
++
++export function formatMismatchedScan(code?: string): string {
++  return code ? `Scanned code did not match: ${code}` : "";
++}
++
+ // "Batch X · Exp Y" for entries without a canister (canister text already has both)
+ export function formatBatchExpiry(m: BatchExpiry): string {
+   return [m.batch && `Batch ${m.batch}`, m.expiry && `Exp ${m.expiry}`]
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index d02b809..d1e7e3f 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -31,6 +31,9 @@ export const stockMovementsTable = defineTable({
+   // Stock Out: batch and expiry (calendar day YYYY-MM-DD) of the stock taken, if entered
+   batch: v.optional(v.string()),
+   expiry: v.optional(v.string()),
++  // Stock Out: GS1 code scanned for batch/expiry whose product code didn't match
++  // this package form, kept because the user chose to continue anyway
++  mismatchedScan: v.optional(v.string()),
+   // Stock Out into a canister (only when "Fill canister" was switched on)
+   canister: v.optional(
+     v.object({
+diff --git a/convex/stock.ts b/convex/stock.ts
+index e080eda..2a685dc 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -8,6 +8,7 @@ import {
+   canUseCanister,
+   cleanBatchExpiry,
+   cleanCanisterInput,
++  cleanMismatchedScan,
+   type BatchExpiry,
+   type CanisterInput,
+ } from "./lib/canister";
+@@ -37,6 +38,7 @@ async function recordMovement(
+   reason?: string,
+   canister?: CanisterInput,
+   batchExpiry: BatchExpiry = {},
++  mismatchedScan?: string,
+ ) {
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+@@ -74,6 +76,7 @@ async function recordMovement(
+     reason,
+     batch: batchExpiry.batch,
+     expiry: batchExpiry.expiry,
++    mismatchedScan,
+     canister,
+     userRef: user._id,
+     userName: user.name ?? user.email ?? "Unknown user",
+@@ -100,6 +103,7 @@ export const recordOut = mutation({
+     reason: v.string(),
+     batch: v.optional(v.string()),
+     expiry: v.optional(v.string()),
++    mismatchedScan: v.optional(v.string()),
+     canister: v.optional(
+       v.object({
+         batch: v.string(),
+@@ -111,7 +115,7 @@ export const recordOut = mutation({
+   },
+   handler: async (
+     ctx,
+-    { packageId, reason, canister, batch, expiry, ...rest },
++    { packageId, reason, canister, batch, expiry, mismatchedScan, ...rest },
+   ) => {
+     let cleanedCanister: CanisterInput | undefined;
+     if (canister) {
+@@ -137,6 +141,7 @@ export const recordOut = mutation({
+       cleanReason(reason),
+       cleanedCanister,
+       batchExpiry,
++      cleanMismatchedScan(mismatchedScan),
+     );
+   },
+ });
+diff --git a/src/components/stock/batch-expiry-fields.tsx b/src/components/stock/batch-expiry-fields.tsx
+index a4d962c..b7cedd3 100644
+--- a/src/components/stock/batch-expiry-fields.tsx
++++ b/src/components/stock/batch-expiry-fields.tsx
+@@ -18,6 +18,7 @@ import {
+ import { Input } from "@/components/ui/input.tsx";
+ import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
+ import { useScannerInput } from "@/hooks/use-scanner-input.ts";
++import { useConfirm } from "@/hooks/use-confirm.ts";
+ import type {
+   MovementFormInput,
+   MovementFormValues,
+@@ -46,6 +47,10 @@ export default function BatchExpiryFields({
+ }: Props) {
+   const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
+   const expiry = useWatch({ control: form.control, name: "expiry" });
++  const mismatchedScan = useWatch({
++    control: form.control,
++    name: "mismatchedScan",
++  });
+   // Last scanned expiry that was refused because it had passed
+   const [expiredScan, setExpiredScan] = useState(scannedExpired);
+   const today = toCalendarDay(new Date());
+@@ -57,6 +62,18 @@ export default function BatchExpiryFields({
+   return (
+     <div className="space-y-3">
+       <Gs1ScanBox packageBarcode={packageBarcode} onExpired={setExpiredScan} />
++      {mismatchedScan && (
++        <div
++          role="status"
++          className="flex items-start gap-2 rounded-lg bg-orange-500/10 px-3 py-2 text-sm font-medium text-orange-700 dark:text-orange-300"
++        >
++          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
++          <span>
++            Using a scanned code that did not match this package. It will be
++            noted in the Log.
++          </span>
++        </div>
++      )}
+       {expiredScan && !expiry && (
+         <div
+           role="alert"
+@@ -126,6 +143,7 @@ function Gs1ScanBox({
+   onExpired: (expiry: string | null) => void;
+ }) {
+   const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
++  const confirm = useConfirm();
+   const [value, setValue] = useState("");
+   const [camera, setCamera] = useState(false);
+   const {
+@@ -135,7 +153,7 @@ function Gs1ScanBox({
+     display,
+   } = useScannerInput(setValue);
+ 
+-  const apply = (code: string) => {
++  const apply = async (code: string) => {
+     const data = parseGs1(code);
+     setValue("");
+     if (!data || (!data.batch && !data.expiry)) {
+@@ -144,17 +162,28 @@ function Gs1ScanBox({
+       });
+       return;
+     }
+-    if (
+-      data.gtin &&
+-      packageBarcode &&
+-      !barcodesMatch(data.gtin, packageBarcode)
+-    ) {
+-      toast.error("This code is for a different product", {
+-        description: "Check you scanned the box for the selected package form.",
++    const mismatch =
++      !!data.gtin &&
++      !!packageBarcode &&
++      !barcodesMatch(data.gtin, packageBarcode);
++    if (mismatch) {
++      // Some makers print a different product code in the square code than on
++      // the ordinary barcode, so let the user decide
++      const ok = await confirm({
++        title: "This code doesn't match the selected package",
++        description: `The scanned product code (${data.gtin}) is different from this package form's barcode (${packageBarcode}). Check it is the right box. If you continue, the Stock Out will be marked "Scanned code did not match" and the scan will be saved in the Log.`,
++        confirmLabel: "Continue anyway",
++        cancelLabel: "Cancel and scan again",
+       });
+-      return;
++      if (!ok) {
++        inputRef.current?.focus();
++        return;
++      }
+     }
+     const opts = { shouldDirty: true, shouldValidate: true };
++    form.setValue("mismatchedScan", mismatch ? code : "", {
++      shouldDirty: true,
++    });
+     if (data.batch) form.setValue("batch", data.batch, opts);
+     if (data.expiry && data.expiry < toCalendarDay(new Date())) {
+       // Expired: keep Expiry empty so this box can't be recorded with it
+@@ -176,7 +205,7 @@ function Gs1ScanBox({
+     // Enter here fills the fields; it must not record the Stock Out
+     e.preventDefault();
+     const code = rebuilt ?? e.currentTarget.value;
+-    if (code.trim()) apply(code);
++    if (code.trim()) void apply(code);
+   };
+ 
+   return (
+@@ -204,7 +233,7 @@ function Gs1ScanBox({
+         onOpenChange={setCamera}
+         onDetected={(code) => {
+           setCamera(false);
+-          apply(code);
++          void apply(code);
+         }}
+       />
+     </div>
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index c74722e..fd2a116 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -46,6 +46,8 @@ export function movementFormSchema(kind: MovementKind) {
+       canisterOn: z.boolean(),
+       batch: z.string().trim(),
+       expiry: z.string(),
++      // GS1 code used even though its product didn't match (set by the scan box)
++      mismatchedScan: z.string(),
+       canisterQty: z.string(),
+       canisterType: z.string(),
+     })
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 6ba8265..4d28348 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -121,6 +121,7 @@ export default function MovementForm({
+       canisterOn: false,
+       batch: scanned?.batch ?? "",
+       expiry: scannedExpired ? "" : (scanned?.expiry ?? ""),
++      mismatchedScan: "",
+       canisterQty: "",
+       canisterType: String(DEFAULT_CANISTER_TYPE),
+     },
+@@ -169,6 +170,7 @@ export default function MovementForm({
+     canisterOn,
+     batch,
+     expiry,
++    mismatchedScan,
+     canisterQty,
+     canisterType,
+     ...values
+@@ -219,7 +221,14 @@ export default function MovementForm({
+       const result =
+         kind === "in"
+           ? await recordIn(args)
+-          : await recordOut({ ...args, reason, batch, expiry, canister });
++          : await recordOut({
++              ...args,
++              reason,
++              batch,
++              expiry,
++              canister,
++              mismatchedScan: mismatchedScan || undefined,
++            });
+       toast.success(
+         `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
+         {
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index a74a87e..ab1a1b1 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -176,6 +176,11 @@ export default function MovementLog({
+                     .join(" · ")}
+                 </p>
+               )}
++              {m.mismatchedScan && (
++                <p className="break-all text-xs font-medium text-orange-700 dark:text-orange-300">
++                  Scanned code did not match: {m.mismatchedScan}
++                </p>
++              )}
+               {m.notes && (
+                 <p className="whitespace-pre-line text-sm">{m.notes}</p>
+               )}

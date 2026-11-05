@@ -16,6 +16,7 @@ import { Switch } from "@/components/ui/switch.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { errorMessage } from "@/lib/errors.ts";
+import IdleRefreshSetting from "./_components/idle-refresh-setting.tsx";
 
 export default function SettingsPage() {
   const me = useCurrentUser();
@@ -29,6 +30,7 @@ export default function SettingsPage() {
       />
       <div className="space-y-6">
         <LargeQuantitySetting />
+        <IdleRefreshSetting />
         <ExpiryWarningSetting />
         <CanisterRolloutSetting />
       </div>

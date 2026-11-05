@@ -3,6 +3,8 @@ import { createContext, useContext, useEffect, useId } from "react";
 export type UnsavedChangesApi = {
   register: (id: string) => () => void;
   hasUnsaved: () => boolean;
+  // Forget every unsaved form (e.g. the user chose to refresh and discard them)
+  clearAll: () => void;
   // Resolves true when there is nothing unsaved or the user agrees to discard it
   confirmDiscard: () => Promise<boolean>;
 };

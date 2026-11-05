@@ -1,0 +1,62 @@
+diff --git a/src/components/manufacturer-line.tsx b/src/components/manufacturer-line.tsx
+new file mode 100644
+index 0000000..fce09c3
+--- /dev/null
++++ b/src/components/manufacturer-line.tsx
+@@ -0,0 +1,13 @@
++import { Factory } from "lucide-react";
++import { cn } from "@/lib/utils.ts";
++
++// Small manufacturer line shown on drug cards; renders nothing when no manufacturer is saved
++export default function ManufacturerLine({ manufacturer, className }: { manufacturer: string; className?: string }) {
++  if (!manufacturer) return null;
++  return (
++    <div className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", className)}>
++      <Factory className="size-3.5 shrink-0" />
++      <span className="truncate">{manufacturer}</span>
++    </div>
++  );
++}
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 658b6f0..c889868 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -1,5 +1,6 @@
+ import { Barcode, Check } from "lucide-react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import ZoomableDrugImage, { type GallerySlide } from "@/components/zoomable-drug-image.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import { cn } from "@/lib/utils.ts";
+@@ -25,6 +26,7 @@ export default function DrugPackagePicker({ drug, selectedPackageId, matchedPack
+           <div className="truncate text-sm text-muted-foreground">
+             {drug.brandName || "No brand"} · <span className="font-mono">{drug.drugId}</span>
+           </div>
++          <ManufacturerLine manufacturer={drug.manufacturer} className="pt-1" />
+         </div>
+       </div>
+       <div className="grid gap-2 sm:grid-cols-2">
+diff --git a/src/pages/inventory/_components/drug-row.tsx b/src/pages/inventory/_components/drug-row.tsx
+index 3aa04e9..6b6aafc 100644
+--- a/src/pages/inventory/_components/drug-row.tsx
++++ b/src/pages/inventory/_components/drug-row.tsx
+@@ -1,4 +1,4 @@
+-import { Factory } from "lucide-react";
++import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import { Badge } from "@/components/ui/badge.tsx";
+ import DrugImage from "@/components/drug-image.tsx";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+@@ -25,12 +25,7 @@ export default function DrugRow({
+           {drug.brandName && <span className="truncate text-sm text-muted-foreground">{drug.brandName}</span>}
+           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
+         </div>
+-        {drug.manufacturer && (
+-          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+-            <Factory className="size-3.5 shrink-0" />
+-            <span className="truncate">{drug.manufacturer}</span>
+-          </div>
+-        )}
++        <ManufacturerLine manufacturer={drug.manufacturer} />
+         <div className="flex flex-wrap gap-2">
+           {drug.packages.map((p) => (
+             <Badge

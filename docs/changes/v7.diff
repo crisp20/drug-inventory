@@ -1,0 +1,1012 @@
+diff --git a/convex/lib/stock.test.ts b/convex/lib/stock.test.ts
+index 92e62b9..f0230c2 100644
+--- a/convex/lib/stock.test.ts
++++ b/convex/lib/stock.test.ts
+@@ -1,7 +1,13 @@
+ import { describe, expect, it } from "vitest";
+-import { cleanMovementInput, formDiffers, nextStock } from "./stock";
++import { cleanMovementInput, cleanReason, nextStock } from "./stock";
+ 
+-const form = { qtyPerUnit: 10, baseUnit: "Strip" as const, unitCount: 10 };
++describe("cleanReason", () => {
++  it("trims and requires a reason", () => {
++    expect(cleanReason(" Expired ")).toBe("Expired");
++    expect(() => cleanReason("   ")).toThrow(/required/);
++    expect(() => cleanReason("x".repeat(61))).toThrow(/at most/);
++  });
++});
+ 
+ describe("nextStock", () => {
+   it("adds on Stock In", () => {
+@@ -17,24 +23,12 @@ describe("nextStock", () => {
+ 
+ describe("cleanMovementInput", () => {
+   it("trims notes", () => {
+-    expect(cleanMovementInput({ ...form, quantity: 2, notes: "  inv 12 " }).notes).toBe("inv 12");
++    expect(cleanMovementInput({ quantity: 2, notes: "  inv 12 " }).notes).toBe("inv 12");
+   });
+   it.each([0, -1, 1.5, 100_001])("rejects quantity %s", (quantity) => {
+-    expect(() => cleanMovementInput({ ...form, quantity, notes: "" })).toThrow(/Quantity/);
+-  });
+-  it("rejects a bad package form", () => {
+-    expect(() => cleanMovementInput({ ...form, qtyPerUnit: 0, quantity: 1, notes: "" })).toThrow(/per base unit/);
+-    expect(() => cleanMovementInput({ ...form, unitCount: 2.5, quantity: 1, notes: "" })).toThrow(/base units/);
++    expect(() => cleanMovementInput({ quantity, notes: "" })).toThrow(/Quantity/);
+   });
+   it("rejects very long notes", () => {
+-    expect(() => cleanMovementInput({ ...form, quantity: 1, notes: "x".repeat(501) })).toThrow(/Notes/);
+-  });
+-});
+-
+-describe("formDiffers", () => {
+-  it("detects edits to any part of the form", () => {
+-    expect(formDiffers(form, form)).toBe(false);
+-    expect(formDiffers(form, { ...form, unitCount: 5 })).toBe(true);
+-    expect(formDiffers(form, { ...form, baseUnit: "Box" })).toBe(true);
++    expect(() => cleanMovementInput({ quantity: 1, notes: "x".repeat(501) })).toThrow(/Notes/);
+   });
+ });
+diff --git a/convex/lib/stock.ts b/convex/lib/stock.ts
+index 599d12f..e3ef3df 100644
+--- a/convex/lib/stock.ts
++++ b/convex/lib/stock.ts
+@@ -1,36 +1,40 @@
+ import { ConvexError } from "convex/values";
+-import type { BaseUnit } from "./barcode";
+ 
+ export const MAX_MOVEMENT_QUANTITY = 100_000;
+ export const MAX_NOTES_LENGTH = 500;
++export const MAX_REASON_LENGTH = 60;
+ 
+-export type MovementKind = "in" | "out";
++// Suggested Stock Out reasons; staff can also type their own
++export const STOCK_OUT_REASONS = ["Dispensed", "Expired", "Damaged", "Returned to supplier", "Transferred"] as const;
++export const DEFAULT_STOCK_OUT_REASON = STOCK_OUT_REASONS[0];
+ 
+-export type PackageForm = { qtyPerUnit: number; baseUnit: BaseUnit; unitCount: number };
++export type MovementKind = "in" | "out";
+ 
+-export type MovementInput = PackageForm & { quantity: number; notes: string };
++// Package form always comes from the saved barcode; staff only enter these
++export type MovementInput = { quantity: number; notes: string };
+ 
+ function bad(message: string): never {
+   throw new ConvexError({ code: "BAD_REQUEST", message });
+ }
+ 
+-function isPositiveInt(n: number) {
+-  return Number.isInteger(n) && n > 0;
+-}
+-
+ // Validates a stock movement entered by a user. Returns trimmed values.
+ export function cleanMovementInput(input: MovementInput): MovementInput {
+-  if (!isPositiveInt(input.quantity)) bad("Quantity must be a whole number above 0");
++  if (!Number.isInteger(input.quantity) || input.quantity <= 0) bad("Quantity must be a whole number above 0");
+   if (input.quantity > MAX_MOVEMENT_QUANTITY) {
+     bad(`Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`);
+   }
+-  if (!isPositiveInt(input.qtyPerUnit)) bad("Quantity per base unit must be a whole number above 0");
+-  if (!isPositiveInt(input.unitCount)) bad("Number of base units must be a whole number above 0");
+   const notes = input.notes.trim();
+   if (notes.length > MAX_NOTES_LENGTH) bad(`Notes can be at most ${MAX_NOTES_LENGTH} characters`);
+   return { ...input, notes };
+ }
+ 
++export function cleanReason(reason: string): string {
++  const cleaned = reason.trim();
++  if (!cleaned) bad("Reason is required");
++  if (cleaned.length > MAX_REASON_LENGTH) bad(`Reason can be at most ${MAX_REASON_LENGTH} characters`);
++  return cleaned;
++}
++
+ // New stock amount (in package forms) after a movement. Stock can never go below 0.
+ export function nextStock(current: number, kind: MovementKind, quantity: number): number {
+   if (kind === "in") return current + quantity;
+@@ -39,11 +43,3 @@ export function nextStock(current: number, kind: MovementKind, quantity: number)
+   }
+   return current - quantity;
+ }
+-
+-export function formDiffers(saved: PackageForm, recorded: PackageForm): boolean {
+-  return (
+-    saved.qtyPerUnit !== recorded.qtyPerUnit ||
+-    saved.baseUnit !== recorded.baseUnit ||
+-    saved.unitCount !== recorded.unitCount
+-  );
+-}
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index 96ca0b9..be7af53 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -15,12 +15,12 @@ export const stockMovementsTable = defineTable({
+   brandName: v.string(),
+   pieceName: v.string(),
+   barcode: v.string(),
+-  // Package form as recorded by the user (prefilled from the barcode, editable)
++  // Package form at the time of the movement (copied from the barcode's saved form)
+   qtyPerUnit: v.number(),
+   baseUnit: baseUnit,
+   unitCount: v.number(),
+-  // True when the recorded form differs from the barcode's saved form
+-  formChanged: v.boolean(),
++  // Legacy: set on early entries when the form could be edited during a transaction
++  formChanged: v.optional(v.boolean()),
+   // Number of package forms moved
+   quantity: v.number(),
+   stockBefore: v.number(),
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index 46b01e3..5c5cc79 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -33,7 +33,7 @@ async function setup({ approveStaff = true } = {}) {
+   return { owner, staff, packageId: created!.packages[0]._id, drugRef };
+ }
+ 
+-const entry = { quantity: 4, qtyPerUnit: 10, baseUnit: "Strip" as const, unitCount: 10, notes: " Invoice 88 " };
++const entry = { quantity: 4, notes: " Invoice 88 " };
+ 
+ describe("Stock In", () => {
+   it("lets staff add stock and logs who did it", async () => {
+@@ -53,19 +53,13 @@ describe("Stock In", () => {
+       userName: "Sam",
+       notes: "Invoice 88",
+       drugName: "Paracetamol 500mg",
+-      formChanged: false,
++      // Package form is copied from the barcode, never entered by staff
++      qtyPerUnit: 10,
++      baseUnit: "Strip",
++      unitCount: 10,
+     });
+   });
+ 
+-  it("records an edited package form without changing the saved one", async () => {
+-    const { owner, packageId, drugRef } = await setup();
+-    await owner.mutation(api.stock.recordIn, { packageId, ...entry, unitCount: 5 });
+-    const log = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: { numItems: 10, cursor: null } });
+-    expect(log.page[0]).toMatchObject({ unitCount: 5, formChanged: true });
+-    const updated = await owner.query(api.drugs.get, { id: drugRef });
+-    expect(updated!.packages[0].unitCount).toBe(10);
+-  });
+-
+   it("blocks users who are not approved", async () => {
+     const { staff, packageId } = await setup({ approveStaff: false });
+     await expect(staff.mutation(api.stock.recordIn, { packageId, ...entry })).rejects.toThrow(/approval/);
+@@ -78,3 +72,45 @@ describe("Stock In", () => {
+     expect(updated!.packages[0].stock).toBe(3);
+   });
+ });
++
++describe("Stock Out", () => {
++  const out = { ...entry, quantity: 2, reason: " Dispensed " };
++
++  it("lets staff remove stock and logs the reason", async () => {
++    const { owner, staff, packageId, drugRef } = await setup();
++    const result = await staff.mutation(api.stock.recordOut, { packageId, ...out });
++    expect(result.stockAfter).toBe(1);
++    const updated = await owner.query(api.drugs.get, { id: drugRef });
++    expect(updated!.packages[0].stock).toBe(1);
++
++    const log = await owner.query(api.stock.listMovements, { kind: "out", paginationOpts: { numItems: 10, cursor: null } });
++    expect(log.page[0]).toMatchObject({ kind: "out", quantity: 2, stockBefore: 3, stockAfter: 1, reason: "Dispensed", userName: "Sam" });
++    const inLog = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: { numItems: 10, cursor: null } });
++    expect(inLog.page).toHaveLength(0);
++  });
++
++  it("allows taking stock to exactly zero", async () => {
++    const { owner, packageId } = await setup();
++    const result = await owner.mutation(api.stock.recordOut, { packageId, ...out, quantity: 3 });
++    expect(result.stockAfter).toBe(0);
++  });
++
++  it("blocks taking out more than is in stock and logs nothing", async () => {
++    const { owner, packageId, drugRef } = await setup();
++    await expect(owner.mutation(api.stock.recordOut, { packageId, ...out, quantity: 4 })).rejects.toThrow(/only 3 on hand/);
++    const updated = await owner.query(api.drugs.get, { id: drugRef });
++    expect(updated!.packages[0].stock).toBe(3);
++    const log = await owner.query(api.stock.listMovements, { kind: "out", paginationOpts: { numItems: 10, cursor: null } });
++    expect(log.page).toHaveLength(0);
++  });
++
++  it("requires a reason", async () => {
++    const { owner, packageId } = await setup();
++    await expect(owner.mutation(api.stock.recordOut, { packageId, ...out, reason: "  " })).rejects.toThrow(/Reason/);
++  });
++
++  it("blocks users who are not approved", async () => {
++    const { staff, packageId } = await setup({ approveStaff: false });
++    await expect(staff.mutation(api.stock.recordOut, { packageId, ...out })).rejects.toThrow(/approval/);
++  });
++});
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 8672366..8d1a6b1 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -1,53 +1,77 @@
+ import { paginationOptsValidator } from "convex/server";
+ import { ConvexError, v } from "convex/values";
+-import { mutation, query } from "./_generated/server";
++import { mutation, query, type MutationCtx } from "./_generated/server";
++import type { Id } from "./_generated/dataModel";
+ import { requireActiveUser } from "./lib/access";
+-import { cleanMovementInput, formDiffers, nextStock } from "./lib/stock";
+-import { baseUnit } from "./schema/drugs";
++import {
++  cleanMovementInput,
++  cleanReason,
++  nextStock,
++  type MovementInput,
++  type MovementKind,
++} from "./lib/stock";
+ import { movementKind } from "./schema/stock";
+ 
++const movementArgs = {
++  packageId: v.id("drugPackages"),
++  quantity: v.number(),
++  notes: v.string(),
++};
++
++// Updates the package form's stock and appends a log entry in one transaction
++async function recordMovement(
++  ctx: MutationCtx,
++  kind: MovementKind,
++  packageId: Id<"drugPackages">,
++  raw: MovementInput,
++  reason?: string,
++) {
++  const user = await requireActiveUser(ctx);
++  const input = cleanMovementInput(raw);
++  const pkg = await ctx.db.get("drugPackages", packageId);
++  if (!pkg) throw new ConvexError({ code: "NOT_FOUND", message: "This package form no longer exists" });
++  const drug = await ctx.db.get("drugs", pkg.drugRef);
++  if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "This drug no longer exists" });
++
++  const stockAfter = nextStock(pkg.stock, kind, input.quantity);
++  await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
++  await ctx.db.insert("stockMovements", {
++    kind,
++    drugRef: drug._id,
++    packageRef: pkg._id,
++    drugCode: drug.drugId,
++    drugName: drug.name,
++    brandName: drug.brandName,
++    pieceName: drug.pieceName,
++    barcode: pkg.barcode,
++    qtyPerUnit: pkg.qtyPerUnit,
++    baseUnit: pkg.baseUnit,
++    unitCount: pkg.unitCount,
++    quantity: input.quantity,
++    stockBefore: pkg.stock,
++    stockAfter,
++    notes: input.notes,
++    reason,
++    userRef: user._id,
++    userName: user.name ?? user.email ?? "Unknown user",
++    occurredAt: new Date().toISOString(),
++  });
++  return { stockAfter };
++}
++
+ // Records stock received. Any approved user (admin or staff) can do this.
+ export const recordIn = mutation({
+-  args: {
+-    packageId: v.id("drugPackages"),
+-    quantity: v.number(),
+-    qtyPerUnit: v.number(),
+-    baseUnit: baseUnit,
+-    unitCount: v.number(),
+-    notes: v.string(),
+-  },
++  args: movementArgs,
+   handler: async (ctx, { packageId, ...rest }) => {
+-    const user = await requireActiveUser(ctx);
+-    const input = cleanMovementInput(rest);
+-    const pkg = await ctx.db.get("drugPackages", packageId);
+-    if (!pkg) throw new ConvexError({ code: "NOT_FOUND", message: "This package form no longer exists" });
+-    const drug = await ctx.db.get("drugs", pkg.drugRef);
+-    if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "This drug no longer exists" });
++    return await recordMovement(ctx, "in", packageId, rest);
++  },
++});
+ 
+-    const stockAfter = nextStock(pkg.stock, "in", input.quantity);
+-    await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
+-    await ctx.db.insert("stockMovements", {
+-      kind: "in",
+-      drugRef: drug._id,
+-      packageRef: pkg._id,
+-      drugCode: drug.drugId,
+-      drugName: drug.name,
+-      brandName: drug.brandName,
+-      pieceName: drug.pieceName,
+-      barcode: pkg.barcode,
+-      qtyPerUnit: input.qtyPerUnit,
+-      baseUnit: input.baseUnit,
+-      unitCount: input.unitCount,
+-      formChanged: formDiffers(pkg, input),
+-      quantity: input.quantity,
+-      stockBefore: pkg.stock,
+-      stockAfter,
+-      notes: input.notes,
+-      userRef: user._id,
+-      userName: user.name ?? user.email ?? "Unknown user",
+-      occurredAt: new Date().toISOString(),
+-    });
+-    return { stockAfter };
++// Records stock leaving. Blocked if it would take stock below zero.
++export const recordOut = mutation({
++  args: { ...movementArgs, reason: v.string() },
++  handler: async (ctx, { packageId, reason, ...rest }) => {
++    return await recordMovement(ctx, "out", packageId, rest, cleanReason(reason));
+   },
+ });
+ 
+diff --git a/src/App.tsx b/src/App.tsx
+index be77cb6..36272df 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -5,6 +5,7 @@ import AuthCallback from "./pages/auth/Callback.tsx";
+ import Index from "./pages/Index.tsx";
+ import NotFound from "./pages/NotFound.tsx";
+ import StockInPage from "./pages/stock-in/page.tsx";
++import StockOutPage from "./pages/stock-out/page.tsx";
+ import UsersPage from "./pages/users/page.tsx";
+ 
+ export default function App() {
+@@ -16,6 +17,7 @@ export default function App() {
+           <Route element={<AppLayout />}>
+             <Route path="/" element={<Index />} />
+             <Route path="/stock-in" element={<StockInPage />} />
++            <Route path="/stock-out" element={<StockOutPage />} />
+             <Route path="/users" element={<UsersPage />} />
+           </Route>
+           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+diff --git a/src/components/app-layout.tsx b/src/components/app-layout.tsx
+index d5d52ef..df2f007 100644
+--- a/src/components/app-layout.tsx
++++ b/src/components/app-layout.tsx
+@@ -15,7 +15,7 @@ type NavItem = { label: string; icon: LucideIcon; to?: string; adminOnly?: boole
+ const NAV: NavItem[] = [
+   { label: "Inventory", icon: Boxes, to: "/" },
+   { label: "Stock In", icon: ArrowDownToLine, to: "/stock-in" },
+-  { label: "Stock Out", icon: ArrowUpFromLine },
++  { label: "Stock Out", icon: ArrowUpFromLine, to: "/stock-out" },
+   { label: "Users", icon: Users, to: "/users", adminOnly: true },
+ ];
+ 
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index e40bba4..0e3fc07 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -13,6 +13,7 @@ type Props = {
+ 
+ // A drug with one tappable button per package form (barcode)
+ export default function DrugPackagePicker({ drug, selectedPackageId, matchedPackageId, onPick }: Props) {
++  const selectedPkg = drug.packages.find((p) => p._id === selectedPackageId);
+   return (
+     <div className="rounded-xl border bg-card p-3">
+       <div className="flex items-center gap-3 pb-3">
+@@ -56,6 +57,34 @@ export default function DrugPackagePicker({ drug, selectedPackageId, matchedPack
+           );
+         })}
+       </div>
++      {selectedPkg && <PackagingPictures pkg={selectedPkg} />}
++    </div>
++  );
++}
++
++// Packaging pictures for the chosen package form (each barcode can have its own)
++function PackagingPictures({ pkg }: { pkg: DrugPackage }) {
++  return (
++    <div className="mt-3 space-y-2 border-t pt-3">
++      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
++        Packaging pictures · {formatPackageForm(pkg)}
++      </div>
++      {pkg.images.some((img) => img.url) ? (
++        <div className="flex flex-wrap gap-2">
++          {pkg.images.map((img, i) =>
++            img.url ? (
++              <ZoomableDrugImage
++                key={img.id}
++                url={img.url}
++                alt={`Packaging ${i + 1} · ${formatPackageForm(pkg)}`}
++                className="size-24 border sm:size-28"
++              />
++            ) : null,
++          )}
++        </div>
++      ) : (
++        <p className="text-sm italic text-muted-foreground">No packaging pictures for this package form.</p>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index ee1265c..d9f5a7f 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -1,20 +1,25 @@
+ import { z } from "zod";
+-import { BASE_UNITS } from "@/convex/lib/barcode.ts";
+-import { MAX_MOVEMENT_QUANTITY, MAX_NOTES_LENGTH } from "@/convex/lib/stock.ts";
++import {
++  MAX_MOVEMENT_QUANTITY,
++  MAX_NOTES_LENGTH,
++  MAX_REASON_LENGTH,
++  type MovementKind,
++} from "@/convex/lib/stock.ts";
+ 
+-const positiveInt = (label: string, max?: number) => {
+-  const base = z.coerce.number<string | number>().int(`${label} must be a whole number`).min(1, `${label} must be at least 1`);
+-  return max ? base.max(max, `${label} can be at most ${max.toLocaleString()}`) : base;
+-};
++// Shared by Stock In and Stock Out forms. Reason is only required for Stock Out.
++// The package form is not editable here; it always comes from the chosen barcode.
++export function movementFormSchema(kind: MovementKind) {
++  const reason = z.string().trim().max(MAX_REASON_LENGTH, `Reason can be at most ${MAX_REASON_LENGTH} characters`);
++  return z.object({
++    quantity: z.coerce
++      .number<string | number>()
++      .int("Quantity must be a whole number")
++      .min(1, "Quantity must be at least 1")
++      .max(MAX_MOVEMENT_QUANTITY, `Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`),
++    notes: z.string().trim().max(MAX_NOTES_LENGTH, `Notes can be at most ${MAX_NOTES_LENGTH} characters`),
++    reason: kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
++  });
++}
+ 
+-// Shared by Stock In and Stock Out forms
+-export const movementFormSchema = z.object({
+-  quantity: positiveInt("Quantity", MAX_MOVEMENT_QUANTITY),
+-  qtyPerUnit: positiveInt("Qty per unit"),
+-  baseUnit: z.enum(BASE_UNITS),
+-  unitCount: positiveInt("No. of units"),
+-  notes: z.string().trim().max(MAX_NOTES_LENGTH, `Notes can be at most ${MAX_NOTES_LENGTH} characters`),
+-});
+-
+-export type MovementFormInput = z.input<typeof movementFormSchema>;
+-export type MovementFormValues = z.output<typeof movementFormSchema>;
++export type MovementFormInput = z.input<ReturnType<typeof movementFormSchema>>;
++export type MovementFormValues = z.output<ReturnType<typeof movementFormSchema>>;
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+new file mode 100644
+index 0000000..afa3edb
+--- /dev/null
++++ b/src/components/stock/movement-form.tsx
+@@ -0,0 +1,154 @@
++import { useForm, useWatch } from "react-hook-form";
++import { zodResolver } from "@hookform/resolvers/zod";
++import { useMutation } from "convex/react";
++import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
++import { toast } from "sonner";
++import { api } from "@/convex/_generated/api.js";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import { DEFAULT_STOCK_OUT_REASON, type MovementKind } from "@/convex/lib/stock.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { Textarea } from "@/components/ui/textarea.tsx";
++import { errorMessage } from "@/lib/errors.ts";
++import { cn } from "@/lib/utils.ts";
++import { movementFormSchema, type MovementFormInput, type MovementFormValues } from "./movement-form-schema.ts";
++import PackageFormSummary from "./package-form-summary.tsx";
++import ReasonField from "./reason-field.tsx";
++import type { StockSelection } from "./stock-drug-finder.tsx";
++
++type Props = { kind: MovementKind; selection: StockSelection; onDone: () => void };
++
++const COPY = {
++  in: {
++    title: "Stock In",
++    quantityLabel: "Quantity received",
++    notesPlaceholder: "e.g. Invoice #4521 from supplier",
++    submit: "Record Stock In",
++    verb: "Added",
++    error: "Could not record Stock In",
++    icon: ArrowDownToLine,
++  },
++  out: {
++    title: "Stock Out",
++    quantityLabel: "Quantity going out",
++    notesPlaceholder: "e.g. Patient / ward / script number",
++    submit: "Record Stock Out",
++    verb: "Removed",
++    error: "Could not record Stock Out",
++    icon: ArrowUpFromLine,
++  },
++} as const;
++
++function toNumber(value: string | number | undefined): number {
++  const n = Number(value);
++  return Number.isFinite(n) ? n : 0;
++}
++
++// Quantity, editable package form, notes (and reason for Stock Out) for one package form
++export default function MovementForm({ kind, selection, onDone }: Props) {
++  const { drug, pkg } = selection;
++  const copy = COPY[kind];
++  const recordIn = useMutation(api.stock.recordIn);
++  const recordOut = useMutation(api.stock.recordOut);
++  const form = useForm<MovementFormInput, unknown, MovementFormValues>({
++    resolver: zodResolver(movementFormSchema(kind)),
++    defaultValues: {
++      quantity: 1,
++      notes: "",
++      reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
++    },
++  });
++  const watched = useWatch({ control: form.control });
++  const quantity = Math.max(0, toNumber(watched.quantity));
++  const stockAfter = kind === "in" ? pkg.stock + quantity : pkg.stock - quantity;
++  const notEnough = kind === "out" && stockAfter < 0;
++
++  const onSubmit = async ({ reason, ...values }: MovementFormValues) => {
++    try {
++      const args = { packageId: pkg._id, ...values };
++      const result = kind === "in" ? await recordIn(args) : await recordOut({ ...args, reason });
++      toast.success(`${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`, {
++        description: `Stock is now ${result.stockAfter}`,
++      });
++      onDone();
++    } catch (e) {
++      toast.error(errorMessage(e, copy.error));
++    }
++  };
++
++  return (
++    <Form {...form}>
++      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5 rounded-xl border-2 border-primary/30 bg-card p-4">
++        <div className="flex items-baseline justify-between gap-3">
++          <h2 className="text-lg font-bold">{copy.title}</h2>
++          <span className="truncate text-sm text-muted-foreground">{drug.name}</span>
++        </div>
++
++        <FormField
++          control={form.control}
++          name="quantity"
++          render={({ field }) => (
++            <FormItem>
++              <FormLabel>{copy.quantityLabel}</FormLabel>
++              <FormControl>
++                <Input
++                  {...field}
++                  value={String(field.value)}
++                  inputMode="numeric"
++                  autoFocus
++                  onFocus={(e) => e.target.select()}
++                  className="h-14 bg-background text-center text-2xl font-extrabold"
++                />
++              </FormControl>
++              <FormMessage />
++            </FormItem>
++          )}
++        />
++
++        <PackageFormSummary pkg={pkg} pieceName={drug.pieceName} />
++
++        {kind === "out" && <ReasonField control={form.control} />}
++
++        <FormField
++          control={form.control}
++          name="notes"
++          render={({ field }) => (
++            <FormItem>
++              <FormLabel>Notes</FormLabel>
++              <FormControl>
++                <Textarea {...field} rows={2} placeholder={copy.notesPlaceholder} className="bg-background" />
++              </FormControl>
++              <FormMessage />
++            </FormItem>
++          )}
++        />
++
++        <div
++          className={cn(
++            "flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm",
++            notEnough ? "bg-destructive/10 text-destructive" : "bg-muted",
++          )}
++        >
++          <span className={cn(!notEnough && "text-muted-foreground")}>
++            {notEnough ? `Not enough stock: only ${pkg.stock} on hand` : "Stock after"}
++          </span>
++          <span className="font-semibold">
++            {pkg.stock} → <span className="text-lg font-extrabold">{stockAfter}</span>
++          </span>
++        </div>
++
++        <div className="flex gap-2">
++          <Button type="button" variant="ghost" onClick={onDone}>
++            Cancel
++          </Button>
++          <Button type="submit" size="lg" className="flex-1" disabled={form.formState.isSubmitting || notEnough}>
++            {form.formState.isSubmitting ? <Spinner /> : <copy.icon />}
++            {copy.submit}
++          </Button>
++        </div>
++      </form>
++    </Form>
++  );
++}
+diff --git a/src/components/stock/package-form-fields.tsx b/src/components/stock/package-form-fields.tsx
+deleted file mode 100644
+index d9aac0a..0000000
+--- a/src/components/stock/package-form-fields.tsx
++++ /dev/null
+@@ -1,81 +0,0 @@
+-import type { Control } from "react-hook-form";
+-import { BASE_UNITS } from "@/convex/lib/barcode.ts";
+-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
+-import { Input } from "@/components/ui/input.tsx";
+-import {
+-  Select,
+-  SelectContent,
+-  SelectItem,
+-  SelectTrigger,
+-  SelectValue,
+-} from "@/components/ui/select.tsx";
+-import type { MovementFormInput, MovementFormValues } from "./movement-form-schema.ts";
+-
+-type Props = {
+-  control: Control<MovementFormInput, unknown, MovementFormValues>;
+-  changed: boolean;
+-};
+-
+-// Editable "Qty / Base unit x No." fields, prefilled from the barcode's saved form
+-export default function PackageFormFields({ control, changed }: Props) {
+-  return (
+-    <div className="space-y-2">
+-      <div className="grid grid-cols-[1fr_1.4fr_1fr] gap-2">
+-        <FormField
+-          control={control}
+-          name="qtyPerUnit"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel className="text-xs">Qty per unit</FormLabel>
+-              <FormControl>
+-                <Input {...field} value={String(field.value)} inputMode="numeric" className="h-11 bg-card text-center" />
+-              </FormControl>
+-              <FormMessage />
+-            </FormItem>
+-          )}
+-        />
+-        <FormField
+-          control={control}
+-          name="baseUnit"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel className="text-xs">Base unit</FormLabel>
+-              <Select value={field.value} onValueChange={field.onChange}>
+-                <FormControl>
+-                  <SelectTrigger className="h-11 w-full bg-card data-[size=default]:h-11">
+-                    <SelectValue />
+-                  </SelectTrigger>
+-                </FormControl>
+-                <SelectContent>
+-                  {BASE_UNITS.map((u) => (
+-                    <SelectItem key={u} value={u}>
+-                      {u}
+-                    </SelectItem>
+-                  ))}
+-                </SelectContent>
+-              </Select>
+-            </FormItem>
+-          )}
+-        />
+-        <FormField
+-          control={control}
+-          name="unitCount"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel className="text-xs">No. of units</FormLabel>
+-              <FormControl>
+-                <Input {...field} value={String(field.value)} inputMode="numeric" className="h-11 bg-card text-center" />
+-              </FormControl>
+-              <FormMessage />
+-            </FormItem>
+-          )}
+-        />
+-      </div>
+-      {changed && (
+-        <p className="rounded-lg bg-accent px-3 py-2 text-xs text-accent-foreground">
+-          This differs from the saved package form. It will be noted in the log; stock is still added to this barcode.
+-        </p>
+-      )}
+-    </div>
+-  );
+-}
+diff --git a/src/components/stock/package-form-summary.tsx b/src/components/stock/package-form-summary.tsx
+new file mode 100644
+index 0000000..370c505
+--- /dev/null
++++ b/src/components/stock/package-form-summary.tsx
+@@ -0,0 +1,28 @@
++import type { DrugPackage } from "@/lib/drug-types.ts";
++
++type Props = { pkg: DrugPackage; pieceName: string };
++
++const FIELDS = [
++  { label: "Qty per unit", value: (p: DrugPackage) => p.qtyPerUnit },
++  { label: "Base unit", value: (p: DrugPackage) => p.baseUnit },
++  { label: "No. of units", value: (p: DrugPackage) => p.unitCount },
++] as const;
++
++// Read-only package form for the chosen barcode. Only admins change it, from Inventory.
++export default function PackageFormSummary({ pkg, pieceName }: Props) {
++  return (
++    <div className="space-y-1.5">
++      <div className="grid grid-cols-[1fr_1.4fr_1fr] gap-2">
++        {FIELDS.map((f) => (
++          <div key={f.label} className="space-y-1.5">
++            <div className="text-xs font-medium text-muted-foreground">{f.label}</div>
++            <div className="flex h-11 items-center justify-center rounded-md bg-muted px-3 font-semibold">{f.value(pkg)}</div>
++          </div>
++        ))}
++      </div>
++      <p className="text-xs text-muted-foreground">
++        {pkg.qtyPerUnit * pkg.unitCount} {pieceName} per package form
++      </p>
++    </div>
++  );
++}
+diff --git a/src/components/stock/reason-field.tsx b/src/components/stock/reason-field.tsx
+new file mode 100644
+index 0000000..b729b5b
+--- /dev/null
++++ b/src/components/stock/reason-field.tsx
+@@ -0,0 +1,44 @@
++import type { Control } from "react-hook-form";
++import { STOCK_OUT_REASONS } from "@/convex/lib/stock.ts";
++import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import { cn } from "@/lib/utils.ts";
++import type { MovementFormInput, MovementFormValues } from "./movement-form-schema.ts";
++
++type Props = { control: Control<MovementFormInput, unknown, MovementFormValues> };
++
++// Quick-pick reason chips plus a free-text box for anything else
++export default function ReasonField({ control }: Props) {
++  return (
++    <FormField
++      control={control}
++      name="reason"
++      render={({ field }) => (
++        <FormItem>
++          <FormLabel>Reason</FormLabel>
++          <div className="flex flex-wrap gap-2">
++            {STOCK_OUT_REASONS.map((r) => (
++              <button
++                key={r}
++                type="button"
++                onClick={() => field.onChange(r)}
++                className={cn(
++                  "cursor-pointer rounded-full border px-3 py-1.5 text-sm font-medium transition-colors",
++                  field.value === r
++                    ? "border-primary bg-primary text-primary-foreground"
++                    : "bg-background hover:bg-muted",
++                )}
++              >
++                {r}
++              </button>
++            ))}
++          </div>
++          <FormControl>
++            <Input {...field} placeholder="Or type another reason" className="h-10 bg-background" />
++          </FormControl>
++          <FormMessage />
++        </FormItem>
++      )}
++    />
++  );
++}
+diff --git a/src/components/stock/stock-movement-page.tsx b/src/components/stock/stock-movement-page.tsx
+new file mode 100644
+index 0000000..af1c733
+--- /dev/null
++++ b/src/components/stock/stock-movement-page.tsx
+@@ -0,0 +1,39 @@
++import type { MovementKind } from "@/convex/lib/stock.ts";
++import PageHeader from "@/components/page-header.tsx";
++import MovementForm from "./movement-form.tsx";
++import MovementLog from "./movement-log.tsx";
++import StockDrugFinder from "./stock-drug-finder.tsx";
++
++const COPY = {
++  in: {
++    title: "Stock In",
++    description: "Scan or search a drug, choose the package form, and record what arrived.",
++    logTitle: "Recent Stock In",
++  },
++  out: {
++    title: "Stock Out",
++    description: "Scan or search a drug, choose the package form, and record what is going out.",
++    logTitle: "Recent Stock Out",
++  },
++} as const;
++
++// Shared page layout for Stock In and Stock Out
++export default function StockMovementPage({ kind }: { kind: MovementKind }) {
++  const copy = COPY[kind];
++  return (
++    <div className="mx-auto max-w-3xl space-y-10 p-4 md:p-8">
++      <div>
++        <PageHeader title={copy.title} description={copy.description} />
++        <StockDrugFinder key={kind}>
++          {(selection, reset) => (
++            <MovementForm key={selection.pkg._id} kind={kind} selection={selection} onDone={reset} />
++          )}
++        </StockDrugFinder>
++      </div>
++      <section className="space-y-3">
++        <h2 className="text-lg font-bold">{copy.logTitle}</h2>
++        <MovementLog kind={kind} />
++      </section>
++    </div>
++  );
++}
+diff --git a/src/pages/stock-in/_components/stock-in-form.tsx b/src/pages/stock-in/_components/stock-in-form.tsx
+deleted file mode 100644
+index f971128..0000000
+--- a/src/pages/stock-in/_components/stock-in-form.tsx
++++ /dev/null
+@@ -1,122 +0,0 @@
+-import { useForm, useWatch } from "react-hook-form";
+-import { zodResolver } from "@hookform/resolvers/zod";
+-import { useMutation } from "convex/react";
+-import { ArrowDownToLine } from "lucide-react";
+-import { toast } from "sonner";
+-import { api } from "@/convex/_generated/api.js";
+-import { formatPackageForm } from "@/convex/lib/barcode.ts";
+-import { formDiffers } from "@/convex/lib/stock.ts";
+-import { Button } from "@/components/ui/button.tsx";
+-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
+-import { Input } from "@/components/ui/input.tsx";
+-import { Spinner } from "@/components/ui/spinner.tsx";
+-import { Textarea } from "@/components/ui/textarea.tsx";
+-import PackageFormFields from "@/components/stock/package-form-fields.tsx";
+-import {
+-  movementFormSchema,
+-  type MovementFormInput,
+-  type MovementFormValues,
+-} from "@/components/stock/movement-form-schema.ts";
+-import type { StockSelection } from "@/components/stock/stock-drug-finder.tsx";
+-import { errorMessage } from "@/lib/errors.ts";
+-
+-type Props = { selection: StockSelection; onDone: () => void };
+-
+-function toNumber(value: string | number | undefined): number {
+-  const n = Number(value);
+-  return Number.isFinite(n) ? n : 0;
+-}
+-
+-export default function StockInForm({ selection, onDone }: Props) {
+-  const { drug, pkg } = selection;
+-  const recordIn = useMutation(api.stock.recordIn);
+-  const form = useForm<MovementFormInput, unknown, MovementFormValues>({
+-    resolver: zodResolver(movementFormSchema),
+-    defaultValues: { quantity: 1, qtyPerUnit: pkg.qtyPerUnit, baseUnit: pkg.baseUnit, unitCount: pkg.unitCount, notes: "" },
+-  });
+-  const watched = useWatch({ control: form.control });
+-  const quantity = toNumber(watched.quantity);
+-  const recordedForm = {
+-    qtyPerUnit: toNumber(watched.qtyPerUnit),
+-    baseUnit: watched.baseUnit ?? pkg.baseUnit,
+-    unitCount: toNumber(watched.unitCount),
+-  };
+-  const changed = formDiffers(pkg, recordedForm);
+-
+-  const onSubmit = async (values: MovementFormValues) => {
+-    try {
+-      const { stockAfter } = await recordIn({ packageId: pkg._id, ...values });
+-      toast.success(`Added ${values.quantity} × ${formatPackageForm(values)} of ${drug.name}`, {
+-        description: `Stock is now ${stockAfter}`,
+-      });
+-      onDone();
+-    } catch (e) {
+-      toast.error(errorMessage(e, "Could not record Stock In"));
+-    }
+-  };
+-
+-  return (
+-    <Form {...form}>
+-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5 rounded-xl border-2 border-primary/30 bg-card p-4">
+-        <div className="flex items-baseline justify-between gap-3">
+-          <h2 className="text-lg font-bold">Stock In</h2>
+-          <span className="truncate text-sm text-muted-foreground">{drug.name}</span>
+-        </div>
+-
+-        <FormField
+-          control={form.control}
+-          name="quantity"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel>Quantity received</FormLabel>
+-              <FormControl>
+-                <Input
+-                  {...field}
+-                  value={String(field.value)}
+-                  inputMode="numeric"
+-                  autoFocus
+-                  onFocus={(e) => e.target.select()}
+-                  className="h-14 bg-background text-center text-2xl font-extrabold"
+-                />
+-              </FormControl>
+-              <FormMessage />
+-            </FormItem>
+-          )}
+-        />
+-
+-        <PackageFormFields control={form.control} changed={changed} />
+-
+-        <FormField
+-          control={form.control}
+-          name="notes"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel>Notes</FormLabel>
+-              <FormControl>
+-                <Textarea {...field} rows={2} placeholder="e.g. Invoice #4521 from supplier" className="bg-background" />
+-              </FormControl>
+-              <FormMessage />
+-            </FormItem>
+-          )}
+-        />
+-
+-        <div className="flex items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-sm">
+-          <span className="text-muted-foreground">Stock after</span>
+-          <span className="font-semibold">
+-            {pkg.stock} → <span className="text-lg font-extrabold">{pkg.stock + (quantity > 0 ? quantity : 0)}</span>
+-          </span>
+-        </div>
+-
+-        <div className="flex gap-2">
+-          <Button type="button" variant="ghost" onClick={onDone}>
+-            Cancel
+-          </Button>
+-          <Button type="submit" size="lg" className="flex-1" disabled={form.formState.isSubmitting}>
+-            {form.formState.isSubmitting ? <Spinner /> : <ArrowDownToLine />}
+-            Record Stock In
+-          </Button>
+-        </div>
+-      </form>
+-    </Form>
+-  );
+-}
+diff --git a/src/pages/stock-in/page.tsx b/src/pages/stock-in/page.tsx
+index 55ee8fa..1a9d6af 100644
+--- a/src/pages/stock-in/page.tsx
++++ b/src/pages/stock-in/page.tsx
+@@ -1,21 +1,5 @@
+-import PageHeader from "@/components/page-header.tsx";
+-import MovementLog from "@/components/stock/movement-log.tsx";
+-import StockDrugFinder from "@/components/stock/stock-drug-finder.tsx";
+-import StockInForm from "./_components/stock-in-form.tsx";
++import StockMovementPage from "@/components/stock/stock-movement-page.tsx";
+ 
+ export default function StockInPage() {
+-  return (
+-    <div className="mx-auto max-w-3xl space-y-10 p-4 md:p-8">
+-      <div>
+-        <PageHeader title="Stock In" description="Scan or search a drug, choose the package form, and record what arrived." />
+-        <StockDrugFinder>
+-          {(selection, reset) => <StockInForm key={selection.pkg._id} selection={selection} onDone={reset} />}
+-        </StockDrugFinder>
+-      </div>
+-      <section className="space-y-3">
+-        <h2 className="text-lg font-bold">Recent Stock In</h2>
+-        <MovementLog kind="in" />
+-      </section>
+-    </div>
+-  );
++  return <StockMovementPage kind="in" />;
+ }
+diff --git a/src/pages/stock-out/page.tsx b/src/pages/stock-out/page.tsx
+new file mode 100644
+index 0000000..5a0efea
+--- /dev/null
++++ b/src/pages/stock-out/page.tsx
+@@ -0,0 +1,5 @@
++import StockMovementPage from "@/components/stock/stock-movement-page.tsx";
++
++export default function StockOutPage() {
++  return <StockMovementPage kind="out" />;
++}

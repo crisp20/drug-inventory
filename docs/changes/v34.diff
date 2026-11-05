@@ -1,0 +1,101 @@
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index a1abb8e..c2b50f9 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -12,6 +12,7 @@ import {
+ } from "@/convex/lib/settings.ts";
+ import {
+   DEFAULT_STOCK_OUT_REASON,
++  MAX_MOVEMENT_QUANTITY,
+   type MovementKind,
+ } from "@/convex/lib/stock.ts";
+ import { useConfirm } from "@/hooks/use-confirm.ts";
+@@ -70,6 +71,8 @@ const COPY = {
+   },
+ } as const;
+ 
++const MAX_QUANTITY_DIGITS = String(MAX_MOVEMENT_QUANTITY).length;
++
+ function toNumber(value: string | number | undefined): number {
+   const n = Number(value);
+   return Number.isFinite(n) ? n : 0;
+@@ -180,7 +183,16 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+                 <Input
+                   {...field}
+                   value={String(field.value)}
++                  // Digits only, at most 6 (max is 100,000), so a stray scan can't become a huge number
++                  onChange={(e) =>
++                    field.onChange(
++                      e.target.value
++                        .replace(/\D/g, "")
++                        .slice(0, MAX_QUANTITY_DIGITS),
++                    )
++                  }
+                   inputMode="numeric"
++                  maxLength={MAX_QUANTITY_DIGITS}
+                   autoFocus
+                   onKeyDown={guardQuantity}
+                   onFocus={(e) => e.target.select()}
+diff --git a/src/lib/scanner-input.test.ts b/src/lib/scanner-input.test.ts
+index 49899a7..e2caf05 100644
+--- a/src/lib/scanner-input.test.ts
++++ b/src/lib/scanner-input.test.ts
+@@ -81,6 +81,26 @@ describe("scan bursts", () => {
+     );
+   });
+ 
++  it("keeps one scan together across a mid-code pause (e.g. at the GS1 separator)", () => {
++    const first = typeCodes(gs1, 5);
++    // 200ms pause, then the rest of the code arrives fast
++    const rest = gs1
++      .slice(0, 6)
++      .reduce<Burst | null>(
++        (b, [code, mods], i) =>
++          addKey(b, keyFromCode(code, mods), 1240 + i * 5, "ignored"),
++        first,
++      );
++    expect(scanResult(rest)?.text).toBe("(01)093LC(01)09");
++  });
++
++  it("still starts fresh after a pause in normal typing", () => {
++    const short = typeCodes(gs1.slice(0, 3), 5);
++    const next = addKey(short, "7", 1300, "abc");
++    expect(next.prefix).toBe("abc");
++    expect(next.chars).toEqual(["7"]);
++  });
++
+   it("flags keys the browser could not identify", () => {
+     const burst = typeCodes(gs1, 5);
+     const withUnknown = addKey(burst, null, 1000 + gs1.length * 5, "");
+diff --git a/src/lib/scanner-input.ts b/src/lib/scanner-input.ts
+index 1914013..6492afd 100644
+--- a/src/lib/scanner-input.ts
++++ b/src/lib/scanner-input.ts
+@@ -7,8 +7,10 @@
+ export const SCAN_MAX_GAP_MS = 50;
+ // Shortest real barcode (EAN-8) is 8 characters; 6 keeps a safety margin
+ export const SCAN_MIN_KEYS = 6;
+-// Silence after the last key that means the scan is finished
+-export const SCAN_END_MS = 100;
++// Silence after the last key that means the scan is finished. Generous because
++// scanners can pause mid-code (e.g. at the GS1 separator), especially with a
++// Chinese keyboard on; ending early sends half a code and the rest spills elsewhere.
++export const SCAN_END_MS = 300;
+ 
+ const DIGIT_SHIFTED = ")!@#$%^&*(";
+ const SYMBOLS: Record<string, [string, string]> = {
+@@ -85,8 +87,13 @@ export function addKey(
+   now: number,
+   value: string,
+ ): Burst {
++  // Once a burst is clearly a scanner, a mid-code pause doesn't split it
++  const maxGap =
++    burst && burst.chars.length >= SCAN_MIN_KEYS
++      ? SCAN_END_MS
++      : SCAN_MAX_GAP_MS;
+   const current =
+-    burst && now - burst.lastAt <= SCAN_MAX_GAP_MS
++    burst && now - burst.lastAt <= maxGap
+       ? burst
+       : { prefix: value, chars: [], lastAt: now, incomplete: false };
+   return char === null

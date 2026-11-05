@@ -1,0 +1,930 @@
+diff --git a/convex/activity.ts b/convex/activity.ts
+new file mode 100644
+index 0000000..37300f1
+--- /dev/null
++++ b/convex/activity.ts
+@@ -0,0 +1,73 @@
++import { paginationOptsValidator } from "convex/server";
++import { v } from "convex/values";
++import { internal } from "./_generated/api";
++import { internalMutation, query } from "./_generated/server";
++import { requireAdmin } from "./lib/access";
++import { logMovement, logUndo } from "./lib/activity";
++import { withinPeriod } from "./lib/period";
++import { activityCategory } from "./schema/activity";
++
++// Admin-only full activity log, newest first.
++// Medicine, then type, use an index; the rest is filtered before paginating.
++export const list = query({
++  args: {
++    category: v.optional(activityCategory),
++    drugId: v.optional(v.id("drugs")),
++    userId: v.optional(v.id("users")),
++    since: v.optional(v.string()),
++    until: v.optional(v.string()),
++    paginationOpts: paginationOptsValidator,
++  },
++  handler: async (ctx, { category, drugId, userId, since, until, paginationOpts }) => {
++    await requireAdmin(ctx);
++    const table = ctx.db.query("activityLog");
++    const scoped = drugId
++      ? table.withIndex("by_drug_and_occurredAt", (q) => withinPeriod(q.eq("drugRef", drugId), since, until))
++      : category
++        ? table.withIndex("by_category_and_occurredAt", (q) =>
++            withinPeriod(q.eq("category", category), since, until),
++          )
++        : table.withIndex("by_occurredAt", (q) => withinPeriod(q, since, until));
++    return await scoped
++      .order("desc")
++      .filter((q) =>
++        q.and(
++          userId ? q.eq(q.field("userRef"), userId) : true,
++          drugId && category ? q.eq(q.field("category"), category) : true,
++        ),
++      )
++      .paginate(paginationOpts);
++  },
++});
++
++const BACKFILL_BATCH = 200;
++
++// One-off: copies Stock In / Stock Out / Undo entries recorded before the log existed.
++// Skips entries already logged, so it is safe to run again.
++export const backfillMovements = internalMutation({
++  args: { cursor: v.union(v.string(), v.null()) },
++  handler: async (ctx, { cursor }): Promise<{ added: number; done: boolean }> => {
++    const page = await ctx.db
++      .query("stockMovements")
++      .paginate({ numItems: BACKFILL_BATCH, cursor });
++    let added = 0;
++    for (const m of page.page) {
++      const logged = await ctx.db
++        .query("activityLog")
++        .withIndex("by_movement", (q) => q.eq("movementRef", m._id))
++        .take(2);
++      if (!logged.some((e) => e.category !== "undo")) {
++        await logMovement(ctx, m);
++        added++;
++      }
++      if (m.undo && !logged.some((e) => e.category === "undo")) {
++        await logUndo(ctx, m);
++        added++;
++      }
++    }
++    if (!page.isDone) {
++      await ctx.scheduler.runAfter(0, internal.activity.backfillMovements, { cursor: page.continueCursor });
++    }
++    return { added, done: page.isDone };
++  },
++});
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index 28d8cf2..a2a3352 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -3,6 +3,7 @@ import { ConvexError, v } from "convex/values";
+ import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+ import type { Doc, Id } from "./_generated/dataModel";
+ import { requireAdmin } from "./lib/access";
++import { SYSTEM_ACTOR, actorOf, logDrugDelete, logDrugImport, type Actor } from "./lib/activity";
+ import { normalizeBarcode } from "./lib/barcode";
+ import {
+   MAX_IMPORT_BATCH,
+@@ -142,7 +143,12 @@ function failureMessage(error: unknown): string {
+ 
+ // Creates a new drug, or ("update") brings an existing drug in line with the file.
+ // Stock, pictures and package forms that only exist in the app are never touched.
+-async function applyDrug(ctx: MutationCtx, d: ImportDrug, action: "create" | "update"): Promise<ApplyResult> {
++async function applyDrug(
++  ctx: MutationCtx,
++  d: ImportDrug,
++  action: "create" | "update",
++  actor: Actor,
++): Promise<ApplyResult> {
+   const existing = await findDrug(ctx, d.drugId);
+   if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
+   if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
+@@ -192,10 +198,12 @@ async function applyDrug(ctx: MutationCtx, d: ImportDrug, action: "create" | "up
+     };
+     const drugRef = existing ? existing._id : await ctx.db.insert("drugs", fields);
+     if (existing) await ctx.db.patch("drugs", existing._id, fields);
++    const saved: PackageInput[] = [];
+     for (const p of input.packages) {
+       const form = { qtyPerUnit: p.qtyPerUnit, baseUnit: p.baseUnit, unitCount: p.unitCount };
+       if (p.packageId) {
+         await ctx.db.patch("drugPackages", p.packageId, form);
++        saved.push(p);
+       } else {
+         await ctx.db.insert("drugPackages", {
+           drugRef,
+@@ -205,8 +213,16 @@ async function applyDrug(ctx: MutationCtx, d: ImportDrug, action: "create" | "up
+           stock: 0,
+           imageIds: [],
+         });
++        saved.push({ ...p, stock: 0, imageIds: [] });
+       }
+     }
++    await logDrugImport(ctx, actor, {
++      drug: { _id: drugRef, drugId: input.drugId, name: input.name },
++      before: existing,
++      beforePackages: current,
++      after: input,
++      afterPackages: saved,
++    });
+     return { failure: null, skippedBarcodes: [...clashes] };
+   } catch (error) {
+     return { failure: failureMessage(error), skippedBarcodes: [...clashes] };
+@@ -220,13 +236,13 @@ export const applyBatch = mutation({
+     ),
+   },
+   handler: async (ctx, args) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     assertBatch(args.items.length);
+     let applied = 0;
+     const failures: { drugId: string; name: string; message: string }[] = [];
+     const skipped: { drugId: string; name: string; barcodes: string[] }[] = [];
+     for (const { drug, action } of args.items) {
+-      const result = await applyDrug(ctx, drug, action);
++      const result = await applyDrug(ctx, drug, action, actorOf(admin));
+       if (result.failure) failures.push({ drugId: drug.drugId, name: drug.name, message: result.failure });
+       else applied += 1;
+       if (result.skippedBarcodes.length > 0) {
+@@ -240,12 +256,13 @@ export const applyBatch = mutation({
+ export const removeBatch = mutation({
+   args: { ids: v.array(v.id("drugs")) },
+   handler: async (ctx, args) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     assertBatch(args.ids.length);
+     let removed = 0;
+     for (const id of args.ids) {
+       const drug = await ctx.db.get("drugs", id);
+       if (!drug) continue;
++      await logDrugDelete(ctx, actorOf(admin), drug, await getPackages(ctx, drug._id), "import");
+       await deleteDrug(ctx, drug);
+       removed += 1;
+     }
+@@ -265,7 +282,7 @@ export const seedNewDrugs = internalMutation({
+         existing += 1;
+         continue;
+       }
+-      const result = await applyDrug(ctx, d, "create");
++      const result = await applyDrug(ctx, d, "create", SYSTEM_ACTOR);
+       if (result.failure) failures.push(`${d.drugId}: ${result.failure}`);
+       else created += 1;
+     }
+diff --git a/convex/drugPhotos.ts b/convex/drugPhotos.ts
+index f9ef0bf..383f9c5 100644
+--- a/convex/drugPhotos.ts
++++ b/convex/drugPhotos.ts
+@@ -2,6 +2,7 @@ import { ConvexError, v } from "convex/values";
+ import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
+ import type { Id } from "./_generated/dataModel";
+ import { requireAdmin } from "./lib/access";
++import { SYSTEM_ACTOR, actorOf, logActivity, type Actor } from "./lib/activity";
+ import { deleteFiles } from "./lib/drugs";
+ import { MAX_PHOTO_BATCH, MAX_PHOTO_CHECK } from "./lib/drugPhotos";
+ 
+@@ -16,7 +17,11 @@ async function findDrug(ctx: MutationCtx, drugId: string) {
+ 
+ // Sets each drug's main picture, replacing (and deleting) the old one.
+ // Uploads for unknown Drug IDs are deleted so no orphan files are left behind.
+-async function applyPhotos(ctx: MutationCtx, items: { drugId: string; storageId: Id<"_storage"> }[]) {
++async function applyPhotos(
++  ctx: MutationCtx,
++  items: { drugId: string; storageId: Id<"_storage"> }[],
++  actor: Actor,
++) {
+   let applied = 0;
+   const notFound: string[] = [];
+   for (const { drugId, storageId } of items) {
+@@ -28,6 +33,13 @@ async function applyPhotos(ctx: MutationCtx, items: { drugId: string; storageId:
+     }
+     if (drug.imageId && drug.imageId !== storageId) await deleteFiles(ctx, [drug.imageId]);
+     await ctx.db.patch("drugs", drug._id, { imageId: storageId, updatedAt: new Date().toISOString() });
++    const action = drug.imageId ? "Replaced" : "Added";
++    await logActivity(ctx, actor, {
++      category: "photo",
++      action,
++      summary: `${action} medicine picture (photo upload)`,
++      drug,
++    });
+     applied += 1;
+   }
+   return { applied, notFound };
+@@ -58,16 +70,16 @@ export const checkPhotos = query({
+ export const setPhotos = mutation({
+   args: { items: v.array(photoItem) },
+   handler: async (ctx, args) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     if (args.items.length > MAX_PHOTO_BATCH) {
+       throw new ConvexError({ code: "BAD_REQUEST", message: `Send at most ${MAX_PHOTO_BATCH} photos at a time` });
+     }
+-    return await applyPhotos(ctx, args.items);
++    return await applyPhotos(ctx, args.items, actorOf(admin));
+   },
+ });
+ 
+ // One-off loads run by the builder
+ export const setPhotosInternal = internalMutation({
+   args: { items: v.array(photoItem) },
+-  handler: async (ctx, args) => await applyPhotos(ctx, args.items),
++  handler: async (ctx, args) => await applyPhotos(ctx, args.items, SYSTEM_ACTOR),
+ });
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index a843d3b..0f21289 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -3,6 +3,7 @@ import { ConvexError, v } from "convex/values";
+ import { mutation, query } from "./_generated/server";
+ import type { Doc, Id } from "./_generated/dataModel";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
++import { actorOf, logDrugDelete, logDrugSave } from "./lib/activity";
+ import { normalizeBarcode, toStoredBarcode } from "./lib/barcode";
+ import {
+   assertBarcodesFree,
+@@ -141,7 +142,7 @@ export const get = query({
+ export const create = mutation({
+   args: drugArgs,
+   handler: async (ctx, args) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     const input = cleanDrugInput(args);
+     await assertDrugIdFree(ctx, input.drugId);
+     await assertBarcodesFree(ctx, input.packages);
+@@ -159,6 +160,13 @@ export const create = mutation({
+     for (const p of input.packages) {
+       await ctx.db.insert("drugPackages", { drugRef, ...packageFields(p) });
+     }
++    await logDrugSave(ctx, actorOf(admin), {
++      drug: { _id: drugRef, drugId: input.drugId, name: input.name },
++      before: null,
++      beforePackages: [],
++      after: input,
++      afterPackages: input.packages.map((p) => ({ ...p, barcode: toStoredBarcode(p.barcode) })),
++    });
+     return drugRef;
+   },
+ });
+@@ -166,7 +174,7 @@ export const create = mutation({
+ export const update = mutation({
+   args: { id: v.id("drugs"), ...drugArgs },
+   handler: async (ctx, { id, ...rest }) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     const drug = await ctx.db.get("drugs", id);
+     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
+     const input = cleanDrugInput(rest);
+@@ -199,6 +207,14 @@ export const update = mutation({
+       if (match) await ctx.db.patch("drugPackages", match._id, fields);
+       else await ctx.db.insert("drugPackages", { drugRef: id, ...fields });
+     }
++    await logDrugSave(ctx, actorOf(admin), {
++      drug: { _id: id, drugId: input.drugId, name: input.name },
++      before: drug,
++      beforePackages: existing,
++      after: input,
++      // Normalized barcodes so a re-saved package isn't reported as changed
++      afterPackages: input.packages.map((p) => ({ ...p, barcode: toStoredBarcode(p.barcode) })),
++    });
+     return null;
+   },
+ });
+@@ -206,9 +222,10 @@ export const update = mutation({
+ export const remove = mutation({
+   args: { id: v.id("drugs") },
+   handler: async (ctx, args) => {
+-    await requireAdmin(ctx);
++    const admin = await requireAdmin(ctx);
+     const drug = await ctx.db.get("drugs", args.id);
+     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
++    await logDrugDelete(ctx, actorOf(admin), drug, await getPackages(ctx, drug._id), "form");
+     await deleteDrug(ctx, drug);
+     return null;
+   },
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+new file mode 100644
+index 0000000..a892955
+--- /dev/null
++++ b/convex/lib/activity.ts
+@@ -0,0 +1,354 @@
++import type { MutationCtx } from "../_generated/server";
++import type { Doc, Id } from "../_generated/dataModel";
++import { formatPackageForm } from "./barcode";
++import type { PackageInput } from "./drugs";
++
++// Filter / badge labels for each kind of activity (matches schema/activity.ts)
++export const ACTIVITY_CATEGORIES = [
++  { value: "medicine", label: "Medicines" },
++  { value: "package", label: "Package forms" },
++  { value: "photo", label: "Pictures" },
++  { value: "import", label: "Imports" },
++  { value: "stock_in", label: "Stock In" },
++  { value: "stock_out", label: "Stock Out" },
++  { value: "undo", label: "Undos" },
++  { value: "user", label: "Users" },
++  { value: "settings", label: "Settings" },
++] as const;
++export type ActivityCategory = (typeof ACTIVITY_CATEGORIES)[number]["value"];
++
++export const MAX_CHANGES = 40;
++
++export type Change = { field: string; before: string; after: string };
++export type Actor = { userRef?: Id<"users">; userName: string };
++
++export const SYSTEM_ACTOR: Actor = { userName: "System" };
++
++export function displayName(u: Pick<Doc<"users">, "name" | "email">): string {
++  return u.name ?? u.email ?? "Unknown user";
++}
++
++export function actorOf(user: Doc<"users">): Actor {
++  return { userRef: user._id, userName: displayName(user) };
++}
++
++type Entry = {
++  category: ActivityCategory;
++  action: string;
++  summary: string;
++  drug?: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
++  detail?: string;
++  changes?: Change[];
++  movementRef?: Id<"stockMovements">;
++  occurredAt?: string;
++};
++
++export async function logActivity(ctx: MutationCtx, actor: Actor, e: Entry) {
++  await ctx.db.insert("activityLog", {
++    category: e.category,
++    action: e.action,
++    summary: e.summary,
++    drugRef: e.drug?._id,
++    drugCode: e.drug?.drugId,
++    drugName: e.drug?.name,
++    detail: e.detail || undefined,
++    changes:
++      e.changes && e.changes.length > 0
++        ? e.changes.slice(0, MAX_CHANGES)
++        : undefined,
++    movementRef: e.movementRef,
++    userRef: actor.userRef,
++    userName: actor.userName,
++    occurredAt: e.occurredAt ?? new Date().toISOString(),
++  });
++}
++
++// ---------- Medicine diffs ----------
++
++type DrugFields = Pick<
++  Doc<"drugs">,
++  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName"
++>;
++
++const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
++  ["drugId", "Drug ID"],
++  ["name", "Name"],
++  ["brandName", "Brand"],
++  ["manufacturer", "Manufacturer"],
++  ["pieceName", "Piece name"],
++];
++
++// Fields that differ; `before` null means a new medicine (every filled field)
++export function diffDrugFields(
++  before: DrugFields | null,
++  after: DrugFields,
++): Change[] {
++  const changes: Change[] = [];
++  for (const [key, label] of DRUG_FIELDS) {
++    const old = before ? before[key] : "";
++    if (old !== after[key]) {
++      changes.push({ field: label, before: old, after: after[key] });
++    }
++  }
++  return changes;
++}
++
++type PackageLike = Pick<
++  PackageInput,
++  "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount"
++>;
++
++export function packageLabel(p: PackageLike): string {
++  return `${formatPackageForm(p)} · ${p.barcode || "No barcode"}`;
++}
++
++function plural(n: number, word: string) {
++  return `${n} ${word}${n === 1 ? "" : "s"}`;
++}
++
++type SavedPackage = Pick<
++  Doc<"drugPackages">,
++  "_id" | "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount" | "stock" | "imageIds"
++>;
++
++function diffPackage(before: SavedPackage, after: PackageInput): Change[] {
++  const changes: Change[] = [];
++  if (before.barcode !== after.barcode) {
++    changes.push({
++      field: "Barcode",
++      before: before.barcode || "No barcode",
++      after: after.barcode || "No barcode",
++    });
++  }
++  const oldForm = formatPackageForm(before);
++  const newForm = formatPackageForm(after);
++  if (oldForm !== newForm) {
++    changes.push({ field: "Package form", before: oldForm, after: newForm });
++  }
++  if (before.stock !== after.stock) {
++    changes.push({
++      field: "Stock",
++      before: String(before.stock),
++      after: String(after.stock),
++    });
++  }
++  return changes;
++}
++
++function countNew(ids: Id<"_storage">[], than: Id<"_storage">[]) {
++  const set = new Set(than);
++  return ids.filter((id) => !set.has(id)).length;
++}
++
++function pictureDetail(added: number, removed: number) {
++  return [
++    added > 0 ? `${plural(added, "picture")} added` : "",
++    removed > 0 ? `${plural(removed, "picture")} removed` : "",
++  ]
++    .filter(Boolean)
++    .join(", ");
++}
++
++type DrugSave = {
++  drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
++  before: (DrugFields & { imageId?: Id<"_storage"> }) | null;
++  beforePackages: SavedPackage[];
++  after: DrugFields & { imageId?: Id<"_storage"> };
++  afterPackages: PackageInput[];
++};
++
++// Activity entries for a medicine saved from the Inventory form
++export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
++  const { drug, before, after } = s;
++  if (!before) {
++    await logActivity(ctx, actor, {
++      category: "medicine",
++      action: "Added",
++      summary: `Added ${after.name}`,
++      drug,
++      detail: `${plural(s.afterPackages.length, "package form")}: ${s.afterPackages
++        .map((p) => `${packageLabel(p)} (stock ${p.stock})`)
++        .join("; ")}`,
++      changes: diffDrugFields(null, after),
++    });
++    return;
++  }
++
++  const fieldChanges = diffDrugFields(before, after);
++  if (fieldChanges.length > 0) {
++    await logActivity(ctx, actor, {
++      category: "medicine",
++      action: "Edited",
++      summary: `Edited ${after.name}`,
++      drug,
++      changes: fieldChanges,
++    });
++  }
++
++  if (before.imageId !== after.imageId) {
++    const action = !after.imageId
++      ? "Removed"
++      : before.imageId
++        ? "Replaced"
++        : "Added";
++    await logActivity(ctx, actor, {
++      category: "photo",
++      action,
++      summary: `${action} medicine picture`,
++      drug,
++    });
++  }
++
++  const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
++  const kept = new Set<Id<"drugPackages">>();
++  for (const p of s.afterPackages) {
++    const old = p.packageId ? byId.get(p.packageId) : undefined;
++    if (!old) {
++      await logActivity(ctx, actor, {
++        category: "package",
++        action: "Added",
++        summary: `Added package form ${packageLabel(p)}`,
++        drug,
++        detail: [
++          `Stock ${p.stock}`,
++          p.imageIds.length > 0 ? plural(p.imageIds.length, "picture") : "",
++        ]
++          .filter(Boolean)
++          .join(" · "),
++      });
++      continue;
++    }
++    kept.add(old._id);
++    const changes = diffPackage(old, p);
++    if (changes.length > 0) {
++      await logActivity(ctx, actor, {
++        category: "package",
++        action: "Edited",
++        summary: `Edited package form ${packageLabel(p)}`,
++        drug,
++        changes,
++      });
++    }
++    const added = countNew(p.imageIds, old.imageIds);
++    const removed = countNew(old.imageIds, p.imageIds);
++    if (added + removed > 0) {
++      await logActivity(ctx, actor, {
++        category: "photo",
++        action: "Changed",
++        summary: `Packaging pictures for ${packageLabel(p)}`,
++        drug,
++        detail: pictureDetail(added, removed),
++      });
++    }
++  }
++  for (const old of s.beforePackages) {
++    if (kept.has(old._id)) continue;
++    await logActivity(ctx, actor, {
++      category: "package",
++      action: "Removed",
++      summary: `Removed package form ${packageLabel(old)}`,
++      drug,
++      detail: `Had stock ${old.stock}`,
++    });
++  }
++}
++
++// One entry per medicine created or updated from a spreadsheet import
++export async function logDrugImport(
++  ctx: MutationCtx,
++  actor: Actor,
++  s: DrugSave,
++) {
++  const { drug, before, after } = s;
++  const changes = diffDrugFields(before, after);
++  const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
++  for (const p of s.afterPackages) {
++    const old = p.packageId ? byId.get(p.packageId) : undefined;
++    if (!old) {
++      changes.push({ field: "Package form added", before: "", after: packageLabel(p) });
++    } else {
++      for (const c of diffPackage(old, p)) {
++        changes.push({ ...c, field: `${c.field} (${old.barcode || "no barcode"})` });
++      }
++    }
++  }
++  if (before && changes.length === 0) return;
++  await logActivity(ctx, actor, {
++    category: "import",
++    action: before ? "Updated" : "Added",
++    summary: `${before ? "Updated" : "Added"} ${after.name} from import`,
++    drug,
++    changes,
++  });
++}
++
++export async function logDrugDelete(
++  ctx: MutationCtx,
++  actor: Actor,
++  drug: Doc<"drugs">,
++  packages: SavedPackage[],
++  via: "form" | "import",
++) {
++  const stock = packages.reduce((sum, p) => sum + p.stock, 0);
++  await logActivity(ctx, actor, {
++    category: via === "import" ? "import" : "medicine",
++    action: "Deleted",
++    summary: `Deleted ${drug.name}${via === "import" ? " (not in import file)" : ""}`,
++    drug,
++    detail: `${plural(packages.length, "package form")}, total stock ${stock}${
++      packages.length > 0 ? `: ${packages.map(packageLabel).join("; ")}` : ""
++    }`,
++  });
++}
++
++// ---------- Stock ----------
++
++function drugOfMovement(m: Doc<"stockMovements">) {
++  return { _id: m.drugRef, drugId: m.drugCode, name: m.drugName };
++}
++
++export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
++  const sign = m.kind === "in" ? "+" : "−";
++  await logActivity(
++    ctx,
++    { userRef: m.userRef, userName: m.userName },
++    {
++      category: m.kind === "in" ? "stock_in" : "stock_out",
++      action: m.kind === "in" ? "Stock In" : "Stock Out",
++      summary: `${sign}${m.quantity} ${m.drugName} (${formatPackageForm(m)})`,
++      drug: drugOfMovement(m),
++      detail: [
++        m.barcode || "No barcode",
++        `Stock ${m.stockBefore} → ${m.stockAfter}`,
++        m.reason ?? "",
++        m.notes,
++      ]
++        .filter(Boolean)
++        .join(" · "),
++      movementRef: m._id,
++      occurredAt: m.occurredAt,
++    },
++  );
++}
++
++export async function logUndo(ctx: MutationCtx, m: Doc<"stockMovements">) {
++  if (!m.undo) return;
++  const sign = m.kind === "in" ? "+" : "−";
++  await logActivity(
++    ctx,
++    { userRef: m.undo.userRef, userName: m.undo.userName },
++    {
++      category: "undo",
++      action: "Undo",
++      summary: `Undid ${m.kind === "in" ? "Stock In" : "Stock Out"} ${sign}${m.quantity} ${m.drugName} (${formatPackageForm(m)})`,
++      drug: drugOfMovement(m),
++      detail: [
++        m.undo.reason,
++        `Stock ${m.undo.stockBefore} → ${m.undo.stockAfter}`,
++        `Originally by ${m.userName}`,
++      ].join(" · "),
++      movementRef: m._id,
++      occurredAt: m.undo.undoneAt,
++    },
++  );
++}
+diff --git a/convex/lib/period.ts b/convex/lib/period.ts
+new file mode 100644
+index 0000000..45b8768
+--- /dev/null
++++ b/convex/lib/period.ts
+@@ -0,0 +1,22 @@
++// Narrows any index range ending in occurredAt to [since, until]
++export type OccurredAtRange<R> = {
++  gte(
++    field: "occurredAt",
++    value: string,
++  ): {
++    lte(field: "occurredAt", value: string): R;
++  } & R;
++  lte(field: "occurredAt", value: string): R;
++} & R;
++
++export function withinPeriod<R>(
++  q: OccurredAtRange<R>,
++  since: string | undefined,
++  until: string | undefined,
++): R {
++  if (since && until)
++    return q.gte("occurredAt", since).lte("occurredAt", until);
++  if (since) return q.gte("occurredAt", since);
++  if (until) return q.lte("occurredAt", until);
++  return q;
++}
+diff --git a/convex/schema.ts b/convex/schema.ts
+index dab5216..46f753d 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -1,4 +1,5 @@
+ import { defineSchema } from "convex/server";
++import { activityLogTable } from "./schema/activity";
+ import { usersTable } from "./schema/users";
+ import { drugPackagesTable, drugsTable } from "./schema/drugs";
+ import { settingsTable } from "./schema/settings";
+@@ -10,4 +11,5 @@ export default defineSchema({
+   drugPackages: drugPackagesTable,
+   stockMovements: stockMovementsTable,
+   settings: settingsTable,
++  activityLog: activityLogTable,
+ });
+diff --git a/convex/schema/activity.ts b/convex/schema/activity.ts
+new file mode 100644
+index 0000000..c230c7a
+--- /dev/null
++++ b/convex/schema/activity.ts
+@@ -0,0 +1,44 @@
++import { defineTable } from "convex/server";
++import { v } from "convex/values";
++
++// Keep in sync with ACTIVITY_CATEGORIES in convex/lib/activity.ts
++export const activityCategory = v.union(
++  v.literal("medicine"),
++  v.literal("package"),
++  v.literal("photo"),
++  v.literal("import"),
++  v.literal("stock_in"),
++  v.literal("stock_out"),
++  v.literal("undo"),
++  v.literal("user"),
++  v.literal("settings"),
++);
++
++// Append-only admin audit trail. Names are copied in so entries still read
++// correctly after a drug or user is edited or deleted.
++export const activityLogTable = defineTable({
++  category: activityCategory,
++  // Short verb shown as a badge, e.g. "Added", "Edited", "Stock In"
++  action: v.string(),
++  summary: v.string(),
++  drugRef: v.optional(v.id("drugs")),
++  drugCode: v.optional(v.string()),
++  drugName: v.optional(v.string()),
++  detail: v.optional(v.string()),
++  // Bounded list of old → new values (capped at MAX_CHANGES)
++  changes: v.optional(
++    v.array(
++      v.object({ field: v.string(), before: v.string(), after: v.string() }),
++    ),
++  ),
++  // Links Stock In / Stock Out / Undo entries to their stock entry
++  movementRef: v.optional(v.id("stockMovements")),
++  // Empty for system actions (e.g. one-off data loads)
++  userRef: v.optional(v.id("users")),
++  userName: v.string(),
++  occurredAt: v.string(),
++})
++  .index("by_occurredAt", ["occurredAt"])
++  .index("by_category_and_occurredAt", ["category", "occurredAt"])
++  .index("by_drug_and_occurredAt", ["drugRef", "occurredAt"])
++  .index("by_movement", ["movementRef"]);
+diff --git a/convex/settings.ts b/convex/settings.ts
+index 4c0bb18..012b3fe 100644
+--- a/convex/settings.ts
++++ b/convex/settings.ts
+@@ -1,6 +1,7 @@
+ import { v } from "convex/values";
+ import { mutation, query } from "./_generated/server";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
++import { actorOf, logActivity } from "./lib/activity";
+ import {
+   cleanLargeQuantityThreshold,
+   DEFAULT_LARGE_QUANTITY_THRESHOLD,
+@@ -33,8 +34,24 @@ export const update = mutation({
+       updatedByName: admin.name ?? admin.email ?? "Unknown user",
+     };
+     const row = await ctx.db.query("settings").first();
++    const before =
++      row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD;
+     if (row) await ctx.db.patch("settings", row._id, fields);
+     else await ctx.db.insert("settings", fields);
++    if (before !== fields.largeQuantityThreshold) {
++      await logActivity(ctx, actorOf(admin), {
++        category: "settings",
++        action: "Changed",
++        summary: "Changed the large quantity check",
++        changes: [
++          {
++            field: "Large quantity check",
++            before: String(before),
++            after: String(fields.largeQuantityThreshold),
++          },
++        ],
++      });
++    }
+     return null;
+   },
+ });
+diff --git a/convex/stock.ts b/convex/stock.ts
+index df29be9..211790a 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -3,6 +3,8 @@ import { ConvexError, v } from "convex/values";
+ import { mutation, query, type MutationCtx } from "./_generated/server";
+ import type { Id } from "./_generated/dataModel";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
++import { logMovement, logUndo } from "./lib/activity";
++import { withinPeriod } from "./lib/period";
+ import {
+   cleanMovementInput,
+   cleanReason,
+@@ -44,7 +46,7 @@ async function recordMovement(
+ 
+   const stockAfter = nextStock(pkg.stock, kind, input.quantity);
+   await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
+-  await ctx.db.insert("stockMovements", {
++  const movementId = await ctx.db.insert("stockMovements", {
+     kind,
+     drugRef: drug._id,
+     packageRef: pkg._id,
+@@ -65,6 +67,8 @@ async function recordMovement(
+     userName: user.name ?? user.email ?? "Unknown user",
+     occurredAt: new Date().toISOString(),
+   });
++  const movement = await ctx.db.get("stockMovements", movementId);
++  if (movement) await logMovement(ctx, movement);
+   return { stockAfter };
+ }
+ 
+@@ -127,6 +131,8 @@ export const undoMovement = mutation({
+         undoneAt: new Date().toISOString(),
+       },
+     });
++    const undone = await ctx.db.get("stockMovements", movement._id);
++    if (undone) await logUndo(ctx, undone);
+     return { stockAfter };
+   },
+ });
+@@ -139,28 +145,6 @@ const movementFilter = v.optional(
+   ),
+ );
+ 
+-// Narrows any index range ending in occurredAt to [since, until]
+-type OccurredAtRange<R> = {
+-  gte(
+-    field: "occurredAt",
+-    value: string,
+-  ): {
+-    lte(field: "occurredAt", value: string): R;
+-  } & R;
+-  lte(field: "occurredAt", value: string): R;
+-} & R;
+-function withinPeriod<R>(
+-  q: OccurredAtRange<R>,
+-  since: string | undefined,
+-  until: string | undefined,
+-): R {
+-  if (since && until)
+-    return q.gte("occurredAt", since).lte("occurredAt", until);
+-  if (since) return q.gte("occurredAt", since);
+-  if (until) return q.lte("occurredAt", until);
+-  return q;
+-}
+-
+ // Newest first. Leaving out `kind` returns both Stock In and Stock Out,
+ // which is only supported for a single package form.
+ // Time period uses the index; user and reason are filtered before paginating.
+diff --git a/convex/users.ts b/convex/users.ts
+index 0e30996..8fdb8e3 100644
+--- a/convex/users.ts
++++ b/convex/users.ts
+@@ -6,6 +6,7 @@ import {
+   requireActiveUser,
+   requireAdmin,
+ } from "./lib/access";
++import { actorOf, displayName, logActivity } from "./lib/activity";
+ import { userRole, userStatus } from "./schema/users";
+ 
+ export const updateCurrentUser = mutation({
+@@ -41,13 +42,25 @@ export const updateCurrentUser = mutation({
+       return user._id;
+     }
+     // New people wait for admin approval, except the owner
+-    return await ctx.db.insert("users", {
++    const userId = await ctx.db.insert("users", {
+       name: identity.name,
+       email: identity.email,
+       tokenIdentifier: identity.tokenIdentifier,
+       role: isOwner ? "admin" : "staff",
+       status: isOwner ? "active" : "pending",
+     });
++    const name = identity.name ?? identity.email ?? "Unknown user";
++    await logActivity(
++      ctx,
++      { userRef: userId, userName: name },
++      {
++        category: "user",
++        action: "Signed up",
++        summary: `${name} signed up${isOwner ? "" : " (waiting for approval)"}`,
++        detail: identity.email,
++      },
++    );
++    return userId;
+   },
+ });
+ 
+@@ -112,6 +125,25 @@ export const updateAccess = mutation({
+       role: args.role,
+       status: args.status,
+     });
++    const changes = [
++      { field: "Role", before: target.role ?? "staff", after: args.role },
++      { field: "Status", before: target.status ?? "pending", after: args.status },
++    ].filter((c) => c.before !== c.after);
++    if (changes.length > 0) {
++      const approved = target.status === "pending" && args.status === "active";
++      const action = approved
++        ? "Approved"
++        : args.status === "disabled" && target.status !== "disabled"
++          ? "Disabled"
++          : "Access changed";
++      await logActivity(ctx, actorOf(admin), {
++        category: "user",
++        action,
++        summary: `${action}: ${displayName(target)}`,
++        detail: target.email,
++        changes,
++      });
++    }
+     return null;
+   },
+ });

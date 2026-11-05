@@ -25,6 +25,7 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
         };
       },
       hasUnsaved: () => dirtyRef.current.size > 0,
+      clearAll: () => dirtyRef.current.clear(),
       confirmDiscard: async () =>
         dirtyRef.current.size === 0 ||
         (await confirm({

@@ -1,0 +1,199 @@
+diff --git a/convex/canister.test.ts b/convex/canister.test.ts
+index 81e106f..5323530 100644
+--- a/convex/canister.test.ts
++++ b/convex/canister.test.ts
+@@ -129,6 +129,36 @@ describe("Batch and expiry on any Stock Out", () => {
+       "Scanned code did not match: 0103838957097319 | 10PW5322",
+     );
+   });
++
++  it("can be saved on Stock In too, and are checked the same way", async () => {
++    const { owner, staff, packageId } = await setup();
++    await staff.mutation(api.stock.recordIn, {
++      packageId,
++      quantity: 2,
++      notes: "",
++      batch: " RC4304 ",
++      expiry: "2099-11-30",
++    });
++    await staff.mutation(api.stock.recordIn, {
++      packageId,
++      quantity: 1,
++      notes: "",
++    });
++    const { page } = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(page[0].batch).toBeUndefined();
++    expect(page[1]).toMatchObject({ batch: "RC4304", expiry: "2099-11-30" });
++    await expect(
++      staff.mutation(api.stock.recordIn, {
++        packageId,
++        quantity: 1,
++        notes: "",
++        expiry: "2001-01-01",
++      }),
++    ).rejects.toThrow();
++  });
+ });
+ 
+ describe("Canister details on Stock Out", () => {
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 2a685dc..49efdce 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -89,9 +89,26 @@ async function recordMovement(
+ 
+ // Records stock received. Any approved user (admin or staff) can do this.
+ export const recordIn = mutation({
+-  args: movementArgs,
+-  handler: async (ctx, { packageId, ...rest }) => {
+-    return await recordMovement(ctx, "in", packageId, rest);
++  args: {
++    ...movementArgs,
++    batch: v.optional(v.string()),
++    expiry: v.optional(v.string()),
++    mismatchedScan: v.optional(v.string()),
++  },
++  handler: async (
++    ctx,
++    { packageId, batch, expiry, mismatchedScan, ...rest },
++  ) => {
++    return await recordMovement(
++      ctx,
++      "in",
++      packageId,
++      rest,
++      undefined,
++      undefined,
++      cleanBatchExpiry({ batch, expiry }),
++      cleanMismatchedScan(mismatchedScan),
++    );
+   },
+ });
+ 
+diff --git a/src/components/stock/batch-expiry-fields.tsx b/src/components/stock/batch-expiry-fields.tsx
+index b7cedd3..278eec2 100644
+--- a/src/components/stock/batch-expiry-fields.tsx
++++ b/src/components/stock/batch-expiry-fields.tsx
+@@ -19,12 +19,14 @@ import { Input } from "@/components/ui/input.tsx";
+ import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
+ import { useScannerInput } from "@/hooks/use-scanner-input.ts";
+ import { useConfirm } from "@/hooks/use-confirm.ts";
++import type { MovementKind } from "@/convex/lib/stock.ts";
+ import type {
+   MovementFormInput,
+   MovementFormValues,
+ } from "./movement-form-schema.ts";
+ 
+ type Props = {
++  kind: MovementKind;
+   packageBarcode: string;
+   // Months ahead that count as "expiring soon" (from Settings)
+   warningMonths: number;
+@@ -38,8 +40,9 @@ const inputClass = "h-10 bg-background";
+ 
+ const showDay = (day: string) => format(parseISO(day), "d MMM yyyy");
+ 
+-// Batch and Expiry on Stock Out, with a GS1 scan box that fills both
++// Batch and Expiry on Stock In and Stock Out, with a GS1 scan box that fills both
+ export default function BatchExpiryFields({
++  kind,
+   packageBarcode,
+   warningMonths,
+   scannedExpired,
+@@ -61,7 +64,11 @@ export default function BatchExpiryFields({
+ 
+   return (
+     <div className="space-y-3">
+-      <Gs1ScanBox packageBarcode={packageBarcode} onExpired={setExpiredScan} />
++      <Gs1ScanBox
++        kind={kind}
++        packageBarcode={packageBarcode}
++        onExpired={setExpiredScan}
++      />
+       {mismatchedScan && (
+         <div
+           role="status"
+@@ -136,9 +143,11 @@ export default function BatchExpiryFields({
+ 
+ // Scan the box's GS1 code here to fill Batch and Expiry
+ function Gs1ScanBox({
++  kind,
+   packageBarcode,
+   onExpired,
+ }: {
++  kind: MovementKind;
+   packageBarcode: string;
+   onExpired: (expiry: string | null) => void;
+ }) {
+@@ -171,7 +180,7 @@ function Gs1ScanBox({
+       // the ordinary barcode, so let the user decide
+       const ok = await confirm({
+         title: "This code doesn't match the selected package",
+-        description: `The scanned product code (${data.gtin}) is different from this package form's barcode (${packageBarcode}). Check it is the right box. If you continue, the Stock Out will be marked "Scanned code did not match" and the scan will be saved in the Log.`,
++        description: `The scanned product code (${data.gtin}) is different from this package form's barcode (${packageBarcode}). Check it is the right box. If you continue, the ${kind === "in" ? "Stock In" : "Stock Out"} will be marked "Scanned code did not match" and the scan will be saved in the Log.`,
+         confirmLabel: "Continue anyway",
+         cancelLabel: "Cancel and scan again",
+       });
+@@ -202,7 +211,7 @@ function Gs1ScanBox({
+   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+     const rebuilt = scannerKeyDown(e);
+     if (e.key !== "Enter") return;
+-    // Enter here fills the fields; it must not record the Stock Out
++    // Enter here fills the fields; it must not record the movement
+     e.preventDefault();
+     const code = rebuilt ?? e.currentTarget.value;
+     if (code.trim()) void apply(code);
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 489b2df..d107bea 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -114,8 +114,8 @@ export default function MovementForm({
+   const recordIn = useMutation(api.stock.recordIn);
+   const recordOut = useMutation(api.stock.recordOut);
+   const canisterEnabled = useCanisterEnabled() && kind === "out";
+-  // A scanned GS1 code already carries the batch and expiry (Stock Out only)
+-  const scanned = scannedCode && kind === "out" ? parseGs1(scannedCode) : null;
++  // A scanned GS1 code already carries the batch and expiry
++  const scanned = scannedCode ? parseGs1(scannedCode) : null;
+   const today = toCalendarDay(new Date());
+   // Expired stock found by scanning: leave Expiry empty and say why
+   const scannedExpired =
+@@ -233,7 +233,12 @@ export default function MovementForm({
+         : undefined;
+       const result =
+         kind === "in"
+-          ? await recordIn(args)
++          ? await recordIn({
++              ...args,
++              batch: batch || undefined,
++              expiry: expiry || undefined,
++              mismatchedScan: mismatchedScan || undefined,
++            })
+           : await recordOut({
+               ...args,
+               reason,
+@@ -319,14 +324,13 @@ export default function MovementForm({
+ 
+         {kind === "out" && <ReasonField control={form.control} />}
+ 
+-        {kind === "out" && (
+-          <BatchExpiryFields
+-            packageBarcode={pkg.barcode}
+-            warningMonths={warningMonths}
+-            scannedExpired={scannedExpired}
+-            required={canisterEnabled && canisterOn}
+-          />
+-        )}
++        <BatchExpiryFields
++          kind={kind}
++          packageBarcode={pkg.barcode}
++          warningMonths={warningMonths}
++          scannedExpired={scannedExpired}
++          required={canisterEnabled && canisterOn}
++        />
+ 
+         {canisterEnabled && (
+           <CanisterSection

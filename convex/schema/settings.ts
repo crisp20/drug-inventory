@@ -9,6 +9,8 @@ export const settingsTable = defineTable({
   canisterForEveryone: v.optional(v.boolean()),
   // Canister stock expiring within this many months asks the user to confirm (0 = off)
   expiryWarningMonths: v.optional(v.number()),
+  // After this many minutes without use, the app must be refreshed (0 or missing = off)
+  idleTimeoutMinutes: v.optional(v.number()),
   updatedAt: v.string(),
   updatedByName: v.string(),
 });

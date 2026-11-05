@@ -1,0 +1,66 @@
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 261c1ed..e40bba4 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -1,6 +1,6 @@
+ import { Barcode, Check } from "lucide-react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+-import DrugImage from "@/components/drug-image.tsx";
++import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import { cn } from "@/lib/utils.ts";
+ 
+@@ -16,9 +16,9 @@ export default function DrugPackagePicker({ drug, selectedPackageId, matchedPack
+   return (
+     <div className="rounded-xl border bg-card p-3">
+       <div className="flex items-center gap-3 pb-3">
+-        <DrugImage url={drug.imageUrl} alt={drug.name} className="size-12 shrink-0" />
++        <ZoomableDrugImage url={drug.imageUrl} alt={drug.name} className="size-24 sm:size-28" />
+         <div className="min-w-0">
+-          <div className="truncate font-semibold">{drug.name}</div>
++          <div className="truncate text-lg font-semibold">{drug.name}</div>
+           <div className="truncate text-sm text-muted-foreground">
+             {drug.brandName || "No brand"} · <span className="font-mono">{drug.drugId}</span>
+           </div>
+diff --git a/src/components/zoomable-drug-image.tsx b/src/components/zoomable-drug-image.tsx
+new file mode 100644
+index 0000000..637e783
+--- /dev/null
++++ b/src/components/zoomable-drug-image.tsx
+@@ -0,0 +1,36 @@
++import { useState } from "react";
++import { ZoomIn } from "lucide-react";
++import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog.tsx";
++import { cn } from "@/lib/utils.ts";
++import DrugImage from "./drug-image.tsx";
++
++type Props = { url: string | null | undefined; alt: string; className?: string };
++
++// Drug picture thumbnail that opens a large view when pressed
++export default function ZoomableDrugImage({ url, alt, className }: Props) {
++  const [open, setOpen] = useState(false);
++  if (!url) return <DrugImage url={null} alt={alt} className={cn("shrink-0", className)} />;
++
++  return (
++    <>
++      <button
++        type="button"
++        onClick={() => setOpen(true)}
++        className={cn("group relative shrink-0 cursor-zoom-in overflow-hidden rounded-lg", className)}
++        aria-label={`Enlarge picture of ${alt}`}
++      >
++        <DrugImage url={url} alt={alt} className="size-full transition-transform group-hover:scale-105" />
++        <span className="absolute bottom-1 right-1 flex size-6 items-center justify-center rounded-full bg-black/55 text-white">
++          <ZoomIn className="size-3.5" />
++        </span>
++      </button>
++      <Dialog open={open} onOpenChange={setOpen}>
++        <DialogContent className="max-w-[calc(100vw-2rem)] gap-3 p-3 sm:max-w-2xl">
++          <DialogTitle className="pr-8 text-base">{alt}</DialogTitle>
++          <DialogDescription className="sr-only">Enlarged drug picture</DialogDescription>
++          <img src={url} alt={alt} className="max-h-[75vh] w-full rounded-lg bg-muted object-contain" />
++        </DialogContent>
++      </Dialog>
++    </>
++  );
++}

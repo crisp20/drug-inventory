@@ -1,0 +1,532 @@
+diff --git a/convex/lib/settings.ts b/convex/lib/settings.ts
+new file mode 100644
+index 0000000..16d5ab4
+--- /dev/null
++++ b/convex/lib/settings.ts
+@@ -0,0 +1,23 @@
++import { ConvexError } from "convex/values";
++import { MAX_MOVEMENT_QUANTITY } from "./stock";
++
++export const DEFAULT_LARGE_QUANTITY_THRESHOLD = 100;
++
++// Validates the admin-chosen "ask to confirm at or above" amount
++export function cleanLargeQuantityThreshold(value: number): number {
++  if (!Number.isInteger(value) || value < 1 || value > MAX_MOVEMENT_QUANTITY) {
++    throw new ConvexError({
++      code: "BAD_REQUEST",
++      message: `Enter a whole number from 1 to ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`,
++    });
++  }
++  return value;
++}
++
++// True when a Stock In / Stock Out quantity needs a second confirmation
++export function needsLargeQuantityConfirm(
++  quantity: number,
++  threshold: number,
++): boolean {
++  return quantity >= threshold;
++}
+diff --git a/convex/schema.ts b/convex/schema.ts
+index ae8085b..dab5216 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -1,6 +1,7 @@
+ import { defineSchema } from "convex/server";
+ import { usersTable } from "./schema/users";
+ import { drugPackagesTable, drugsTable } from "./schema/drugs";
++import { settingsTable } from "./schema/settings";
+ import { stockMovementsTable } from "./schema/stock";
+ 
+ export default defineSchema({
+@@ -8,4 +9,5 @@ export default defineSchema({
+   drugs: drugsTable,
+   drugPackages: drugPackagesTable,
+   stockMovements: stockMovementsTable,
++  settings: settingsTable,
+ });
+diff --git a/convex/schema/settings.ts b/convex/schema/settings.ts
+new file mode 100644
+index 0000000..5580b01
+--- /dev/null
++++ b/convex/schema/settings.ts
+@@ -0,0 +1,10 @@
++import { defineTable } from "convex/server";
++import { v } from "convex/values";
++
++// App-wide settings. A single row; when missing, defaults from convex/lib/settings.ts apply.
++export const settingsTable = defineTable({
++  // Stock In / Stock Out amounts at or above this ask the user to confirm (guards against scan errors)
++  largeQuantityThreshold: v.number(),
++  updatedAt: v.string(),
++  updatedByName: v.string(),
++});
+diff --git a/convex/settings.test.ts b/convex/settings.test.ts
+new file mode 100644
+index 0000000..66a9751
+--- /dev/null
++++ b/convex/settings.test.ts
+@@ -0,0 +1,68 @@
++import { convexTest } from "convex-test";
++import { describe, expect, it } from "vitest";
++import { api } from "./_generated/api";
++import { needsLargeQuantityConfirm } from "./lib/settings";
++import schema from "./schema";
++import { modules } from "./test.setup";
++
++const OWNER = {
++  tokenIdentifier: "iss|owner",
++  email: "hubert@activecaregroup.com",
++  name: "Hubert",
++};
++const STAFF = {
++  tokenIdentifier: "iss|staff",
++  email: "staff@example.com",
++  name: "Sam",
++};
++
++async function setup() {
++  const t = convexTest(schema, modules);
++  const owner = t.withIdentity(OWNER);
++  const staff = t.withIdentity(STAFF);
++  await owner.mutation(api.users.updateCurrentUser, {});
++  await staff.mutation(api.users.updateCurrentUser, {});
++  const [pending] = await owner.query(api.users.listByStatus, {
++    status: "pending",
++  });
++  await owner.mutation(api.users.updateAccess, {
++    userId: pending._id,
++    role: "staff",
++    status: "active",
++  });
++  return { owner, staff };
++}
++
++describe("Large quantity setting", () => {
++  it("defaults to 100 and lets an admin change it", async () => {
++    const { owner, staff } = await setup();
++    expect(
++      (await staff.query(api.settings.get, {})).largeQuantityThreshold,
++    ).toBe(100);
++    await owner.mutation(api.settings.update, { largeQuantityThreshold: 50 });
++    await owner.mutation(api.settings.update, { largeQuantityThreshold: 60 });
++    const after = await staff.query(api.settings.get, {});
++    expect(after).toMatchObject({
++      largeQuantityThreshold: 60,
++      updatedByName: "Hubert",
++    });
++  });
++
++  it("blocks staff and invalid amounts", async () => {
++    const { owner, staff } = await setup();
++    await expect(
++      staff.mutation(api.settings.update, { largeQuantityThreshold: 50 }),
++    ).rejects.toThrow(/admins/);
++    for (const bad of [0, -5, 2.5, 100_001]) {
++      await expect(
++        owner.mutation(api.settings.update, { largeQuantityThreshold: bad }),
++      ).rejects.toThrow(/whole number/);
++    }
++  });
++
++  it("asks to confirm at or above the amount, not below", () => {
++    expect(needsLargeQuantityConfirm(99, 100)).toBe(false);
++    expect(needsLargeQuantityConfirm(100, 100)).toBe(true);
++    expect(needsLargeQuantityConfirm(85742, 100)).toBe(true);
++  });
++});
+diff --git a/convex/settings.ts b/convex/settings.ts
+new file mode 100644
+index 0000000..4c0bb18
+--- /dev/null
++++ b/convex/settings.ts
+@@ -0,0 +1,40 @@
++import { v } from "convex/values";
++import { mutation, query } from "./_generated/server";
++import { requireActiveUser, requireAdmin } from "./lib/access";
++import {
++  cleanLargeQuantityThreshold,
++  DEFAULT_LARGE_QUANTITY_THRESHOLD,
++} from "./lib/settings";
++
++// Current settings, with defaults filled in. Any approved user can read them.
++export const get = query({
++  args: {},
++  handler: async (ctx) => {
++    await requireActiveUser(ctx);
++    const row = await ctx.db.query("settings").first();
++    return {
++      largeQuantityThreshold:
++        row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD,
++      updatedAt: row?.updatedAt ?? null,
++      updatedByName: row?.updatedByName ?? null,
++    };
++  },
++});
++
++export const update = mutation({
++  args: { largeQuantityThreshold: v.number() },
++  handler: async (ctx, args) => {
++    const admin = await requireAdmin(ctx);
++    const fields = {
++      largeQuantityThreshold: cleanLargeQuantityThreshold(
++        args.largeQuantityThreshold,
++      ),
++      updatedAt: new Date().toISOString(),
++      updatedByName: admin.name ?? admin.email ?? "Unknown user",
++    };
++    const row = await ctx.db.query("settings").first();
++    if (row) await ctx.db.patch("settings", row._id, fields);
++    else await ctx.db.insert("settings", fields);
++    return null;
++  },
++});
+diff --git a/src/App.tsx b/src/App.tsx
+index 36272df..0b4b4ee 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -4,6 +4,7 @@ import { DefaultProviders } from "./components/providers/default.tsx";
+ import AuthCallback from "./pages/auth/Callback.tsx";
+ import Index from "./pages/Index.tsx";
+ import NotFound from "./pages/NotFound.tsx";
++import SettingsPage from "./pages/settings/page.tsx";
+ import StockInPage from "./pages/stock-in/page.tsx";
+ import StockOutPage from "./pages/stock-out/page.tsx";
+ import UsersPage from "./pages/users/page.tsx";
+@@ -19,6 +20,7 @@ export default function App() {
+             <Route path="/stock-in" element={<StockInPage />} />
+             <Route path="/stock-out" element={<StockOutPage />} />
+             <Route path="/users" element={<UsersPage />} />
++            <Route path="/settings" element={<SettingsPage />} />
+           </Route>
+           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+           <Route path="*" element={<NotFound />} />
+diff --git a/src/components/app-layout.tsx b/src/components/app-layout.tsx
+index 7bcdeec..7154439 100644
+--- a/src/components/app-layout.tsx
++++ b/src/components/app-layout.tsx
+@@ -1,7 +1,7 @@
+ import type { MouseEvent } from "react";
+ import { NavLink, Outlet, useNavigate } from "react-router-dom";
+ import { AuthLoading, Authenticated, Unauthenticated } from "convex/react";
+-import { ArrowDownToLine, ArrowUpFromLine, Boxes, Users, type LucideIcon } from "lucide-react";
++import { ArrowDownToLine, ArrowUpFromLine, Boxes, Settings, Users, type LucideIcon } from "lucide-react";
+ import { toast } from "sonner";
+ import { SignInButton } from "@/components/ui/signin.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+@@ -19,6 +19,7 @@ const NAV: NavItem[] = [
+   { label: "Stock In", icon: ArrowDownToLine, to: "/stock-in" },
+   { label: "Stock Out", icon: ArrowUpFromLine, to: "/stock-out" },
+   { label: "Users", icon: Users, to: "/users", adminOnly: true },
++  { label: "Settings", icon: Settings, to: "/settings", adminOnly: true },
+ ];
+ 
+ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 90e3127..a9f2491 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -1,25 +1,51 @@
+ import { useForm, useWatch } from "react-hook-form";
+ import { zodResolver } from "@hookform/resolvers/zod";
+-import { useMutation } from "convex/react";
++import { useMutation, useQuery } from "convex/react";
+ import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+-import { DEFAULT_STOCK_OUT_REASON, type MovementKind } from "@/convex/lib/stock.ts";
++import {
++  DEFAULT_LARGE_QUANTITY_THRESHOLD,
++  needsLargeQuantityConfirm,
++} from "@/convex/lib/settings.ts";
++import {
++  DEFAULT_STOCK_OUT_REASON,
++  type MovementKind,
++} from "@/convex/lib/stock.ts";
++import { useConfirm } from "@/hooks/use-confirm.ts";
+ import { Button } from "@/components/ui/button.tsx";
+-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
++import {
++  Form,
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { Textarea } from "@/components/ui/textarea.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+-import { useConfirmDiscard, useUnsavedChanges } from "@/hooks/use-unsaved-changes.ts";
++import {
++  useConfirmDiscard,
++  useUnsavedChanges,
++} from "@/hooks/use-unsaved-changes.ts";
+ import { cn } from "@/lib/utils.ts";
+-import { movementFormSchema, type MovementFormInput, type MovementFormValues } from "./movement-form-schema.ts";
++import {
++  movementFormSchema,
++  type MovementFormInput,
++  type MovementFormValues,
++} from "./movement-form-schema.ts";
+ import PackageFormSummary from "./package-form-summary.tsx";
+ import ReasonField from "./reason-field.tsx";
+ import type { StockSelection } from "./stock-drug-finder.tsx";
+ 
+-type Props = { kind: MovementKind; selection: StockSelection; onDone: () => void };
++type Props = {
++  kind: MovementKind;
++  selection: StockSelection;
++  onDone: () => void;
++};
+ 
+ const COPY = {
+   in: {
+@@ -68,16 +94,41 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+     if (await confirmDiscard()) onDone();
+   };
+   const quantity = Math.max(0, toNumber(watched.quantity));
+-  const stockAfter = kind === "in" ? pkg.stock + quantity : pkg.stock - quantity;
++  const stockAfter =
++    kind === "in" ? pkg.stock + quantity : pkg.stock - quantity;
+   const notEnough = kind === "out" && stockAfter < 0;
+ 
++  const confirm = useConfirm();
++  const settings = useQuery(api.settings.get, {});
++  const threshold =
++    settings?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD;
++
+   const onSubmit = async ({ reason, ...values }: MovementFormValues) => {
++    // Large amounts are often a barcode scanned into the quantity box, so ask again
++    if (needsLargeQuantityConfirm(values.quantity, threshold)) {
++      const ok = await confirm({
++        title: `Confirm ${values.quantity.toLocaleString()} × ${formatPackageForm(pkg)}?`,
++        description: `This is a large ${copy.title} (${threshold.toLocaleString()} or more) for ${drug.name}. Stock will go from ${pkg.stock.toLocaleString()} to ${(kind === "in" ? pkg.stock + values.quantity : pkg.stock - values.quantity).toLocaleString()}. Please check the quantity was not a scanning error.`,
++        confirmLabel: `Yes, record ${values.quantity.toLocaleString()}`,
++        cancelLabel: "Go back and fix",
++      });
++      if (!ok) {
++        form.setFocus("quantity");
++        return;
++      }
++    }
+     try {
+       const args = { packageId: pkg._id, ...values };
+-      const result = kind === "in" ? await recordIn(args) : await recordOut({ ...args, reason });
+-      toast.success(`${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`, {
+-        description: `Stock is now ${result.stockAfter}`,
+-      });
++      const result =
++        kind === "in"
++          ? await recordIn(args)
++          : await recordOut({ ...args, reason });
++      toast.success(
++        `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
++        {
++          description: `Stock is now ${result.stockAfter}`,
++        },
++      );
+       onDone();
+     } catch (e) {
+       toast.error(errorMessage(e, copy.error));
+@@ -86,10 +137,15 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+ 
+   return (
+     <Form {...form}>
+-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5 rounded-xl border-2 border-primary/30 bg-card p-4">
++      <form
++        onSubmit={form.handleSubmit(onSubmit)}
++        className="space-y-5 rounded-xl border-2 border-primary/30 bg-card p-4"
++      >
+         <div className="flex items-baseline justify-between gap-3">
+           <h2 className="text-lg font-bold">{copy.title}</h2>
+-          <span className="truncate text-sm text-muted-foreground">{drug.name}</span>
++          <span className="truncate text-sm text-muted-foreground">
++            {drug.name}
++          </span>
+         </div>
+ 
+         <FormField
+@@ -124,7 +180,12 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+             <FormItem>
+               <FormLabel>Notes</FormLabel>
+               <FormControl>
+-                <Textarea {...field} rows={2} placeholder={copy.notesPlaceholder} className="bg-background" />
++                <Textarea
++                  {...field}
++                  rows={2}
++                  placeholder={copy.notesPlaceholder}
++                  className="bg-background"
++                />
+               </FormControl>
+               <FormMessage />
+             </FormItem>
+@@ -138,18 +199,30 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+           )}
+         >
+           <span className={cn(!notEnough && "text-muted-foreground")}>
+-            {notEnough ? `Not enough stock: only ${pkg.stock} on hand` : "Stock after"}
++            {notEnough
++              ? `Not enough stock: only ${pkg.stock} on hand`
++              : "Stock after"}
+           </span>
+           <span className="font-semibold">
+-            {pkg.stock} → <span className="text-lg font-extrabold">{stockAfter}</span>
++            {pkg.stock} →{" "}
++            <span className="text-lg font-extrabold">{stockAfter}</span>
+           </span>
+         </div>
+ 
+         <div className="flex gap-2">
+-          <Button type="button" variant="ghost" onClick={() => void handleCancel()}>
++          <Button
++            type="button"
++            variant="ghost"
++            onClick={() => void handleCancel()}
++          >
+             Cancel
+           </Button>
+-          <Button type="submit" size="lg" className="flex-1" disabled={form.formState.isSubmitting || notEnough}>
++          <Button
++            type="submit"
++            size="lg"
++            className="flex-1"
++            disabled={form.formState.isSubmitting || notEnough}
++          >
+             {form.formState.isSubmitting ? <Spinner /> : <copy.icon />}
+             {copy.submit}
+           </Button>
+diff --git a/src/pages/settings/page.tsx b/src/pages/settings/page.tsx
+new file mode 100644
+index 0000000..1a97f0c
+--- /dev/null
++++ b/src/pages/settings/page.tsx
+@@ -0,0 +1,126 @@
++import { useState } from "react";
++import { useMutation, useQuery } from "convex/react";
++import { Navigate } from "react-router-dom";
++import { format } from "date-fns";
++import { ShieldAlert } from "lucide-react";
++import { toast } from "sonner";
++import { api } from "@/convex/_generated/api.js";
++import { MAX_MOVEMENT_QUANTITY } from "@/convex/lib/stock.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import { Label } from "@/components/ui/label.tsx";
++import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import PageHeader from "@/components/page-header.tsx";
++import { useCurrentUser } from "@/hooks/use-current-user.ts";
++import { errorMessage } from "@/lib/errors.ts";
++
++export default function SettingsPage() {
++  const me = useCurrentUser();
++  if (me === undefined) return null;
++  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
++  return (
++    <div className="mx-auto max-w-2xl p-4 md:p-8">
++      <PageHeader
++        title="Settings"
++        description="App-wide options for everyone using ACP Stock."
++      />
++      <LargeQuantitySetting />
++    </div>
++  );
++}
++
++function LargeQuantitySetting() {
++  const settings = useQuery(api.settings.get, {});
++  if (settings === undefined)
++    return <Skeleton className="h-48 w-full rounded-xl" />;
++  return (
++    <LargeQuantityForm key={settings.updatedAt ?? "default"} {...settings} />
++  );
++}
++
++type FormProps = {
++  largeQuantityThreshold: number;
++  updatedAt: string | null;
++  updatedByName: string | null;
++};
++
++function LargeQuantityForm({
++  largeQuantityThreshold,
++  updatedAt,
++  updatedByName,
++}: FormProps) {
++  const update = useMutation(api.settings.update);
++  const [value, setValue] = useState(String(largeQuantityThreshold));
++  const [saving, setSaving] = useState(false);
++  const n = Number(value);
++  const valid = Number.isInteger(n) && n >= 1 && n <= MAX_MOVEMENT_QUANTITY;
++  const changed = n !== largeQuantityThreshold;
++
++  const handleSave = async () => {
++    setSaving(true);
++    try {
++      await update({ largeQuantityThreshold: n });
++      toast.success(`Large quantity check set to ${n.toLocaleString()}`);
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not save setting"));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  return (
++    <section className="space-y-4 rounded-xl border bg-card p-5">
++      <div className="flex items-start gap-3">
++        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
++          <ShieldAlert className="size-5" />
++        </div>
++        <div>
++          <h2 className="font-bold">Large quantity check</h2>
++          <p className="text-sm text-muted-foreground">
++            When a Stock In or Stock Out is this amount or more, staff are asked
++            to confirm it again. This catches barcodes accidentally scanned into
++            the quantity box.
++          </p>
++        </div>
++      </div>
++      <form
++        className="flex flex-wrap items-end gap-3"
++        onSubmit={(e) => {
++          e.preventDefault();
++          if (valid && changed) void handleSave();
++        }}
++      >
++        <div className="space-y-1.5">
++          <Label htmlFor="large-qty">Ask to confirm at or above</Label>
++          <Input
++            id="large-qty"
++            inputMode="numeric"
++            value={value}
++            onChange={(e) => setValue(e.target.value.trim())}
++            className="h-11 w-40 text-lg font-bold"
++          />
++        </div>
++        <Button
++          type="submit"
++          className="h-11"
++          disabled={!valid || !changed || saving}
++        >
++          {saving && <Spinner />}
++          Save
++        </Button>
++      </form>
++      {!valid && (
++        <p className="text-sm text-destructive">
++          Enter a whole number from 1 to{" "}
++          {MAX_MOVEMENT_QUANTITY.toLocaleString()}
++        </p>
++      )}
++      <p className="text-xs text-muted-foreground">
++        {updatedAt && updatedByName
++          ? `Last changed by ${updatedByName} on ${format(new Date(updatedAt), "d MMM yyyy, h:mm a")}`
++          : "Using the default of 100."}
++      </p>
++    </section>
++  );
++}

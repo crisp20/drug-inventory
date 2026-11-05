@@ -1,0 +1,892 @@
+diff --git a/convex/lib/barcode.test.ts b/convex/lib/barcode.test.ts
+index cd3690b..b0e728e 100644
+--- a/convex/lib/barcode.test.ts
++++ b/convex/lib/barcode.test.ts
+@@ -1,5 +1,12 @@
+ import { describe, expect, it } from "vitest";
+-import { barcodesMatch, extractGtin, formatPackageForm, normalizeBarcode, toStoredBarcode } from "./barcode";
++import {
++  barcodesMatch,
++  extractGtin,
++  formatPackageForm,
++  normalizeBarcode,
++  toHalfWidth,
++  toStoredBarcode,
++} from "./barcode";
+ 
+ describe("normalizeBarcode", () => {
+   it("pads EAN-13 to GTIN-14 so it matches the GS1 form", () => {
+@@ -7,21 +14,34 @@ describe("normalizeBarcode", () => {
+   });
+ 
+   it("extracts GTIN from bracketed GS1 strings", () => {
+-    expect(normalizeBarcode("(01)09312345678907(17)261231(10)AB12")).toBe("09312345678907");
++    expect(normalizeBarcode("(01)09312345678907(17)261231(10)AB12")).toBe(
++      "09312345678907",
++    );
+   });
+ 
+   it("extracts GTIN from raw GS1 DataMatrix with symbology prefix and separators", () => {
+-    expect(extractGtin("]d201093123456789071726123110AB12\u001d21XYZ")).toBe("09312345678907");
++    expect(extractGtin("]d201093123456789071726123110AB12\u001d21XYZ")).toBe(
++      "09312345678907",
++    );
+   });
+ 
+   it("keeps non-numeric codes, uppercased and trimmed", () => {
+     expect(normalizeBarcode("  abc-123 ")).toBe("ABC-123");
+   });
++
++  it("reads wide digits and brackets typed by a Chinese keyboard", () => {
++    expect(normalizeBarcode("（０１）０９３１２３４５６７８９０７")).toBe(
++      "09312345678907",
++    );
++    expect(toHalfWidth("ＡＢ１２。")).toBe("AB12.");
++  });
+ });
+ 
+ describe("barcodesMatch", () => {
+   it("matches the plain barcode against its GS1 scan", () => {
+-    expect(barcodesMatch("9312345678907", "(01)09312345678907(17)261231")).toBe(true);
++    expect(barcodesMatch("9312345678907", "(01)09312345678907(17)261231")).toBe(
++      true,
++    );
+   });
+ 
+   it("rejects different codes and empty scans", () => {
+@@ -32,8 +52,12 @@ describe("barcodesMatch", () => {
+ 
+ describe("toStoredBarcode", () => {
+   it("stores the GTIN (as printed EAN-13) when a GS1 code is entered", () => {
+-    expect(toStoredBarcode("(01)09312345678907(17)261231(10)AB12")).toBe("9312345678907");
+-    expect(toStoredBarcode("]d201093123456789071726123110AB12\u001d21XYZ")).toBe("9312345678907");
++    expect(toStoredBarcode("(01)09312345678907(17)261231(10)AB12")).toBe(
++      "9312345678907",
++    );
++    expect(
++      toStoredBarcode("]d201093123456789071726123110AB12\u001d21XYZ"),
++    ).toBe("9312345678907");
+     expect(toStoredBarcode("0109312345678907")).toBe("9312345678907");
+   });
+ 
+@@ -49,6 +73,8 @@ describe("toStoredBarcode", () => {
+ 
+ describe("formatPackageForm", () => {
+   it("formats qty/unit x count", () => {
+-    expect(formatPackageForm({ qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10 })).toBe("10/Strip x10");
++    expect(
++      formatPackageForm({ qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10 }),
++    ).toBe("10/Strip x10");
+   });
+ });
+diff --git a/convex/lib/barcode.ts b/convex/lib/barcode.ts
+index df4a3a7..7b87356 100644
+--- a/convex/lib/barcode.ts
++++ b/convex/lib/barcode.ts
+@@ -7,30 +7,52 @@ const SYMBOLOGY_PREFIX = /^\][A-Za-z]\d/;
+ // GS1 group separator (ASCII 29) inserted between variable-length fields
+ const GS1_SEPARATOR = new RegExp(String.fromCharCode(29), "g");
+ 
++// Chinese input methods type wide digits/brackets (０１２（）) and "。" for ".";
++// turn them back into normal keyboard characters.
++export function toHalfWidth(text: string): string {
++  return text
++    .replace(/[\uFF01-\uFF5E]/g, (c) =>
++      String.fromCharCode(c.charCodeAt(0) - 0xfee0),
++    )
++    .replace(/\u3000/g, " ")
++    .replace(/\u3002/g, ".");
++}
++
++function cleanCode(raw: string): string {
++  return toHalfWidth(raw)
++    .trim()
++    .replace(SYMBOLOGY_PREFIX, "")
++    .replace(GS1_SEPARATOR, "");
++}
++
+ export function extractGtin(raw: string): string | null {
+-  const code = raw.trim().replace(SYMBOLOGY_PREFIX, "").replace(GS1_SEPARATOR, "");
++  const code = cleanCode(raw);
+   const bracketed = code.match(/\(01\)\s*(\d{14})/);
+   if (bracketed) return bracketed[1];
+   if (/^01\d{14}/.test(code) && code.length > 14) return code.slice(2, 16);
+-  if (/^(\d{8}|\d{12}|\d{13}|\d{14})$/.test(code)) return code.padStart(14, "0");
++  if (/^(\d{8}|\d{12}|\d{13}|\d{14})$/.test(code))
++    return code.padStart(14, "0");
+   return null;
+ }
+ 
+ export function normalizeBarcode(raw: string): string {
+-  return extractGtin(raw) ?? raw.trim().toUpperCase();
++  return extractGtin(raw) ?? toHalfWidth(raw).trim().toUpperCase();
+ }
+ 
+ // True for GS1 element strings that carry extra data (expiry, batch...) after the GTIN
+ export function isGs1String(raw: string): boolean {
+-  const code = raw.trim().replace(SYMBOLOGY_PREFIX, "").replace(GS1_SEPARATOR, "");
+-  return /\(01\)\s*\d{14}/.test(code) || (/^01\d{14}/.test(code) && code.length >= 16);
++  const code = cleanCode(raw);
++  return (
++    /\(01\)\s*\d{14}/.test(code) ||
++    (/^01\d{14}/.test(code) && code.length >= 16)
++  );
+ }
+ 
+ // What we save as the package form's barcode. GS1 codes are reduced to their GTIN,
+ // shown as the 13-digit EAN printed on the box when the GTIN-14 starts with 0.
+ // Plain barcodes are kept exactly as scanned.
+ export function toStoredBarcode(raw: string): string {
+-  const trimmed = raw.trim();
++  const trimmed = toHalfWidth(raw).trim();
+   if (!isGs1String(trimmed)) return trimmed;
+   const gtin = extractGtin(trimmed);
+   if (!gtin) return trimmed;
+diff --git a/src/components/drug-search-input.tsx b/src/components/drug-search-input.tsx
+index 88b3fbc..0211684 100644
+--- a/src/components/drug-search-input.tsx
++++ b/src/components/drug-search-input.tsx
+@@ -2,7 +2,9 @@ import { useCallback, useState } from "react";
+ import { ScanLine, Search, X } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Input } from "@/components/ui/input.tsx";
++import { useScannerInput } from "@/hooks/use-scanner-input.ts";
+ import BarcodeScannerDialog from "./barcode-scanner-dialog.tsx";
++import ScanKeyboardWarning from "./scan-keyboard-warning.tsx";
+ 
+ type Props = {
+   value: string;
+@@ -12,43 +14,66 @@ type Props = {
+ };
+ 
+ // Works with keyboards, USB/Bluetooth scanners (they type + Enter) and the camera
+-export default function DrugSearchInput({ value, onChange, placeholder, autoFocus }: Props) {
++export default function DrugSearchInput({
++  value,
++  onChange,
++  placeholder,
++  autoFocus,
++}: Props) {
+   const [scanning, setScanning] = useState(false);
++  const { inputRef, onKeyDown, setValue, warning } = useScannerInput(onChange);
+   const handleDetected = useCallback(
+     (code: string) => {
+       setScanning(false);
+-      onChange(code);
++      setValue(code);
+     },
+-    [onChange],
++    [setValue],
+   );
+ 
+   return (
+-    <div className="flex gap-2">
+-      <div className="relative flex-1">
+-        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+-        <Input
+-          value={value}
+-          autoFocus={autoFocus}
+-          onChange={(e) => onChange(e.target.value)}
+-          placeholder={placeholder ?? "Scan or search barcode, GS1 code, drug name, brand or Drug ID"}
+-          className="h-11 bg-card pl-9 pr-9"
++    <div className="space-y-2">
++      <div className="flex gap-2">
++        <div className="relative flex-1">
++          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
++          <Input
++            ref={inputRef}
++            value={value}
++            autoFocus={autoFocus}
++            onChange={(e) => setValue(e.target.value)}
++            onKeyDown={(e) => void onKeyDown(e)}
++            placeholder={
++              placeholder ??
++              "Scan or search barcode, GS1 code, drug name, brand or Drug ID"
++            }
++            className="h-11 bg-card pl-9 pr-9"
++          />
++          {value && (
++            <button
++              type="button"
++              onClick={() => setValue("")}
++              className="absolute right-3 top-1/2 -translate-y-1/2 cursor-pointer text-muted-foreground hover:text-foreground"
++              aria-label="Clear search"
++            >
++              <X className="size-4" />
++            </button>
++          )}
++        </div>
++        <Button
++          type="button"
++          size="lg"
++          className="h-11"
++          onClick={() => setScanning(true)}
++        >
++          <ScanLine />
++          <span className="hidden sm:inline">Scan</span>
++        </Button>
++        <BarcodeScannerDialog
++          open={scanning}
++          onOpenChange={setScanning}
++          onDetected={handleDetected}
+         />
+-        {value && (
+-          <button
+-            type="button"
+-            onClick={() => onChange("")}
+-            className="absolute right-3 top-1/2 -translate-y-1/2 cursor-pointer text-muted-foreground hover:text-foreground"
+-            aria-label="Clear search"
+-          >
+-            <X className="size-4" />
+-          </button>
+-        )}
+       </div>
+-      <Button type="button" size="lg" className="h-11" onClick={() => setScanning(true)}>
+-        <ScanLine />
+-        <span className="hidden sm:inline">Scan</span>
+-      </Button>
+-      <BarcodeScannerDialog open={scanning} onOpenChange={setScanning} onDetected={handleDetected} />
++      {warning && <ScanKeyboardWarning />}
+     </div>
+   );
+ }
+diff --git a/src/components/scan-keyboard-warning.tsx b/src/components/scan-keyboard-warning.tsx
+new file mode 100644
+index 0000000..bf995e0
+--- /dev/null
++++ b/src/components/scan-keyboard-warning.tsx
+@@ -0,0 +1,20 @@
++import { Keyboard } from "lucide-react";
++
++// Shown when a scan still looks wrong, usually because a Chinese keyboard is switched on
++export default function ScanKeyboardWarning() {
++  return (
++    <div
++      role="alert"
++      className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
++    >
++      <Keyboard className="mt-0.5 size-4 shrink-0" />
++      <div>
++        <p className="font-medium">This scan may not have read correctly.</p>
++        <p>Switch your keyboard to English (A) and scan again.</p>
++        <p className="pt-0.5 opacity-90">
++          掃描可能有誤。請將鍵盤切換為英文 (A)，然後重新掃描。
++        </p>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/hooks/use-scanner-input.ts b/src/hooks/use-scanner-input.ts
+new file mode 100644
+index 0000000..56736e8
+--- /dev/null
++++ b/src/hooks/use-scanner-input.ts
+@@ -0,0 +1,93 @@
++import {
++  useCallback,
++  useEffect,
++  useRef,
++  useState,
++  type KeyboardEvent,
++} from "react";
++import {
++  SCAN_END_MS,
++  addKey,
++  hasNonAscii,
++  isModifierCode,
++  keyFromCode,
++  scanResult,
++  type Burst,
++} from "@/lib/scanner-input.ts";
++
++const END_KEYS = new Set(["Enter", "NumpadEnter", "Tab"]);
++// Leftover text an input method commits right after a scan is ignored for this long
++const SETTLE_MS = 150;
++
++// Makes scanner input correct even when a Chinese (or other) keyboard is switched on.
++// Typing by hand is untouched; only very fast bursts (a scanner) are rebuilt.
++export function useScannerInput(onChange: (value: string) => void) {
++  const inputRef = useRef<HTMLInputElement>(null);
++  const burstRef = useRef<Burst | null>(null);
++  const timerRef = useRef<number | undefined>(undefined);
++  const settleUntilRef = useRef(0);
++  const [warning, setWarning] = useState(false);
++
++  useEffect(() => () => window.clearTimeout(timerRef.current), []);
++
++  // Ends the current burst. Returns the rebuilt code if it was a scan.
++  const finish = useCallback((): string | null => {
++    window.clearTimeout(timerRef.current);
++    const result = scanResult(burstRef.current);
++    burstRef.current = null;
++    if (!result) return null;
++    settleUntilRef.current = performance.now() + SETTLE_MS;
++    const input = inputRef.current;
++    // Blur + focus ends any half-typed Chinese word so it can't overwrite the code
++    if (input && input.value !== result.text) {
++      input.blur();
++      input.focus();
++    }
++    onChange(result.text);
++    setWarning(result.incomplete || hasNonAscii(result.text));
++    return result.text;
++  }, [onChange]);
++
++  // Returns the rebuilt code when Enter/Tab ends a scan, so callers can act on the right value
++  const onKeyDown = useCallback(
++    (e: KeyboardEvent<HTMLInputElement>): string | null => {
++      if (END_KEYS.has(e.code) || e.key === "Enter") return finish();
++      if (isModifierCode(e.code)) return null;
++      const char =
++        e.code === ""
++          ? null
++          : keyFromCode(e.code, {
++              shift: e.shiftKey,
++              ctrl: e.ctrlKey,
++              capsLock: e.getModifierState("CapsLock"),
++            });
++      // Arrows, Backspace etc. mean a person is editing, not a scanner
++      if (char === null && e.code !== "") {
++        burstRef.current = null;
++        return null;
++      }
++      burstRef.current = addKey(
++        burstRef.current,
++        char,
++        e.timeStamp,
++        e.currentTarget.value,
++      );
++      window.clearTimeout(timerRef.current);
++      timerRef.current = window.setTimeout(finish, SCAN_END_MS);
++      return null;
++    },
++    [finish],
++  );
++
++  // Use for the input's onChange and for clear/camera actions
++  const setValue = useCallback(
++    (value: string) => {
++      if (performance.now() < settleUntilRef.current) return;
++      setWarning(false);
++      onChange(value);
++    },
++    [onChange],
++  );
++
++  return { inputRef, onKeyDown, setValue, warning };
++}
+diff --git a/src/lib/scanner-input.test.ts b/src/lib/scanner-input.test.ts
+new file mode 100644
+index 0000000..49899a7
+--- /dev/null
++++ b/src/lib/scanner-input.test.ts
+@@ -0,0 +1,100 @@
++import { describe, expect, it } from "vitest";
++import {
++  addKey,
++  hasNonAscii,
++  keyFromCode,
++  scanResult,
++  type Burst,
++} from "./scanner-input.ts";
++
++const plain = { shift: false, ctrl: false, capsLock: false };
++const shifted = { ...plain, shift: true };
++
++// Feeds physical key codes as a scanner would (fast) and returns the burst
++function typeCodes(
++  codes: Array<[string, typeof plain]>,
++  gapMs: number,
++  start: Burst | null = null,
++  value = "",
++) {
++  return codes.reduce<Burst | null>(
++    (burst, [code, mods], i) =>
++      addKey(burst, keyFromCode(code, mods), 1000 + i * gapMs, value),
++    start,
++  );
++}
++
++describe("keyFromCode", () => {
++  it("rebuilds US keys from the physical key, whatever language is on", () => {
++    expect(keyFromCode("Digit0", plain)).toBe("0");
++    expect(keyFromCode("KeyA", plain)).toBe("a");
++    expect(keyFromCode("KeyA", shifted)).toBe("A");
++    expect(keyFromCode("Digit9", shifted)).toBe("(");
++    expect(keyFromCode("Digit0", shifted)).toBe(")");
++    expect(keyFromCode("Numpad7", plain)).toBe("7");
++  });
++
++  it("treats Ctrl+] as the GS1 separator and ignores other shortcuts", () => {
++    expect(keyFromCode("BracketRight", { ...plain, ctrl: true })).toBe(
++      String.fromCharCode(29),
++    );
++    expect(keyFromCode("KeyC", { ...plain, ctrl: true })).toBeNull();
++  });
++
++  it("returns null for editing keys", () => {
++    expect(keyFromCode("Backspace", plain)).toBeNull();
++    expect(keyFromCode("ArrowLeft", plain)).toBeNull();
++  });
++});
++
++describe("scan bursts", () => {
++  const gs1: Array<[string, typeof plain]> = [
++    ["Digit9", shifted],
++    ["Digit0", plain],
++    ["Digit1", plain],
++    ["Digit0", shifted],
++    ["Digit0", plain],
++    ["Digit9", plain],
++    ["Digit3", plain],
++    ["KeyL", shifted],
++    ["KeyC", shifted],
++  ];
++
++  it("rebuilds a fast scan exactly, including letters a Chinese keyboard would swallow", () => {
++    expect(scanResult(typeCodes(gs1, 5))).toEqual({
++      text: "(01)093LC",
++      incomplete: false,
++    });
++  });
++
++  it("ignores normal-speed typing", () => {
++    expect(scanResult(typeCodes(gs1, 150))).toBeNull();
++  });
++
++  it("ignores short bursts", () => {
++    expect(scanResult(typeCodes(gs1.slice(0, 3), 5))).toBeNull();
++  });
++
++  it("keeps text that was already in the box before the scan", () => {
++    expect(scanResult(typeCodes(gs1, 5, null, "abc"))?.text).toBe(
++      "abc(01)093LC",
++    );
++  });
++
++  it("flags keys the browser could not identify", () => {
++    const burst = typeCodes(gs1, 5);
++    const withUnknown = addKey(burst, null, 1000 + gs1.length * 5, "");
++    expect(scanResult(withUnknown)?.incomplete).toBe(true);
++  });
++});
++
++describe("hasNonAscii", () => {
++  it("spots Chinese or wide characters but allows the GS1 separator", () => {
++    expect(hasNonAscii("0109312345678907")).toBe(false);
++    expect(hasNonAscii(`0109312345678907${String.fromCharCode(29)}21X`)).toBe(
++      false,
++    );
++    expect(hasNonAscii("01093日月")).toBe(true);
++    expect(hasNonAscii("０１")).toBe(true);
++  });
++});
+diff --git a/src/lib/scanner-input.ts b/src/lib/scanner-input.ts
+new file mode 100644
+index 0000000..1914013
+--- /dev/null
++++ b/src/lib/scanner-input.ts
+@@ -0,0 +1,115 @@
++// Barcode scanners act like a very fast keyboard. When a Chinese input method
++// (Pinyin, Cangjie, Sucheng...) is on, it swallows or changes those keystrokes.
++// KeyboardEvent.code always reports the physical key, so we rebuild what the
++// scanner actually typed (US layout, which is what scanners emulate).
++
++// Keys from a scanner arrive a few ms apart; people type ~100ms+ apart
++export const SCAN_MAX_GAP_MS = 50;
++// Shortest real barcode (EAN-8) is 8 characters; 6 keeps a safety margin
++export const SCAN_MIN_KEYS = 6;
++// Silence after the last key that means the scan is finished
++export const SCAN_END_MS = 100;
++
++const DIGIT_SHIFTED = ")!@#$%^&*(";
++const SYMBOLS: Record<string, [string, string]> = {
++  Minus: ["-", "_"],
++  Equal: ["=", "+"],
++  BracketLeft: ["[", "{"],
++  BracketRight: ["]", "}"],
++  Backslash: ["\\", "|"],
++  Semicolon: [";", ":"],
++  Quote: ["'", '"'],
++  Comma: [",", "<"],
++  Period: [".", ">"],
++  Slash: ["/", "?"],
++  Backquote: ["`", "~"],
++  Space: [" ", " "],
++};
++const NUMPAD: Record<string, string> = {
++  NumpadDecimal: ".",
++  NumpadSubtract: "-",
++  NumpadAdd: "+",
++  NumpadMultiply: "*",
++  NumpadDivide: "/",
++};
++const MODIFIERS = new Set([
++  "ShiftLeft",
++  "ShiftRight",
++  "ControlLeft",
++  "ControlRight",
++  "AltLeft",
++  "AltRight",
++  "MetaLeft",
++  "MetaRight",
++  "CapsLock",
++]);
++// GS1 group separator; many scanners send it as Ctrl+]
++const GS1_SEPARATOR = String.fromCharCode(29);
++
++export function isModifierCode(code: string): boolean {
++  return MODIFIERS.has(code);
++}
++
++type Mods = { shift: boolean; ctrl: boolean; capsLock: boolean };
++
++// Character a US keyboard would type for this physical key, or null if it's not a typing key
++export function keyFromCode(
++  code: string,
++  { shift, ctrl, capsLock }: Mods,
++): string | null {
++  if (ctrl) return code === "BracketRight" ? GS1_SEPARATOR : null;
++  const letter = code.match(/^Key([A-Z])$/);
++  if (letter) return shift !== capsLock ? letter[1] : letter[1].toLowerCase();
++  const digit = code.match(/^Digit(\d)$/);
++  if (digit) return shift ? DIGIT_SHIFTED[Number(digit[1])] : digit[1];
++  const pad = code.match(/^Numpad(\d)$/);
++  if (pad) return pad[1];
++  if (code in NUMPAD) return NUMPAD[code];
++  const sym = SYMBOLS[code];
++  return sym ? sym[shift ? 1 : 0] : null;
++}
++
++export type Burst = {
++  // Text in the box before the burst started
++  prefix: string;
++  chars: string[];
++  lastAt: number;
++  // A key arrived whose physical position the browser didn't report
++  incomplete: boolean;
++};
++
++// Adds one keystroke; a long pause starts a new burst
++export function addKey(
++  burst: Burst | null,
++  char: string | null,
++  now: number,
++  value: string,
++): Burst {
++  const current =
++    burst && now - burst.lastAt <= SCAN_MAX_GAP_MS
++      ? burst
++      : { prefix: value, chars: [], lastAt: now, incomplete: false };
++  return char === null
++    ? { ...current, lastAt: now, incomplete: true }
++    : { ...current, chars: [...current.chars, char], lastAt: now };
++}
++
++// The rebuilt text if the burst was fast and long enough to be a scanner
++export function scanResult(
++  burst: Burst | null,
++): { text: string; incomplete: boolean } | null {
++  if (!burst || burst.chars.length < SCAN_MIN_KEYS) return null;
++  return {
++    text: burst.prefix + burst.chars.join(""),
++    incomplete: burst.incomplete,
++  };
++}
++
++// Chinese, wide or other non-keyboard characters left in a barcode mean the scan went wrong
++export function hasNonAscii(text: string): boolean {
++  // Allow printable keyboard characters plus the GS1 separator (code 29)
++  return [...text].some((c) => {
++    const n = c.charCodeAt(0);
++    return n !== 29 && (n < 0x20 || n > 0x7e);
++  });
++}
+diff --git a/src/pages/inventory/_components/barcode-confirm-entry.tsx b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+index 830fa8a..c8be879 100644
+--- a/src/pages/inventory/_components/barcode-confirm-entry.tsx
++++ b/src/pages/inventory/_components/barcode-confirm-entry.tsx
+@@ -1,7 +1,6 @@
+-import { useCallback, useRef, useState, type KeyboardEvent } from "react";
+-import { CheckCircle2, CircleAlert, Plus, ScanLine } from "lucide-react";
++import { useCallback, useRef, useState } from "react";
++import { CheckCircle2, CircleAlert, Plus } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+-import { Input } from "@/components/ui/input.tsx";
+ import {
+   AlertDialog,
+   AlertDialogAction,
+@@ -13,9 +12,15 @@ import {
+   AlertDialogTitle,
+ } from "@/components/ui/alert-dialog.tsx";
+ import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
+-import { barcodesMatch, isGs1String, normalizeBarcode, toStoredBarcode } from "@/convex/lib/barcode.ts";
++import {
++  barcodesMatch,
++  isGs1String,
++  normalizeBarcode,
++  toStoredBarcode,
++} from "@/convex/lib/barcode.ts";
+ import { toast } from "sonner";
+ import { cn } from "@/lib/utils.ts";
++import ScanField from "./scan-field.tsx";
+ 
+ type Slot = "first" | "second";
+ 
+@@ -26,7 +31,10 @@ type Props = {
+ 
+ // Barcode must be scanned twice and match before a package form can be added.
+ // Medicines without a barcode can be added after confirming a reminder.
+-export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props) {
++export default function BarcodeConfirmEntry({
++  existingBarcodes,
++  onAdd,
++}: Props) {
+   const [first, setFirst] = useState("");
+   const [second, setSecond] = useState("");
+   const [scanSlot, setScanSlot] = useState<Slot | null>(null);
+@@ -38,7 +46,10 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+   const bothFilled = first.trim() !== "" && second.trim() !== "";
+   const matched = barcodesMatch(first, second);
+   const isDuplicate =
+-    matched && existingBarcodes.some((b) => b && normalizeBarcode(b) === normalizeBarcode(first));
++    matched &&
++    existingBarcodes.some(
++      (b) => b && normalizeBarcode(b) === normalizeBarcode(first),
++    );
+ 
+   const reset = () => {
+     setFirst("");
+@@ -47,38 +58,40 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+     firstRef.current?.focus();
+   };
+ 
+-  const tryAdd = () => {
++  const tryAdd = (secondValue: string = second) => {
+     if (!first.trim()) {
+       setError("Scan the barcode first.");
+       firstRef.current?.focus();
+       return;
+     }
+-    if (!second.trim()) {
++    if (!secondValue.trim()) {
+       setError("Scan the barcode a second time to confirm.");
+       secondRef.current?.focus();
+       return;
+     }
+-    if (!matched) {
++    if (!barcodesMatch(first, secondValue)) {
+       setError("The two scans do not match. Please scan again.");
+       setSecond("");
+       secondRef.current?.focus();
+       return;
+     }
+-    if (isDuplicate) {
++    if (
++      existingBarcodes.some(
++        (b) => b && normalizeBarcode(b) === normalizeBarcode(first),
++      )
++    ) {
+       setError("This barcode is already listed below.");
+       return;
+     }
+     onAdd(toStoredBarcode(first));
+-    if (isGs1String(first)) toast.success(`GS1 code detected. Saved GTIN ${toStoredBarcode(first)}`);
++    if (isGs1String(first))
++      toast.success(`GS1 code detected. Saved GTIN ${toStoredBarcode(first)}`);
+     reset();
+   };
+ 
+-  // Barcode scanners type the code then press Enter; move along instead of submitting the form
+-  const onKeyDown = (slot: Slot) => (e: KeyboardEvent<HTMLInputElement>) => {
+-    if (e.key !== "Enter") return;
+-    e.preventDefault();
+-    if (slot === "first" && first.trim()) secondRef.current?.focus();
+-    else if (slot === "second") tryAdd();
++  const handleEnter = (slot: Slot) => (value: string) => {
++    if (slot === "first" && value.trim()) secondRef.current?.focus();
++    else if (slot === "second") tryAdd(value);
+   };
+ 
+   const handleDetected = useCallback(
+@@ -95,38 +108,30 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+     [scanSlot],
+   );
+ 
+-  const scanField = (slot: Slot, value: string, setValue: (v: string) => void, label: string) => (
+-    <div className="flex flex-1 gap-1.5">
+-      <div className="relative flex-1">
+-        <ScanLine className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-accent-foreground/70" />
+-        <Input
+-          ref={slot === "first" ? firstRef : secondRef}
+-          value={value}
+-          onChange={(e) => {
+-            setValue(e.target.value);
+-            setError(null);
+-          }}
+-          onKeyDown={onKeyDown(slot)}
+-          placeholder={label}
+-          aria-label={label}
+-          className={cn(
+-            "h-11 border-accent-foreground/20 bg-accent pl-9 font-mono text-accent-foreground placeholder:text-accent-foreground/60",
+-            bothFilled && matched && !isDuplicate && "border-green-600 dark:border-green-400",
+-            bothFilled && !matched && "border-destructive",
+-          )}
+-        />
+-      </div>
+-      <Button
+-        type="button"
+-        variant="secondary"
+-        size="icon"
+-        className="size-11"
+-        onClick={() => setScanSlot(slot)}
+-        aria-label={`Use camera for ${label.toLowerCase()}`}
+-      >
+-        <ScanLine />
+-      </Button>
+-    </div>
++  const scanField = (
++    slot: Slot,
++    value: string,
++    setValue: (v: string) => void,
++    label: string,
++  ) => (
++    <ScanField
++      ref={slot === "first" ? firstRef : secondRef}
++      label={label}
++      value={value}
++      onChange={(v) => {
++        setValue(v);
++        setError(null);
++      }}
++      onEnter={handleEnter(slot)}
++      onCamera={() => setScanSlot(slot)}
++      className={cn(
++        bothFilled &&
++          matched &&
++          !isDuplicate &&
++          "border-green-600 dark:border-green-400",
++        bothFilled && !matched && "border-destructive",
++      )}
++    />
+   );
+ 
+   return (
+@@ -134,7 +139,12 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+       <div className="flex flex-col gap-2 sm:flex-row">
+         {scanField("first", first, setFirst, "Scan barcode")}
+         {scanField("second", second, setSecond, "Scan again to confirm")}
+-        <Button type="button" className="h-11" onClick={tryAdd} disabled={!bothFilled}>
++        <Button
++          type="button"
++          className="h-11"
++          onClick={() => tryAdd()}
++          disabled={!bothFilled}
++        >
+           <Plus /> Add
+         </Button>
+       </div>
+@@ -156,7 +166,9 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+             <CircleAlert className="size-3.5" /> The two scans do not match.
+           </span>
+         ) : (
+-          <span className="text-muted-foreground">Scan the same barcode twice so we know it was read correctly.</span>
++          <span className="text-muted-foreground">
++            Scan the same barcode twice so we know it was read correctly.
++          </span>
+         )}
+         <button
+           type="button"
+@@ -178,7 +190,9 @@ export default function BarcodeConfirmEntry({ existingBarcodes, onAdd }: Props)
+           <AlertDialogHeader>
+             <AlertDialogTitle>Add without a barcode?</AlertDialogTitle>
+             <AlertDialogDescription>
+-              Please check the packaging carefully. Only continue if this medicine has no barcode or GS1 code. Staff will need to find it by name or Drug ID instead of scanning.
++              Please check the packaging carefully. Only continue if this
++              medicine has no barcode or GS1 code. Staff will need to find it by
++              name or Drug ID instead of scanning.
+             </AlertDialogDescription>
+           </AlertDialogHeader>
+           <AlertDialogFooter>
+diff --git a/src/pages/inventory/_components/scan-field.tsx b/src/pages/inventory/_components/scan-field.tsx
+new file mode 100644
+index 0000000..4168e2d
+--- /dev/null
++++ b/src/pages/inventory/_components/scan-field.tsx
+@@ -0,0 +1,76 @@
++import { forwardRef, type KeyboardEvent } from "react";
++import { ScanLine } from "lucide-react";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import ScanKeyboardWarning from "@/components/scan-keyboard-warning.tsx";
++import { useScannerInput } from "@/hooks/use-scanner-input.ts";
++import { cn } from "@/lib/utils.ts";
++
++type Props = {
++  label: string;
++  value: string;
++  onChange: (value: string) => void;
++  // Called on Enter/Tab with the final (scanner-corrected) value
++  onEnter: (value: string) => void;
++  onCamera: () => void;
++  className?: string;
++};
++
++// One barcode box that reads scanners correctly even with a Chinese keyboard on
++const ScanField = forwardRef<HTMLInputElement, Props>(function ScanField(
++  { label, value, onChange, onEnter, onCamera, className },
++  ref,
++) {
++  const { inputRef, onKeyDown, setValue, warning } = useScannerInput(onChange);
++
++  const setRefs = (el: HTMLInputElement | null) => {
++    inputRef.current = el;
++    if (typeof ref === "function") ref(el);
++    else if (ref) ref.current = el;
++  };
++
++  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
++    const scanned = onKeyDown(e);
++    // Barcode scanners type the code then press Enter; move along instead of submitting the form.
++    // With a Chinese keyboard on, e.key can be "Process", so also check the physical key.
++    if (e.key !== "Enter" && e.code !== "Enter" && e.code !== "NumpadEnter")
++      return;
++    e.preventDefault();
++    onEnter(scanned ?? e.currentTarget.value);
++  };
++
++  return (
++    <div className="flex-1 space-y-2">
++      <div className="flex gap-1.5">
++        <div className="relative flex-1">
++          <ScanLine className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-accent-foreground/70" />
++          <Input
++            ref={setRefs}
++            value={value}
++            onChange={(e) => setValue(e.target.value)}
++            onKeyDown={handleKeyDown}
++            placeholder={label}
++            aria-label={label}
++            className={cn(
++              "h-11 border-accent-foreground/20 bg-accent pl-9 font-mono text-accent-foreground placeholder:text-accent-foreground/60",
++              className,
++            )}
++          />
++        </div>
++        <Button
++          type="button"
++          variant="secondary"
++          size="icon"
++          className="size-11"
++          onClick={onCamera}
++          aria-label={`Use camera for ${label.toLowerCase()}`}
++        >
++          <ScanLine />
++        </Button>
++      </div>
++      {warning && <ScanKeyboardWarning />}
++    </div>
++  );
++});
++
++export default ScanField;

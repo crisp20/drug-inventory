@@ -1,0 +1,21 @@
+diff --git a/src/index.css b/src/index.css
+index 86656fe..1b8db16 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -7,13 +7,12 @@
+ 
+ @theme inline {
+   --font-sans:
+-    "Figtree", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji",
++    Arial, "Helvetica Neue", Helvetica, sans-serif, "Apple Color Emoji",
+     "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+   --font-mono:
+-    "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+-    "Liberation Mono", "Courier New", monospace;
++    Arial, "Helvetica Neue", Helvetica, sans-serif;
+   --font-serif:
+-    "Noto Serif", ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
++    Arial, "Helvetica Neue", Helvetica, sans-serif;
+ 
+   --radius-sm: calc(var(--radius) - 4px);
+   --radius-md: calc(var(--radius) - 2px);

@@ -1,0 +1,904 @@
+diff --git a/convex/lib/stock.ts b/convex/lib/stock.ts
+index e3ef3df..5c29f99 100644
+--- a/convex/lib/stock.ts
++++ b/convex/lib/stock.ts
+@@ -5,7 +5,13 @@ export const MAX_NOTES_LENGTH = 500;
+ export const MAX_REASON_LENGTH = 60;
+ 
+ // Suggested Stock Out reasons; staff can also type their own
+-export const STOCK_OUT_REASONS = ["Dispensed", "Expired", "Damaged", "Returned to supplier", "Transferred"] as const;
++export const STOCK_OUT_REASONS = [
++  "Dispensed",
++  "Expired",
++  "Damaged",
++  "Returned to supplier",
++  "Transferred",
++] as const;
+ export const DEFAULT_STOCK_OUT_REASON = STOCK_OUT_REASONS[0];
+ 
+ export type MovementKind = "in" | "out";
+@@ -19,24 +25,54 @@ function bad(message: string): never {
+ 
+ // Validates a stock movement entered by a user. Returns trimmed values.
+ export function cleanMovementInput(input: MovementInput): MovementInput {
+-  if (!Number.isInteger(input.quantity) || input.quantity <= 0) bad("Quantity must be a whole number above 0");
++  if (!Number.isInteger(input.quantity) || input.quantity <= 0)
++    bad("Quantity must be a whole number above 0");
+   if (input.quantity > MAX_MOVEMENT_QUANTITY) {
+     bad(`Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`);
+   }
+   const notes = input.notes.trim();
+-  if (notes.length > MAX_NOTES_LENGTH) bad(`Notes can be at most ${MAX_NOTES_LENGTH} characters`);
++  if (notes.length > MAX_NOTES_LENGTH)
++    bad(`Notes can be at most ${MAX_NOTES_LENGTH} characters`);
+   return { ...input, notes };
+ }
+ 
+ export function cleanReason(reason: string): string {
+   const cleaned = reason.trim();
+   if (!cleaned) bad("Reason is required");
+-  if (cleaned.length > MAX_REASON_LENGTH) bad(`Reason can be at most ${MAX_REASON_LENGTH} characters`);
++  if (cleaned.length > MAX_REASON_LENGTH)
++    bad(`Reason can be at most ${MAX_REASON_LENGTH} characters`);
+   return cleaned;
+ }
+ 
++// Suggested reasons when an admin undoes an entry; they can also type their own
++export const UNDO_REASONS = [
++  "Scanned in error",
++  "Wrong quantity",
++  "Wrong drug",
++  "Duplicate entry",
++] as const;
++
++// Stock amount after reversing a movement. Undoing a Stock In cannot take stock below 0.
++export function undoneStock(
++  current: number,
++  kind: MovementKind,
++  quantity: number,
++): number {
++  if (kind === "out") return current + quantity;
++  if (quantity > current) {
++    bad(
++      `Can't undo: only ${current} on hand now, but this entry added ${quantity}`,
++    );
++  }
++  return current - quantity;
++}
++
+ // New stock amount (in package forms) after a movement. Stock can never go below 0.
+-export function nextStock(current: number, kind: MovementKind, quantity: number): number {
++export function nextStock(
++  current: number,
++  kind: MovementKind,
++  quantity: number,
++): number {
+   if (kind === "in") return current + quantity;
+   if (quantity > current) {
+     bad(`Not enough stock: only ${current} on hand`);
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index 17e1c36..51e5dc6 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -31,9 +31,24 @@ export const stockMovementsTable = defineTable({
+   userRef: v.id("users"),
+   userName: v.string(),
+   occurredAt: v.string(),
++  // Set when an admin reverses this entry; its stock change has been put back
++  undo: v.optional(
++    v.object({
++      reason: v.string(),
++      userRef: v.id("users"),
++      userName: v.string(),
++      stockBefore: v.number(),
++      stockAfter: v.number(),
++      undoneAt: v.string(),
++    }),
++  ),
+ })
+   .index("by_kind_and_occurredAt", ["kind", "occurredAt"])
+   .index("by_kind_and_drug_and_occurredAt", ["kind", "drugRef", "occurredAt"])
+-  .index("by_kind_and_package_and_occurredAt", ["kind", "packageRef", "occurredAt"])
++  .index("by_kind_and_package_and_occurredAt", [
++    "kind",
++    "packageRef",
++    "occurredAt",
++  ])
+   // Full In + Out history of one package form (Inventory detail view)
+   .index("by_package_and_occurredAt", ["packageRef", "occurredAt"]);
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index 9fc8b3a..af70474 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -4,8 +4,16 @@ import { api } from "./_generated/api";
+ import schema from "./schema";
+ import { modules } from "./test.setup";
+ 
+-const OWNER = { tokenIdentifier: "iss|owner", email: "hubert@activecaregroup.com", name: "Hubert" };
+-const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
++const OWNER = {
++  tokenIdentifier: "iss|owner",
++  email: "hubert@activecaregroup.com",
++  name: "Hubert",
++};
++const STAFF = {
++  tokenIdentifier: "iss|staff",
++  email: "staff@example.com",
++  name: "Sam",
++};
+ 
+ const drug = {
+   drugId: "PCM500",
+@@ -14,7 +22,14 @@ const drug = {
+   manufacturer: "GSK",
+   pieceName: "tablets",
+   packages: [
+-    { barcode: "9312345678907", qtyPerUnit: 10, baseUnit: "Strip" as const, unitCount: 10, stock: 3, imageIds: [] },
++    {
++      barcode: "9312345678907",
++      qtyPerUnit: 10,
++      baseUnit: "Strip" as const,
++      unitCount: 10,
++      stock: 3,
++      imageIds: [],
++    },
+   ],
+ };
+ 
+@@ -25,8 +40,14 @@ async function setup({ approveStaff = true } = {}) {
+   await owner.mutation(api.users.updateCurrentUser, {});
+   await staff.mutation(api.users.updateCurrentUser, {});
+   if (approveStaff) {
+-    const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
+-    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
++    const [pending] = await owner.query(api.users.listByStatus, {
++      status: "pending",
++    });
++    await owner.mutation(api.users.updateAccess, {
++      userId: pending._id,
++      role: "staff",
++      status: "active",
++    });
+   }
+   const drugRef = await owner.mutation(api.drugs.create, drug);
+   const created = await owner.query(api.drugs.get, { id: drugRef });
+@@ -38,13 +59,19 @@ const entry = { quantity: 4, notes: " Invoice 88 " };
+ describe("Stock In", () => {
+   it("lets staff add stock and logs who did it", async () => {
+     const { owner, staff, packageId, drugRef } = await setup();
+-    const result = await staff.mutation(api.stock.recordIn, { packageId, ...entry });
++    const result = await staff.mutation(api.stock.recordIn, {
++      packageId,
++      ...entry,
++    });
+     expect(result.stockAfter).toBe(7);
+ 
+     const updated = await owner.query(api.drugs.get, { id: drugRef });
+     expect(updated!.packages[0].stock).toBe(7);
+ 
+-    const log = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: { numItems: 10, cursor: null } });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
+     expect(log.page).toHaveLength(1);
+     expect(log.page[0]).toMatchObject({
+       quantity: 4,
+@@ -62,12 +89,16 @@ describe("Stock In", () => {
+ 
+   it("blocks users who are not approved", async () => {
+     const { staff, packageId } = await setup({ approveStaff: false });
+-    await expect(staff.mutation(api.stock.recordIn, { packageId, ...entry })).rejects.toThrow(/approval/);
++    await expect(
++      staff.mutation(api.stock.recordIn, { packageId, ...entry }),
++    ).rejects.toThrow(/approval/);
+   });
+ 
+   it("rejects invalid quantities and leaves stock unchanged", async () => {
+     const { owner, packageId, drugRef } = await setup();
+-    await expect(owner.mutation(api.stock.recordIn, { packageId, ...entry, quantity: 0 })).rejects.toThrow(/Quantity/);
++    await expect(
++      owner.mutation(api.stock.recordIn, { packageId, ...entry, quantity: 0 }),
++    ).rejects.toThrow(/Quantity/);
+     const updated = await owner.query(api.drugs.get, { id: drugRef });
+     expect(updated!.packages[0].stock).toBe(3);
+   });
+@@ -78,40 +109,178 @@ describe("Stock Out", () => {
+ 
+   it("lets staff remove stock and logs the reason", async () => {
+     const { owner, staff, packageId, drugRef } = await setup();
+-    const result = await staff.mutation(api.stock.recordOut, { packageId, ...out });
++    const result = await staff.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++    });
+     expect(result.stockAfter).toBe(1);
+     const updated = await owner.query(api.drugs.get, { id: drugRef });
+     expect(updated!.packages[0].stock).toBe(1);
+ 
+-    const log = await owner.query(api.stock.listMovements, { kind: "out", paginationOpts: { numItems: 10, cursor: null } });
+-    expect(log.page[0]).toMatchObject({ kind: "out", quantity: 2, stockBefore: 3, stockAfter: 1, reason: "Dispensed", userName: "Sam" });
+-    const inLog = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: { numItems: 10, cursor: null } });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(log.page[0]).toMatchObject({
++      kind: "out",
++      quantity: 2,
++      stockBefore: 3,
++      stockAfter: 1,
++      reason: "Dispensed",
++      userName: "Sam",
++    });
++    const inLog = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
+     expect(inLog.page).toHaveLength(0);
+   });
+ 
+   it("allows taking stock to exactly zero", async () => {
+     const { owner, packageId } = await setup();
+-    const result = await owner.mutation(api.stock.recordOut, { packageId, ...out, quantity: 3 });
++    const result = await owner.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++      quantity: 3,
++    });
+     expect(result.stockAfter).toBe(0);
+   });
+ 
+   it("blocks taking out more than is in stock and logs nothing", async () => {
+     const { owner, packageId, drugRef } = await setup();
+-    await expect(owner.mutation(api.stock.recordOut, { packageId, ...out, quantity: 4 })).rejects.toThrow(/only 3 on hand/);
++    await expect(
++      owner.mutation(api.stock.recordOut, { packageId, ...out, quantity: 4 }),
++    ).rejects.toThrow(/only 3 on hand/);
+     const updated = await owner.query(api.drugs.get, { id: drugRef });
+     expect(updated!.packages[0].stock).toBe(3);
+-    const log = await owner.query(api.stock.listMovements, { kind: "out", paginationOpts: { numItems: 10, cursor: null } });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
+     expect(log.page).toHaveLength(0);
+   });
+ 
+   it("requires a reason", async () => {
+     const { owner, packageId } = await setup();
+-    await expect(owner.mutation(api.stock.recordOut, { packageId, ...out, reason: "  " })).rejects.toThrow(/Reason/);
++    await expect(
++      owner.mutation(api.stock.recordOut, { packageId, ...out, reason: "  " }),
++    ).rejects.toThrow(/Reason/);
+   });
+ 
+   it("blocks users who are not approved", async () => {
+     const { staff, packageId } = await setup({ approveStaff: false });
+-    await expect(staff.mutation(api.stock.recordOut, { packageId, ...out })).rejects.toThrow(/approval/);
++    await expect(
++      staff.mutation(api.stock.recordOut, { packageId, ...out }),
++    ).rejects.toThrow(/approval/);
++  });
++});
++
++describe("Undo", () => {
++  const page = { numItems: 10, cursor: null };
++
++  it("lets an admin undo a Stock In, restoring stock and keeping the entry", async () => {
++    const { owner, staff, packageId, drugRef } = await setup();
++    await staff.mutation(api.stock.recordIn, { packageId, ...entry });
++    const [m] = (
++      await owner.query(api.stock.listMovements, {
++        kind: "in",
++        paginationOpts: page,
++      })
++    ).page;
++    const result = await owner.mutation(api.stock.undoMovement, {
++      movementId: m._id,
++      reason: " Scanned in error ",
++    });
++    expect(result.stockAfter).toBe(3);
++    expect(
++      (await owner.query(api.drugs.get, { id: drugRef }))!.packages[0].stock,
++    ).toBe(3);
++    const [after] = (
++      await owner.query(api.stock.listMovements, {
++        kind: "in",
++        paginationOpts: page,
++      })
++    ).page;
++    expect(after.undo).toMatchObject({
++      reason: "Scanned in error",
++      userName: "Hubert",
++      stockBefore: 7,
++      stockAfter: 3,
++    });
++  });
++
++  it("adds stock back when undoing a Stock Out", async () => {
++    const { owner, packageId } = await setup();
++    await owner.mutation(api.stock.recordOut, {
++      packageId,
++      ...entry,
++      quantity: 2,
++      reason: "Dispensed",
++    });
++    const [m] = (
++      await owner.query(api.stock.listMovements, {
++        kind: "out",
++        paginationOpts: page,
++      })
++    ).page;
++    const result = await owner.mutation(api.stock.undoMovement, {
++      movementId: m._id,
++      reason: "Wrong drug",
++    });
++    expect(result.stockAfter).toBe(3);
++  });
++
++  it("blocks staff, double undo, missing reason, and stock going below zero", async () => {
++    const { owner, staff, packageId } = await setup();
++    await owner.mutation(api.stock.recordIn, { packageId, ...entry });
++    const [m] = (
++      await owner.query(api.stock.listMovements, {
++        kind: "in",
++        paginationOpts: page,
++      })
++    ).page;
++    await expect(
++      staff.mutation(api.stock.undoMovement, {
++        movementId: m._id,
++        reason: "x",
++      }),
++    ).rejects.toThrow(/admins/);
++    await expect(
++      owner.mutation(api.stock.undoMovement, {
++        movementId: m._id,
++        reason: " ",
++      }),
++    ).rejects.toThrow(/Reason/);
++
++    // Stock was 3 + 4 = 7; take 5 out so undoing the +4 would go negative
++    await owner.mutation(api.stock.recordOut, {
++      packageId,
++      ...entry,
++      quantity: 5,
++      reason: "Dispensed",
++    });
++    await expect(
++      owner.mutation(api.stock.undoMovement, {
++        movementId: m._id,
++        reason: "x",
++      }),
++    ).rejects.toThrow(/only 2 on hand/);
++
++    await owner.mutation(api.stock.recordIn, {
++      packageId,
++      ...entry,
++      quantity: 10,
++    });
++    await owner.mutation(api.stock.undoMovement, {
++      movementId: m._id,
++      reason: "x",
++    });
++    await expect(
++      owner.mutation(api.stock.undoMovement, {
++        movementId: m._id,
++        reason: "x",
++      }),
++    ).rejects.toThrow(/already/);
+   });
+ });
+ 
+@@ -124,7 +293,14 @@ describe("Filtered log", () => {
+       ...drug,
+       packages: [
+         { ...drug.packages[0], packageId },
+-        { barcode: "", qtyPerUnit: 20, baseUnit: "Box" as const, unitCount: 1, stock: 5, imageIds: [] },
++        {
++          barcode: "",
++          qtyPerUnit: 20,
++          baseUnit: "Box" as const,
++          unitCount: 1,
++          stock: 5,
++          imageIds: [],
++        },
+       ],
+     });
+     const updated = await owner.query(api.drugs.get, { id: drugRef });
+@@ -135,14 +311,21 @@ describe("Filtered log", () => {
+       name: "Ibuprofen",
+       packages: [{ ...drug.packages[0], barcode: "9300000000001" }],
+     });
+-    const otherDrugPkg = (await owner.query(api.drugs.get, { id: otherDrug }))!.packages[0]._id;
++    const otherDrugPkg = (await owner.query(api.drugs.get, { id: otherDrug }))!
++      .packages[0]._id;
+ 
+     await owner.mutation(api.stock.recordIn, { packageId, ...entry });
+     await owner.mutation(api.stock.recordIn, { packageId: otherPkg, ...entry });
+-    await owner.mutation(api.stock.recordIn, { packageId: otherDrugPkg, ...entry });
++    await owner.mutation(api.stock.recordIn, {
++      packageId: otherDrugPkg,
++      ...entry,
++    });
+ 
+     const page = { numItems: 10, cursor: null };
+-    const all = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: page });
++    const all = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: page,
++    });
+     expect(all.page).toHaveLength(3);
+     const byDrug = await owner.query(api.stock.listMovements, {
+       kind: "in",
+@@ -167,7 +350,11 @@ describe("Filtered log", () => {
+   it("returns Stock In and Stock Out together for one package form, newest first", async () => {
+     const { owner, packageId } = await setup();
+     await owner.mutation(api.stock.recordIn, { packageId, ...entry });
+-    await owner.mutation(api.stock.recordOut, { packageId, ...entry, reason: "Dispensed" });
++    await owner.mutation(api.stock.recordOut, {
++      packageId,
++      ...entry,
++      reason: "Dispensed",
++    });
+     const page = { numItems: 10, cursor: null };
+     const history = await owner.query(api.stock.listMovements, {
+       filter: { type: "package", packageId },
+@@ -175,6 +362,8 @@ describe("Filtered log", () => {
+     });
+     expect(history.page.map((m) => m.kind)).toEqual(["out", "in"]);
+     // Mixed history is only allowed for a single package form
+-    await expect(owner.query(api.stock.listMovements, { paginationOpts: page })).rejects.toThrow();
++    await expect(
++      owner.query(api.stock.listMovements, { paginationOpts: page }),
++    ).rejects.toThrow();
+   });
+ });
+diff --git a/convex/stock.ts b/convex/stock.ts
+index a4b1e62..8e0f5c4 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -2,11 +2,12 @@ import { paginationOptsValidator } from "convex/server";
+ import { ConvexError, v } from "convex/values";
+ import { mutation, query, type MutationCtx } from "./_generated/server";
+ import type { Id } from "./_generated/dataModel";
+-import { requireActiveUser } from "./lib/access";
++import { requireActiveUser, requireAdmin } from "./lib/access";
+ import {
+   cleanMovementInput,
+   cleanReason,
+   nextStock,
++  undoneStock,
+   type MovementInput,
+   type MovementKind,
+ } from "./lib/stock";
+@@ -29,9 +30,17 @@ async function recordMovement(
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+   const pkg = await ctx.db.get("drugPackages", packageId);
+-  if (!pkg) throw new ConvexError({ code: "NOT_FOUND", message: "This package form no longer exists" });
++  if (!pkg)
++    throw new ConvexError({
++      code: "NOT_FOUND",
++      message: "This package form no longer exists",
++    });
+   const drug = await ctx.db.get("drugs", pkg.drugRef);
+-  if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "This drug no longer exists" });
++  if (!drug)
++    throw new ConvexError({
++      code: "NOT_FOUND",
++      message: "This drug no longer exists",
++    });
+ 
+   const stockAfter = nextStock(pkg.stock, kind, input.quantity);
+   await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
+@@ -71,7 +80,54 @@ export const recordIn = mutation({
+ export const recordOut = mutation({
+   args: { ...movementArgs, reason: v.string() },
+   handler: async (ctx, { packageId, reason, ...rest }) => {
+-    return await recordMovement(ctx, "out", packageId, rest, cleanReason(reason));
++    return await recordMovement(
++      ctx,
++      "out",
++      packageId,
++      rest,
++      cleanReason(reason),
++    );
++  },
++});
++
++// Admin-only: reverses an entry's stock change and marks it undone with a reason.
++// The entry stays in the history so the audit trail is kept.
++export const undoMovement = mutation({
++  args: { movementId: v.id("stockMovements"), reason: v.string() },
++  handler: async (ctx, { movementId, reason }) => {
++    const admin = await requireAdmin(ctx);
++    const cleaned = cleanReason(reason);
++    const movement = await ctx.db.get("stockMovements", movementId);
++    if (!movement)
++      throw new ConvexError({
++        code: "NOT_FOUND",
++        message: "This entry no longer exists",
++      });
++    if (movement.undo)
++      throw new ConvexError({
++        code: "CONFLICT",
++        message: "This entry has already been undone",
++      });
++    const pkg = await ctx.db.get("drugPackages", movement.packageRef);
++    if (!pkg) {
++      throw new ConvexError({
++        code: "NOT_FOUND",
++        message: "This package form was deleted, so its stock can't be changed",
++      });
++    }
++    const stockAfter = undoneStock(pkg.stock, movement.kind, movement.quantity);
++    await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
++    await ctx.db.patch("stockMovements", movement._id, {
++      undo: {
++        reason: cleaned,
++        userRef: admin._id,
++        userName: admin.name ?? admin.email ?? "Unknown user",
++        stockBefore: pkg.stock,
++        stockAfter,
++        undoneAt: new Date().toISOString(),
++      },
++    });
++    return { stockAfter };
+   },
+ });
+ 
+@@ -86,27 +142,40 @@ const movementFilter = v.optional(
+ // Newest first. Leaving out `kind` returns both Stock In and Stock Out,
+ // which is only supported for a single package form.
+ export const listMovements = query({
+-  args: { kind: v.optional(movementKind), filter: movementFilter, paginationOpts: paginationOptsValidator },
++  args: {
++    kind: v.optional(movementKind),
++    filter: movementFilter,
++    paginationOpts: paginationOptsValidator,
++  },
+   handler: async (ctx, { kind, filter, paginationOpts }) => {
+     await requireActiveUser(ctx);
+     const table = ctx.db.query("stockMovements");
+     if (kind === undefined) {
+       if (filter?.type !== "package") {
+-        throw new ConvexError({ code: "BAD_REQUEST", message: "Choose Stock In or Stock Out" });
++        throw new ConvexError({
++          code: "BAD_REQUEST",
++          message: "Choose Stock In or Stock Out",
++        });
+       }
+       return await table
+-        .withIndex("by_package_and_occurredAt", (q) => q.eq("packageRef", filter.packageId))
++        .withIndex("by_package_and_occurredAt", (q) =>
++          q.eq("packageRef", filter.packageId),
++        )
+         .order("desc")
+         .paginate(paginationOpts);
+     }
+     const scoped =
+       filter?.type === "drug"
+-        ? table.withIndex("by_kind_and_drug_and_occurredAt", (q) => q.eq("kind", kind).eq("drugRef", filter.drugId))
++        ? table.withIndex("by_kind_and_drug_and_occurredAt", (q) =>
++            q.eq("kind", kind).eq("drugRef", filter.drugId),
++          )
+         : filter?.type === "package"
+           ? table.withIndex("by_kind_and_package_and_occurredAt", (q) =>
+               q.eq("kind", kind).eq("packageRef", filter.packageId),
+             )
+-          : table.withIndex("by_kind_and_occurredAt", (q) => q.eq("kind", kind));
++          : table.withIndex("by_kind_and_occurredAt", (q) =>
++              q.eq("kind", kind),
++            );
+     return await scoped.order("desc").paginate(paginationOpts);
+   },
+ });
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index c656e8b..8e0f680 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -1,10 +1,11 @@
++import { useState } from "react";
+ import { usePaginatedQuery } from "convex/react";
+ import { format } from "date-fns";
+-import { History } from "lucide-react";
++import { History, Undo2 } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import type { MovementKind } from "@/convex/lib/stock.ts";
+-import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import type { Doc, Id } from "@/convex/_generated/dataModel.d.ts";
+ import { Badge } from "@/components/ui/badge.tsx";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+@@ -15,7 +16,9 @@ import {
+   EmptyTitle,
+ } from "@/components/ui/empty.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { cn } from "@/lib/utils.ts";
++import UndoMovementDialog from "./undo-movement-dialog.tsx";
+ 
+ const PAGE_SIZE = 25;
+ 
+@@ -26,9 +29,15 @@ export type MovementLogFilter =
+ // Leaving out `kind` shows Stock In and Stock Out together (package form filter only)
+ type Props =
+   | { kind: MovementKind; filter?: MovementLogFilter }
+-  | { kind?: undefined; filter: Extract<MovementLogFilter, { type: "package" }> };
++  | {
++      kind?: undefined;
++      filter: Extract<MovementLogFilter, { type: "package" }>;
++    };
+ 
+-const KIND_LABEL: Record<MovementKind, string> = { in: "Stock In", out: "Stock Out" };
++const KIND_LABEL: Record<MovementKind, string> = {
++  in: "Stock In",
++  out: "Stock Out",
++};
+ 
+ // Who recorded what, and when. Newest first.
+ export default function MovementLog({ kind, filter }: Props) {
+@@ -37,6 +46,10 @@ export default function MovementLog({ kind, filter }: Props) {
+     { kind, filter },
+     { initialNumItems: PAGE_SIZE },
+   );
++  const currentUser = useCurrentUser();
++  const isAdmin =
++    currentUser?.role === "admin" && currentUser.status === "active";
++  const [undoing, setUndoing] = useState<Doc<"stockMovements"> | null>(null);
+   const mixed = kind === undefined;
+   const label = kind ? KIND_LABEL[kind] : "Stock In or Stock Out";
+ 
+@@ -56,7 +69,11 @@ export default function MovementLog({ kind, filter }: Props) {
+           <EmptyMedia variant="icon">
+             <History />
+           </EmptyMedia>
+-          <EmptyTitle>{filter ? `No ${label} recorded for this ${filter.type === "drug" ? "drug" : "package form"} yet` : "Nothing recorded yet"}</EmptyTitle>
++          <EmptyTitle>
++            {filter
++              ? `No ${label} recorded for this ${filter.type === "drug" ? "drug" : "package form"} yet`
++              : "Nothing recorded yet"}
++          </EmptyTitle>
+           <EmptyDescription>
+             {filter
+               ? "Earlier entries will appear here once they are recorded."
+@@ -71,11 +88,18 @@ export default function MovementLog({ kind, filter }: Props) {
+     <div className="space-y-3">
+       <ul className="divide-y rounded-xl border bg-card">
+         {results.map((m) => (
+-          <li key={m._id} className="flex gap-3 p-3">
++          <li
++            key={m._id}
++            className={cn("flex gap-3 p-3", m.undo && "bg-muted/50")}
++          >
+             <div
+               className={cn(
+                 "w-14 shrink-0 pt-0.5 text-center text-lg font-extrabold",
+-                m.kind === "in" ? "text-primary" : "text-chart-3",
++                m.undo
++                  ? "text-muted-foreground line-through"
++                  : m.kind === "in"
++                    ? "text-primary"
++                    : "text-chart-3",
+               )}
+             >
+               {m.kind === "in" ? "+" : "−"}
+@@ -84,30 +108,73 @@ export default function MovementLog({ kind, filter }: Props) {
+             <div className="min-w-0 flex-1 space-y-0.5">
+               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                 {mixed && (
+-                  <Badge variant={m.kind === "in" ? "default" : "secondary"}>{KIND_LABEL[m.kind]}</Badge>
++                  <Badge variant={m.kind === "in" ? "default" : "secondary"}>
++                    {KIND_LABEL[m.kind]}
++                  </Badge>
+                 )}
+-                <span className="truncate font-semibold">{m.drugName}</span>
+-                <span className="text-sm text-muted-foreground">{formatPackageForm(m)}</span>
++                <span
++                  className={cn(
++                    "truncate font-semibold",
++                    m.undo && "text-muted-foreground line-through",
++                  )}
++                >
++                  {m.drugName}
++                </span>
++                <span className="text-sm text-muted-foreground">
++                  {formatPackageForm(m)}
++                </span>
+                 {m.reason && <Badge variant="secondary">{m.reason}</Badge>}
++                {m.undo && <Badge variant="destructive">Undone</Badge>}
+               </div>
+               <div className="truncate text-xs text-muted-foreground">
+-                {m.barcode ? <span className="font-mono">{m.barcode}</span> : "No barcode"} · Stock {m.stockBefore} → {m.stockAfter}
++                {m.barcode ? (
++                  <span className="font-mono">{m.barcode}</span>
++                ) : (
++                  "No barcode"
++                )}{" "}
++                · Stock {m.stockBefore} → {m.stockAfter}
+               </div>
+-              {m.notes && <p className="whitespace-pre-line text-sm">{m.notes}</p>}
++              {m.notes && (
++                <p className="whitespace-pre-line text-sm">{m.notes}</p>
++              )}
++              {m.undo && (
++                <p className="text-xs text-destructive">
++                  Undone by {m.undo.userName} ·{" "}
++                  {format(new Date(m.undo.undoneAt), "d MMM yyyy, h:mm a")} ·{" "}
++                  <span className="font-semibold">{m.undo.reason}</span> · Stock{" "}
++                  {m.undo.stockBefore} → {m.undo.stockAfter}
++                </p>
++              )}
+             </div>
+-            <div className="shrink-0 text-right text-xs text-muted-foreground">
++            <div className="flex shrink-0 flex-col items-end gap-1 text-right text-xs text-muted-foreground">
+               <div className="font-medium text-foreground">{m.userName}</div>
+               <div>{format(new Date(m.occurredAt), "d MMM yyyy")}</div>
+               <div>{format(new Date(m.occurredAt), "h:mm a")}</div>
++              {isAdmin && !m.undo && (
++                <Button
++                  variant="ghost"
++                  size="sm"
++                  className="h-7 gap-1 px-2 text-xs text-destructive hover:text-destructive"
++                  onClick={() => setUndoing(m)}
++                >
++                  <Undo2 className="size-3.5" />
++                  Undo
++                </Button>
++              )}
+             </div>
+           </li>
+         ))}
+       </ul>
+       {status === "CanLoadMore" && (
+-        <Button variant="secondary" className="w-full" onClick={() => loadMore(PAGE_SIZE)}>
++        <Button
++          variant="secondary"
++          className="w-full"
++          onClick={() => loadMore(PAGE_SIZE)}
++        >
+           Load more
+         </Button>
+       )}
++      <UndoMovementDialog movement={undoing} onClose={() => setUndoing(null)} />
+     </div>
+   );
+ }
+diff --git a/src/components/stock/undo-movement-dialog.tsx b/src/components/stock/undo-movement-dialog.tsx
+new file mode 100644
+index 0000000..b531658
+--- /dev/null
++++ b/src/components/stock/undo-movement-dialog.tsx
+@@ -0,0 +1,129 @@
++import { useState } from "react";
++import { useMutation } from "convex/react";
++import { toast } from "sonner";
++import { api } from "@/convex/_generated/api.js";
++import type { Doc } from "@/convex/_generated/dataModel.d.ts";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import { MAX_REASON_LENGTH, UNDO_REASONS } from "@/convex/lib/stock.ts";
++import { Button } from "@/components/ui/button.tsx";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import { Label } from "@/components/ui/label.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { errorMessage } from "@/lib/errors.ts";
++import { cn } from "@/lib/utils.ts";
++
++type Props = {
++  movement: Doc<"stockMovements"> | null;
++  onClose: () => void;
++};
++
++// Admin confirms an undo and records why (e.g. "Scanned in error")
++export default function UndoMovementDialog({ movement, onClose }: Props) {
++  return (
++    <Dialog open={!!movement} onOpenChange={(open) => !open && onClose()}>
++      <DialogContent className="sm:max-w-md">
++        {movement && (
++          <UndoForm key={movement._id} movement={movement} onClose={onClose} />
++        )}
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++function UndoForm({
++  movement,
++  onClose,
++}: {
++  movement: Doc<"stockMovements">;
++  onClose: () => void;
++}) {
++  const undo = useMutation(api.stock.undoMovement);
++  const [reason, setReason] = useState<string>(UNDO_REASONS[0]);
++  const [saving, setSaving] = useState(false);
++  const isIn = movement.kind === "in";
++  const trimmed = reason.trim();
++
++  const handleUndo = async () => {
++    if (!trimmed) return;
++    setSaving(true);
++    try {
++      const { stockAfter } = await undo({
++        movementId: movement._id,
++        reason: trimmed,
++      });
++      toast.success(`Entry undone. Stock is now ${stockAfter}.`);
++      onClose();
++    } catch (error) {
++      toast.error(errorMessage(error, "Couldn't undo this entry"));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  return (
++    <>
++      <DialogHeader>
++        <DialogTitle>Undo this {isIn ? "Stock In" : "Stock Out"}?</DialogTitle>
++        <DialogDescription>
++          {isIn ? "Removes" : "Adds back"} {movement.quantity} ×{" "}
++          {formatPackageForm(movement)} of{" "}
++          <span className="font-semibold text-foreground">
++            {movement.drugName}
++          </span>
++          . The entry stays in the history, marked as undone.
++        </DialogDescription>
++      </DialogHeader>
++      <div className="space-y-2">
++        <Label htmlFor="undo-reason">Reason</Label>
++        <div className="flex flex-wrap gap-2">
++          {UNDO_REASONS.map((r) => (
++            <button
++              key={r}
++              type="button"
++              onClick={() => setReason(r)}
++              className={cn(
++                "cursor-pointer rounded-full border px-3 py-1.5 text-sm font-medium transition-colors",
++                reason === r
++                  ? "border-primary bg-primary text-primary-foreground"
++                  : "bg-background hover:bg-muted",
++              )}
++            >
++              {r}
++            </button>
++          ))}
++        </div>
++        <Input
++          id="undo-reason"
++          value={reason}
++          onChange={(e) => setReason(e.target.value)}
++          maxLength={MAX_REASON_LENGTH}
++          placeholder="Or type another reason"
++        />
++        {!trimmed && (
++          <p className="text-sm text-destructive">Please give a reason</p>
++        )}
++      </div>
++      <DialogFooter>
++        <Button variant="ghost" onClick={onClose} disabled={saving}>
++          Cancel
++        </Button>
++        <Button
++          variant="destructive"
++          onClick={() => void handleUndo()}
++          disabled={saving || !trimmed}
++        >
++          {saving && <Spinner />}
++          Undo entry
++        </Button>
++      </DialogFooter>
++    </>
++  );
++}

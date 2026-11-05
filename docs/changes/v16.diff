@@ -1,0 +1,224 @@
+diff --git a/src/pages/inventory/_components/manufacturer-picker.tsx b/src/components/search-select.tsx
+similarity index 62%
+rename from src/pages/inventory/_components/manufacturer-picker.tsx
+rename to src/components/search-select.tsx
+index 19f8d5f..6501fc6 100644
+--- a/src/pages/inventory/_components/manufacturer-picker.tsx
++++ b/src/components/search-select.tsx
+@@ -10,29 +10,41 @@ import {
+   CommandList,
+ } from "@/components/ui/command.tsx";
+ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover.tsx";
+-import { MANUFACTURERS } from "@/lib/manufacturers.ts";
+ import { cn } from "@/lib/utils.ts";
+ 
+ type Props = {
+   value: string;
+   onChange: (value: string) => void;
++  options: readonly string[];
++  placeholder: string;
++  // Allow saving a typed value that isn't in the list
++  allowCustom?: boolean;
++  // Tapping the selected option again clears it
++  allowClear?: boolean;
+ };
+ 
+-// Searchable list of known manufacturers. A name that isn't listed can still be used.
+-export default function ManufacturerPicker({ value, onChange }: Props) {
++// Searchable dropdown for picking one value from a fixed list
++export default function SearchSelect({
++  value,
++  onChange,
++  options,
++  placeholder,
++  allowCustom = true,
++  allowClear = true,
++}: Props) {
+   const [open, setOpen] = useState(false);
+   const [search, setSearch] = useState("");
+   const typed = search.trim();
+-  const exactMatch = MANUFACTURERS.some((m) => m.toLowerCase() === typed.toLowerCase());
++  const exactMatch = options.some((o) => o.toLowerCase() === typed.toLowerCase());
+ 
+-  const choose = (name: string) => {
+-    onChange(name === value ? "" : name);
++  const choose = (option: string) => {
++    onChange(allowClear && option === value ? "" : option);
+     setSearch("");
+     setOpen(false);
+   };
+ 
+   return (
+-    // modal keeps scrolling working inside the drug form dialog
++    // modal keeps scrolling working inside dialogs
+     <Popover open={open} onOpenChange={setOpen} modal>
+       <PopoverTrigger asChild>
+         <Button
+@@ -42,18 +54,16 @@ export default function ManufacturerPicker({ value, onChange }: Props) {
+           aria-expanded={open}
+           className="h-auto min-h-9 w-full justify-between whitespace-normal text-left font-normal"
+         >
+-          <span className={cn("min-w-0 flex-1", !value && "text-muted-foreground")}>
+-            {value || "Search and select a manufacturer"}
+-          </span>
++          <span className={cn("min-w-0 flex-1", !value && "text-muted-foreground")}>{value || placeholder}</span>
+           <ChevronsUpDown className="shrink-0 opacity-50" />
+         </Button>
+       </PopoverTrigger>
+-      <PopoverContent className="w-(--radix-popover-trigger-width) min-w-72 p-0" align="start">
++      <PopoverContent className="w-(--radix-popover-trigger-width) min-w-60 p-0" align="start">
+         <Command>
+           <CommandInput placeholder="Type to search…" value={search} onValueChange={setSearch} />
+           <CommandList className="max-h-72">
+-            <CommandEmpty>No manufacturer found.</CommandEmpty>
+-            {typed && !exactMatch && (
++            <CommandEmpty>No match found.</CommandEmpty>
++            {allowCustom && typed && !exactMatch && (
+               <CommandGroup>
+                 <CommandItem value={`__custom__ ${typed}`} onSelect={() => choose(typed)} className="cursor-pointer">
+                   <Plus /> Use “{typed}”
+@@ -61,10 +71,10 @@ export default function ManufacturerPicker({ value, onChange }: Props) {
+               </CommandGroup>
+             )}
+             <CommandGroup>
+-              {MANUFACTURERS.map((name) => (
+-                <CommandItem key={name} value={name} onSelect={() => choose(name)} className="cursor-pointer">
+-                  <Check className={cn(value === name ? "opacity-100" : "opacity-0")} />
+-                  {name}
++              {options.map((option) => (
++                <CommandItem key={option} value={option} onSelect={() => choose(option)} className="cursor-pointer">
++                  <Check className={cn(value === option ? "opacity-100" : "opacity-0")} />
++                  {option}
+                 </CommandItem>
+               ))}
+             </CommandGroup>
+diff --git a/src/lib/piece-names.ts b/src/lib/piece-names.ts
+new file mode 100644
+index 0000000..c40377e
+--- /dev/null
++++ b/src/lib/piece-names.ts
+@@ -0,0 +1,17 @@
++// Names for a single piece of a medicine, as used by ACP.
++// "SACHETS" is marked inactive in the source list, so it is left out.
++export const PIECE_NAMES: readonly string[] = [
++  "CAPSULE",
++  "DROP",
++  "GRAM",
++  "ML",
++  "NEBULES",
++  "PESSARIES",
++  "PIECE",
++  "PUFF",
++  "SPRAY",
++  "SUPP",
++  "TABLET",
++];
++
++export const DEFAULT_PIECE_NAME = "TABLET";
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index add94d1..8810d9c 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -21,7 +21,9 @@ import {
+   FormMessage,
+ } from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+-import ManufacturerPicker from "./manufacturer-picker.tsx";
++import SearchSelect from "@/components/search-select.tsx";
++import { MANUFACTURERS } from "@/lib/manufacturers.ts";
++import { DEFAULT_PIECE_NAME, PIECE_NAMES } from "@/lib/piece-names.ts";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -42,7 +44,7 @@ type Props = {
+ 
+ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+   if (!drug) {
+-    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: "tablets", packages: [] };
++    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: DEFAULT_PIECE_NAME, packages: [] };
+   }
+   return {
+     drugId: drug.drugId,
+@@ -91,7 +93,7 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+     }
+   };
+ 
+-  const textField = (name: "drugId" | "name" | "brandName" | "pieceName", label: string, placeholder: string) => (
++  const textField = (name: "drugId" | "name" | "brandName", label: string, placeholder: string) => (
+     <FormField
+       control={form.control}
+       name={name}
+@@ -107,6 +109,36 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+     />
+   );
+ 
++  const selectField = (
++    name: "pieceName" | "manufacturer",
++    label: string,
++    options: readonly string[],
++    placeholder: string,
++    // Manufacturer: free text and clearable. Pieces: list only, always set.
++    flexible: boolean,
++  ) => (
++    <FormField
++      control={form.control}
++      name={name}
++      render={({ field }) => (
++        <FormItem>
++          <FormLabel>{label}</FormLabel>
++          <FormControl>
++            <SearchSelect
++              value={field.value}
++              onChange={field.onChange}
++              options={options}
++              placeholder={placeholder}
++              allowClear={flexible}
++              allowCustom={flexible}
++            />
++          </FormControl>
++          <FormMessage />
++        </FormItem>
++      )}
++    />
++  );
++
+   return (
+     <Form {...form}>
+       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+@@ -114,21 +146,9 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+           {textField("drugId", "Drug ID", "e.g. PCM500")}
+           {textField("name", "Drug name", "e.g. Paracetamol 500mg")}
+           {textField("brandName", "Brand name", "e.g. Panadol")}
+-          {textField("pieceName", "Pieces are called", "e.g. tablets, capsules, ml")}
++          {selectField("pieceName", "Pieces are called", PIECE_NAMES, "Search and select", false)}
+         </div>
+-        <FormField
+-          control={form.control}
+-          name="manufacturer"
+-          render={({ field }) => (
+-            <FormItem>
+-              <FormLabel>Manufacturer</FormLabel>
+-              <FormControl>
+-                <ManufacturerPicker value={field.value} onChange={field.onChange} />
+-              </FormControl>
+-              <FormMessage />
+-            </FormItem>
+-          )}
+-        />
++        {selectField("manufacturer", "Manufacturer", MANUFACTURERS, "Search and select a manufacturer", true)}
+         <div className="space-y-2">
+           <div className="text-sm font-medium">Drug picture</div>
+           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index 408669b..e55b992 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -22,7 +22,7 @@ export const drugFormSchema = z.object({
+   name: z.string().trim().min(1, "Drug name is required"),
+   brandName: z.string().trim(),
+   manufacturer: z.string().trim(),
+-  pieceName: z.string().trim(),
++  pieceName: z.string().trim().min(1, "Choose what the pieces are called"),
+   packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });
+ 

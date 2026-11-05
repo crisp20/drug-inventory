@@ -1,0 +1,345 @@
+diff --git a/src/components/stock/movement-filter-bar.tsx b/src/components/stock/movement-filter-bar.tsx
+index a0cd7e8..51b1d31 100644
+--- a/src/components/stock/movement-filter-bar.tsx
++++ b/src/components/stock/movement-filter-bar.tsx
+@@ -23,11 +23,14 @@ export type MovementFilters = {
+ };
+ 
+ type Props = {
+-  kind: MovementKind;
++  // Undefined: Stock In and Stock Out together
++  kind?: MovementKind;
+   value: MovementFilters;
+   onChange: (next: MovementFilters) => void;
+   onReset: () => void;
+   isFiltered: boolean;
++  // Hidden where the list is already about one medicine
++  showMedicine?: boolean;
+ };
+ 
+ const selectClass = "h-9 cursor-pointer bg-card";
+@@ -39,6 +42,7 @@ export default function MovementFilterBar({
+   onChange,
+   onReset,
+   isFiltered,
++  showMedicine = true,
+ }: Props) {
+   const people = useQuery(api.users.listPeople, {});
+   const set = (patch: Partial<MovementFilters>) =>
+@@ -81,12 +85,14 @@ export default function MovementFilterBar({
+           ))}
+         </NativeSelect>
+ 
+-        <MedicineFilter
+-          value={medicine}
+-          onChange={(drug) => set({ medicine: drug, packageId: "all" })}
+-        />
++        {showMedicine && (
++          <MedicineFilter
++            value={medicine}
++            onChange={(drug) => set({ medicine: drug, packageId: "all" })}
++          />
++        )}
+ 
+-        {medicine && medicine.packages.length > 0 && (
++        {showMedicine && medicine && medicine.packages.length > 0 && (
+           <NativeSelect
+             aria-label="Package form"
+             className={selectClass}
+@@ -109,7 +115,7 @@ export default function MovementFilterBar({
+           </NativeSelect>
+         )}
+ 
+-        {kind === "out" && (
++        {kind !== "in" && (
+           <NativeSelect
+             aria-label="Reason"
+             className={selectClass}
+diff --git a/src/components/stock/movement-log-section.tsx b/src/components/stock/movement-log-section.tsx
+index c2872be..c42a1f6 100644
+--- a/src/components/stock/movement-log-section.tsx
++++ b/src/components/stock/movement-log-section.tsx
+@@ -1,11 +1,10 @@
+-import { useState } from "react";
+ import type { MovementKind } from "@/convex/lib/stock.ts";
+ import MovementFilterBar, {
+   type MovementFilters,
+ } from "./movement-filter-bar.tsx";
+ import MovementLog, { type MovementLogFilter } from "./movement-log.tsx";
+-import { ALL_TIME, periodRange } from "./movement-period.ts";
+ import type { StockSelection } from "./stock-drug-finder.tsx";
++import { CLEARED_FILTERS, useMovementFilters } from "./use-movement-filters.ts";
+ 
+ type Props = {
+   kind: MovementKind;
+@@ -19,9 +18,7 @@ function initialFilters(
+   barcodeMatched: boolean,
+ ): MovementFilters {
+   return {
+-    period: ALL_TIME,
+-    userId: "all",
+-    reason: "all",
++    ...CLEARED_FILTERS,
+     // A chosen drug narrows the list; a scanned barcode narrows it to that package form
+     medicine: selection?.drug ?? null,
+     packageId: selection && barcodeMatched ? selection.pkg._id : "all",
+@@ -55,13 +52,10 @@ function FilteredLog({
+   kind: MovementKind;
+   defaults: MovementFilters;
+ }) {
+-  const [filters, setFilters] = useState(defaults);
+-  const cleared = initialFilters(null, false);
+-  const isFiltered =
+-    filters.period.value !== "all" ||
+-    filters.userId !== "all" ||
+-    filters.reason !== "all" ||
+-    filters.medicine !== null;
++  const { filters, setFilters, reset, isFiltered, extra } = useMovementFilters(
++    defaults,
++    kind,
++  );
+ 
+   const scope: MovementLogFilter | undefined =
+     filters.packageId !== "all"
+@@ -76,20 +70,13 @@ function FilteredLog({
+         kind={kind}
+         value={filters}
+         onChange={setFilters}
+-        onReset={() => setFilters(cleared)}
++        onReset={reset}
+         isFiltered={isFiltered}
+       />
+       <MovementLog
+         kind={kind}
+         filter={scope}
+-        extra={{
+-          ...periodRange(filters.period),
+-          userId: filters.userId === "all" ? undefined : filters.userId,
+-          reason:
+-            kind === "out" && filters.reason !== "all"
+-              ? filters.reason
+-              : undefined,
+-        }}
++        extra={extra}
+         isFiltered={isFiltered}
+       />
+     </>
+diff --git a/src/components/stock/use-movement-filters.ts b/src/components/stock/use-movement-filters.ts
+new file mode 100644
+index 0000000..4341d97
+--- /dev/null
++++ b/src/components/stock/use-movement-filters.ts
+@@ -0,0 +1,43 @@
++import { useState } from "react";
++import type { MovementKind } from "@/convex/lib/stock.ts";
++import type { MovementFilters } from "./movement-filter-bar.tsx";
++import type { MovementLogExtra } from "./movement-log.tsx";
++import { ALL_TIME, periodRange } from "./movement-period.ts";
++
++export const CLEARED_FILTERS: MovementFilters = {
++  period: ALL_TIME,
++  userId: "all",
++  reason: "all",
++  medicine: null,
++  packageId: "all",
++};
++
++// Filter state plus the server-side narrowing it maps to.
++// `kind` undefined means Stock In and Stock Out together.
++export function useMovementFilters(
++  defaults: MovementFilters = CLEARED_FILTERS,
++  kind?: MovementKind,
++) {
++  const [filters, setFilters] = useState(defaults);
++  const isFiltered =
++    filters.period.value !== "all" ||
++    filters.userId !== "all" ||
++    filters.reason !== "all" ||
++    filters.medicine !== null;
++
++  const extra: MovementLogExtra = {
++    ...periodRange(filters.period),
++    userId: filters.userId === "all" ? undefined : filters.userId,
++    // Only Stock Out has reasons
++    reason:
++      kind !== "in" && filters.reason !== "all" ? filters.reason : undefined,
++  };
++
++  return {
++    filters,
++    setFilters,
++    reset: () => setFilters(CLEARED_FILTERS),
++    isFiltered,
++    extra,
++  };
++}
+diff --git a/src/pages/inventory/_components/package-history-dialog.tsx b/src/pages/inventory/_components/package-history-dialog.tsx
+index a23e128..3c36f37 100644
+--- a/src/pages/inventory/_components/package-history-dialog.tsx
++++ b/src/pages/inventory/_components/package-history-dialog.tsx
+@@ -1,5 +1,9 @@
++import { useState } from "react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import type { MovementKind } from "@/convex/lib/stock.ts";
++import MovementFilterBar from "@/components/stock/movement-filter-bar.tsx";
+ import MovementLog from "@/components/stock/movement-log.tsx";
++import { useMovementFilters } from "@/components/stock/use-movement-filters.ts";
+ import {
+   Dialog,
+   DialogContent,
+@@ -7,7 +11,12 @@ import {
+   DialogHeader,
+   DialogTitle,
+ } from "@/components/ui/dialog.tsx";
+-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
++import {
++  Tabs,
++  TabsContent,
++  TabsList,
++  TabsTrigger,
++} from "@/components/ui/tabs.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ 
+ type Props = {
+@@ -16,44 +25,109 @@ type Props = {
+   onClose: () => void;
+ };
+ 
++const TABS = [
++  { value: "all", label: "All", kind: undefined },
++  { value: "in", label: "Stock In", kind: "in" },
++  { value: "out", label: "Stock Out", kind: "out" },
++] as const satisfies ReadonlyArray<{
++  value: string;
++  label: string;
++  kind: MovementKind | undefined;
++}>;
++type TabValue = (typeof TABS)[number]["value"];
++
+ // Every Stock In and Stock Out recorded against one package form (barcode)
+ export default function PackageHistoryDialog({ drug, pkg, onClose }: Props) {
+   return (
+     <Dialog open={!!pkg} onOpenChange={(o) => !o && onClose()}>
+       <DialogContent className="flex max-h-[90vh] flex-col gap-4 sm:max-w-2xl">
+-        {pkg && (
+-          <>
+-            <DialogHeader>
+-              <DialogTitle>
+-                {drug.name} · {formatPackageForm(pkg)}
+-              </DialogTitle>
+-              <DialogDescription>
+-                {pkg.barcode ? <span className="font-mono">{pkg.barcode}</span> : "No barcode"} · {pkg.stock} in
+-                stock
+-              </DialogDescription>
+-            </DialogHeader>
+-            {/* Inactive tabs unmount, so only one list is loaded at a time */}
+-            <Tabs defaultValue="all" className="min-h-0 flex-1">
+-              <TabsList className="grid w-full grid-cols-3">
+-                <TabsTrigger value="all" className="cursor-pointer">All</TabsTrigger>
+-                <TabsTrigger value="in" className="cursor-pointer">Stock In</TabsTrigger>
+-                <TabsTrigger value="out" className="cursor-pointer">Stock Out</TabsTrigger>
+-              </TabsList>
+-              <div className="min-h-0 flex-1 overflow-y-auto pt-2">
+-                <TabsContent value="all">
+-                  <MovementLog filter={{ type: "package", packageId: pkg._id }} />
+-                </TabsContent>
+-                <TabsContent value="in">
+-                  <MovementLog kind="in" filter={{ type: "package", packageId: pkg._id }} />
+-                </TabsContent>
+-                <TabsContent value="out">
+-                  <MovementLog kind="out" filter={{ type: "package", packageId: pkg._id }} />
+-                </TabsContent>
+-              </div>
+-            </Tabs>
+-          </>
+-        )}
++        {/* Re-key so filters start fresh for each package form */}
++        {pkg && <PackageHistory key={pkg._id} drug={drug} pkg={pkg} />}
+       </DialogContent>
+     </Dialog>
+   );
+ }
++
++function PackageHistory({
++  drug,
++  pkg,
++}: {
++  drug: DrugWithDetails;
++  pkg: DrugPackage;
++}) {
++  const [tab, setTab] = useState<TabValue>("all");
++  const kind = TABS.find((t) => t.value === tab)?.kind;
++  // Filters stay the same when switching tabs
++  const { filters, setFilters, reset, isFiltered, extra } = useMovementFilters(
++    undefined,
++    kind,
++  );
++  const filter = { type: "package", packageId: pkg._id } as const;
++
++  return (
++    <>
++      <DialogHeader>
++        <DialogTitle>
++          {drug.name} · {formatPackageForm(pkg)}
++        </DialogTitle>
++        <DialogDescription>
++          {pkg.barcode ? (
++            <span className="font-mono">{pkg.barcode}</span>
++          ) : (
++            "No barcode"
++          )}{" "}
++          · {pkg.stock} in stock
++        </DialogDescription>
++      </DialogHeader>
++      {/* Inactive tabs unmount, so only one list is loaded at a time */}
++      <Tabs
++        value={tab}
++        onValueChange={(v) => {
++          const next = TABS.find((t) => t.value === v);
++          if (next) setTab(next.value);
++        }}
++        className="min-h-0 flex-1"
++      >
++        <TabsList className="grid w-full grid-cols-3">
++          {TABS.map((t) => (
++            <TabsTrigger
++              key={t.value}
++              value={t.value}
++              className="cursor-pointer"
++            >
++              {t.label}
++            </TabsTrigger>
++          ))}
++        </TabsList>
++        <MovementFilterBar
++          kind={kind}
++          value={filters}
++          onChange={setFilters}
++          onReset={reset}
++          isFiltered={isFiltered}
++          showMedicine={false}
++        />
++        <div className="min-h-0 flex-1 overflow-y-auto pt-2">
++          {TABS.map((t) => (
++            <TabsContent key={t.value} value={t.value}>
++              {t.kind === undefined ? (
++                <MovementLog
++                  filter={filter}
++                  extra={extra}
++                  isFiltered={isFiltered}
++                />
++              ) : (
++                <MovementLog
++                  kind={t.kind}
++                  filter={filter}
++                  extra={extra}
++                  isFiltered={isFiltered}
++                />
++              )}
++            </TabsContent>
++          ))}
++        </div>
++      </Tabs>
++    </>
++  );
++}

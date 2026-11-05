@@ -1,0 +1,60 @@
+diff --git a/src/pages/inventory/_components/package-rows-editor.tsx b/src/pages/inventory/_components/package-rows-editor.tsx
+index 84b3d09..d919cfb 100644
+--- a/src/pages/inventory/_components/package-rows-editor.tsx
++++ b/src/pages/inventory/_components/package-rows-editor.tsx
+@@ -1,4 +1,4 @@
+-import { useFieldArray, useWatch, type Control } from "react-hook-form";
++import { useFieldArray, useFormContext, useWatch, type Control } from "react-hook-form";
+ import { Barcode, Trash2 } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+ import { FormControl, FormField, FormItem, FormMessage } from "@/components/ui/form.tsx";
+@@ -12,6 +12,7 @@ import {
+ } from "@/components/ui/select.tsx";
+ import { BASE_UNITS } from "@/convex/lib/barcode.ts";
+ import {
++  defaultUnitCount,
+   newPackage,
+   type DrugFormInput,
+   type DrugFormValues,
+@@ -42,6 +43,7 @@ function ColumnHeaders() {
+ 
+ export default function PackageRowsEditor({ control }: Props) {
+   const { fields, append, remove } = useFieldArray({ control, name: "packages" });
++  const { setValue } = useFormContext<DrugFormInput, unknown, DrugFormValues>();
+   const barcodes = useWatch({ control, name: "packages" }).map((p) => p.barcode);
+ 
+   return (
+@@ -87,7 +89,13 @@ export default function PackageRowsEditor({ control }: Props) {
+               name={`packages.${index}.baseUnit`}
+               render={({ field: f }) => (
+                 <FormItem>
+-                  <Select value={f.value} onValueChange={f.onChange}>
++                  <Select
++                    value={f.value}
++                    onValueChange={(value: DrugFormValues["packages"][number]["baseUnit"]) => {
++                      f.onChange(value);
++                      setValue(`packages.${index}.unitCount`, defaultUnitCount(value), { shouldValidate: true });
++                    }}
++                  >
+                     <FormControl>
+                       <SelectTrigger className="h-10 w-full bg-card" aria-label="Base unit">
+                         <SelectValue />
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index 616a114..05f18e2 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -29,6 +29,13 @@ export const drugFormSchema = z.object({
+ export type DrugFormInput = z.input<typeof drugFormSchema>;
+ export type DrugFormValues = z.output<typeof drugFormSchema>;
+ 
++type BaseUnit = (typeof BASE_UNITS)[number];
++
++// Usual number of base units per package: strips come in 10s, others are single (e.g. 20/Box x1)
++export function defaultUnitCount(baseUnit: BaseUnit): number {
++  return baseUnit === "Strip" ? 10 : 1;
++}
++
+ export function newPackage(barcode: string): DrugFormInput["packages"][number] {
+-  return { barcode, qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10, stock: 0, images: [] };
++  return { barcode, qtyPerUnit: 10, baseUnit: "Strip", unitCount: defaultUnitCount("Strip"), stock: 0, images: [] };
+ }

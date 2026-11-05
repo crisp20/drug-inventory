@@ -1,0 +1,915 @@
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index af70474..c4e0fe9 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -107,6 +107,55 @@ describe("Stock In", () => {
+ describe("Stock Out", () => {
+   const out = { ...entry, quantity: 2, reason: " Dispensed " };
+ 
++  it("filters by user, reason and time period", async () => {
++    const { owner, staff, packageId } = await setup();
++    await staff.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++      quantity: 1,
++    });
++    await owner.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++      quantity: 1,
++      reason: "Expired",
++    });
++    const page = { numItems: 10, cursor: null };
++    const all = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: page,
++    });
++    expect(all.page).toHaveLength(2);
++    const samId = all.page.find((m) => m.userName === "Sam")!.userRef;
++
++    const bySam = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      userId: samId,
++      paginationOpts: page,
++    });
++    expect(bySam.page.map((m) => m.userName)).toEqual(["Sam"]);
++
++    const expired = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      reason: "Expired",
++      paginationOpts: page,
++    });
++    expect(expired.page.map((m) => m.userName)).toEqual(["Hubert"]);
++
++    const future = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      since: new Date(Date.now() + 86_400_000).toISOString(),
++      paginationOpts: page,
++    });
++    expect(future.page).toHaveLength(0);
++    const past = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      until: new Date(Date.now() - 86_400_000).toISOString(),
++      paginationOpts: page,
++    });
++    expect(past.page).toHaveLength(0);
++  });
++
+   it("lets staff remove stock and logs the reason", async () => {
+     const { owner, staff, packageId, drugRef } = await setup();
+     const result = await staff.mutation(api.stock.recordOut, {
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 8e0f5c4..df29be9 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -139,17 +139,48 @@ const movementFilter = v.optional(
+   ),
+ );
+ 
++// Narrows any index range ending in occurredAt to [since, until]
++type OccurredAtRange<R> = {
++  gte(
++    field: "occurredAt",
++    value: string,
++  ): {
++    lte(field: "occurredAt", value: string): R;
++  } & R;
++  lte(field: "occurredAt", value: string): R;
++} & R;
++function withinPeriod<R>(
++  q: OccurredAtRange<R>,
++  since: string | undefined,
++  until: string | undefined,
++): R {
++  if (since && until)
++    return q.gte("occurredAt", since).lte("occurredAt", until);
++  if (since) return q.gte("occurredAt", since);
++  if (until) return q.lte("occurredAt", until);
++  return q;
++}
++
+ // Newest first. Leaving out `kind` returns both Stock In and Stock Out,
+ // which is only supported for a single package form.
++// Time period uses the index; user and reason are filtered before paginating.
+ export const listMovements = query({
+   args: {
+     kind: v.optional(movementKind),
+     filter: movementFilter,
++    since: v.optional(v.string()),
++    until: v.optional(v.string()),
++    userId: v.optional(v.id("users")),
++    reason: v.optional(v.string()),
+     paginationOpts: paginationOptsValidator,
+   },
+-  handler: async (ctx, { kind, filter, paginationOpts }) => {
++  handler: async (
++    ctx,
++    { kind, filter, since, until, userId, reason, paginationOpts },
++  ) => {
+     await requireActiveUser(ctx);
+     const table = ctx.db.query("stockMovements");
++    let scoped;
+     if (kind === undefined) {
+       if (filter?.type !== "package") {
+         throw new ConvexError({
+@@ -157,25 +188,38 @@ export const listMovements = query({
+           message: "Choose Stock In or Stock Out",
+         });
+       }
+-      return await table
+-        .withIndex("by_package_and_occurredAt", (q) =>
+-          q.eq("packageRef", filter.packageId),
+-        )
+-        .order("desc")
+-        .paginate(paginationOpts);
++      scoped = table.withIndex("by_package_and_occurredAt", (q) =>
++        withinPeriod(q.eq("packageRef", filter.packageId), since, until),
++      );
++    } else if (filter?.type === "drug") {
++      scoped = table.withIndex("by_kind_and_drug_and_occurredAt", (q) =>
++        withinPeriod(
++          q.eq("kind", kind).eq("drugRef", filter.drugId),
++          since,
++          until,
++        ),
++      );
++    } else if (filter?.type === "package") {
++      scoped = table.withIndex("by_kind_and_package_and_occurredAt", (q) =>
++        withinPeriod(
++          q.eq("kind", kind).eq("packageRef", filter.packageId),
++          since,
++          until,
++        ),
++      );
++    } else {
++      scoped = table.withIndex("by_kind_and_occurredAt", (q) =>
++        withinPeriod(q.eq("kind", kind), since, until),
++      );
+     }
+-    const scoped =
+-      filter?.type === "drug"
+-        ? table.withIndex("by_kind_and_drug_and_occurredAt", (q) =>
+-            q.eq("kind", kind).eq("drugRef", filter.drugId),
+-          )
+-        : filter?.type === "package"
+-          ? table.withIndex("by_kind_and_package_and_occurredAt", (q) =>
+-              q.eq("kind", kind).eq("packageRef", filter.packageId),
+-            )
+-          : table.withIndex("by_kind_and_occurredAt", (q) =>
+-              q.eq("kind", kind),
+-            );
+-    return await scoped.order("desc").paginate(paginationOpts);
++    return await scoped
++      .order("desc")
++      .filter((q) =>
++        q.and(
++          userId ? q.eq(q.field("userRef"), userId) : true,
++          reason ? q.eq(q.field("reason"), reason) : true,
++        ),
++      )
++      .paginate(paginationOpts);
+   },
+ });
+diff --git a/convex/users.ts b/convex/users.ts
+index 3fb5aa2..0e30996 100644
+--- a/convex/users.ts
++++ b/convex/users.ts
+@@ -1,6 +1,11 @@
+ import { ConvexError, v } from "convex/values";
+ import { mutation, query } from "./_generated/server";
+-import { getSignedInUser, isOwnerEmail, requireAdmin } from "./lib/access";
++import {
++  getSignedInUser,
++  isOwnerEmail,
++  requireActiveUser,
++  requireAdmin,
++} from "./lib/access";
+ import { userRole, userStatus } from "./schema/users";
+ 
+ export const updateCurrentUser = mutation({
+@@ -23,7 +28,10 @@ export const updateCurrentUser = mutation({
+       .unique();
+     if (user !== null) {
+       if (isOwner && (user.role !== "admin" || user.status !== "active")) {
+-        await ctx.db.patch("users", user._id, { role: "admin", status: "active" });
++        await ctx.db.patch("users", user._id, {
++          role: "admin",
++          status: "active",
++        });
+       } else if (!user.status || !user.role) {
+         await ctx.db.patch("users", user._id, {
+           role: user.role ?? "staff",
+@@ -61,6 +69,25 @@ export const listByStatus = query({
+   },
+ });
+ 
++// Names of everyone who can have recorded entries (for "filter by user")
++export const listPeople = query({
++  args: {},
++  handler: async (ctx) => {
++    await requireActiveUser(ctx);
++    const [active, disabled] = await Promise.all(
++      (["active", "disabled"] as const).map((status) =>
++        ctx.db
++          .query("users")
++          .withIndex("by_status", (q) => q.eq("status", status))
++          .take(200),
++      ),
++    );
++    return [...active, ...disabled]
++      .map((u) => ({ _id: u._id, name: u.name ?? u.email ?? "Unknown user" }))
++      .sort((a, b) => a.name.localeCompare(b.name));
++  },
++});
++
+ export const updateAccess = mutation({
+   args: { userId: v.id("users"), role: userRole, status: userStatus },
+   handler: async (ctx, args) => {
+@@ -70,12 +97,21 @@ export const updateAccess = mutation({
+       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
+     }
+     if (isOwnerEmail(target.email)) {
+-      throw new ConvexError({ code: "FORBIDDEN", message: "The owner account cannot be changed" });
++      throw new ConvexError({
++        code: "FORBIDDEN",
++        message: "The owner account cannot be changed",
++      });
+     }
+     if (target._id === admin._id) {
+-      throw new ConvexError({ code: "BAD_REQUEST", message: "You cannot change your own access" });
++      throw new ConvexError({
++        code: "BAD_REQUEST",
++        message: "You cannot change your own access",
++      });
+     }
+-    await ctx.db.patch("users", args.userId, { role: args.role, status: args.status });
++    await ctx.db.patch("users", args.userId, {
++      role: args.role,
++      status: args.status,
++    });
+     return null;
+   },
+ });
+diff --git a/src/components/stock/medicine-filter.tsx b/src/components/stock/medicine-filter.tsx
+new file mode 100644
+index 0000000..a651d93
+--- /dev/null
++++ b/src/components/stock/medicine-filter.tsx
+@@ -0,0 +1,106 @@
++import { useState } from "react";
++import { useQuery } from "convex/react";
++import { ChevronDown, Pill, X } from "lucide-react";
++import { api } from "@/convex/_generated/api.js";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import {
++  Popover,
++  PopoverContent,
++  PopoverTrigger,
++} from "@/components/ui/popover.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { useDebounce } from "@/hooks/use-debounce.ts";
++import type { DrugWithDetails } from "@/lib/drug-types.ts";
++
++type Props = {
++  value: DrugWithDetails | null;
++  onChange: (drug: DrugWithDetails | null) => void;
++};
++
++// Pick one medicine to filter by (search by name, brand, Drug ID or barcode)
++export default function MedicineFilter({ value, onChange }: Props) {
++  const [open, setOpen] = useState(false);
++  const [text, setText] = useState("");
++  const [term] = useDebounce(text.trim(), 200);
++  // Only search while the picker is open
++  const results = useQuery(api.drugs.search, open && term ? { term } : "skip");
++
++  const pick = (drug: DrugWithDetails | null) => {
++    onChange(drug);
++    setOpen(false);
++    setText("");
++  };
++
++  return (
++    <div className="flex items-center gap-1">
++      <Popover open={open} onOpenChange={setOpen}>
++        <PopoverTrigger asChild>
++          <Button
++            type="button"
++            variant="secondary"
++            size="sm"
++            className="h-9 max-w-56 justify-between gap-2 font-normal"
++          >
++            <Pill className="size-4 shrink-0" />
++            <span className="truncate">
++              {value ? value.name : "All medicines"}
++            </span>
++            <ChevronDown className="size-4 shrink-0 opacity-50" />
++          </Button>
++        </PopoverTrigger>
++        <PopoverContent align="start" className="w-80 space-y-2 p-2">
++          <Input
++            autoFocus
++            value={text}
++            onChange={(e) => setText(e.target.value)}
++            placeholder="Search name, brand or Drug ID"
++            className="h-9"
++          />
++          <div className="max-h-64 overflow-y-auto">
++            {!term ? (
++              <p className="px-2 py-3 text-sm text-muted-foreground">
++                Type to find a medicine
++              </p>
++            ) : results === undefined ? (
++              <div className="flex justify-center py-3">
++                <Spinner />
++              </div>
++            ) : results.length === 0 ? (
++              <p className="px-2 py-3 text-sm text-muted-foreground">
++                No medicine matches “{term}”
++              </p>
++            ) : (
++              results.map((d) => (
++                <button
++                  key={d._id}
++                  type="button"
++                  onClick={() => pick(d)}
++                  className="flex w-full cursor-pointer flex-col items-start rounded-md px-2 py-1.5 text-left hover:bg-muted"
++                >
++                  <span className="text-sm font-medium">{d.name}</span>
++                  <span className="text-xs text-muted-foreground">
++                    {d.brandName} ·{" "}
++                    <span className="font-mono">{d.drugId}</span>
++                  </span>
++                </button>
++              ))
++            )}
++          </div>
++        </PopoverContent>
++      </Popover>
++      {value && (
++        <Button
++          type="button"
++          variant="ghost"
++          size="icon"
++          className="size-8"
++          onClick={() => pick(null)}
++          aria-label="Clear medicine filter"
++        >
++          <X className="size-4" />
++        </Button>
++      )}
++    </div>
++  );
++}
+diff --git a/src/components/stock/movement-filter-bar.tsx b/src/components/stock/movement-filter-bar.tsx
+new file mode 100644
+index 0000000..a0cd7e8
+--- /dev/null
++++ b/src/components/stock/movement-filter-bar.tsx
+@@ -0,0 +1,168 @@
++import { useQuery } from "convex/react";
++import { RotateCcw } from "lucide-react";
++import { api } from "@/convex/_generated/api.js";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import { STOCK_OUT_REASONS, type MovementKind } from "@/convex/lib/stock.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import {
++  NativeSelect,
++  NativeSelectOption,
++} from "@/components/ui/native-select.tsx";
++import type { DrugWithDetails } from "@/lib/drug-types.ts";
++import MedicineFilter from "./medicine-filter.tsx";
++import { PERIODS, type Period } from "./movement-period.ts";
++
++export type MovementFilters = {
++  period: Period;
++  userId: Id<"users"> | "all";
++  reason: string;
++  medicine: DrugWithDetails | null;
++  packageId: Id<"drugPackages"> | "all";
++};
++
++type Props = {
++  kind: MovementKind;
++  value: MovementFilters;
++  onChange: (next: MovementFilters) => void;
++  onReset: () => void;
++  isFiltered: boolean;
++};
++
++const selectClass = "h-9 cursor-pointer bg-card";
++
++// Time period, user, medicine, package form and (Stock Out) reason filters
++export default function MovementFilterBar({
++  kind,
++  value,
++  onChange,
++  onReset,
++  isFiltered,
++}: Props) {
++  const people = useQuery(api.users.listPeople, {});
++  const set = (patch: Partial<MovementFilters>) =>
++    onChange({ ...value, ...patch });
++  const { period, medicine } = value;
++
++  return (
++    <div className="space-y-2 rounded-xl border bg-muted/40 p-2">
++      <div className="flex flex-wrap items-center gap-2">
++        <NativeSelect
++          aria-label="Time period"
++          className={selectClass}
++          value={period.value}
++          onChange={(e) => {
++            const next = PERIODS.find((p) => p.value === e.target.value);
++            if (next) set({ period: { ...period, value: next.value } });
++          }}
++        >
++          {PERIODS.map((p) => (
++            <NativeSelectOption key={p.value} value={p.value}>
++              {p.label}
++            </NativeSelectOption>
++          ))}
++        </NativeSelect>
++
++        <NativeSelect
++          aria-label="User"
++          className={selectClass}
++          value={value.userId}
++          onChange={(e) => {
++            const id = people?.find((p) => p._id === e.target.value)?._id;
++            set({ userId: id ?? "all" });
++          }}
++        >
++          <NativeSelectOption value="all">Everyone</NativeSelectOption>
++          {(people ?? []).map((p) => (
++            <NativeSelectOption key={p._id} value={p._id}>
++              {p.name}
++            </NativeSelectOption>
++          ))}
++        </NativeSelect>
++
++        <MedicineFilter
++          value={medicine}
++          onChange={(drug) => set({ medicine: drug, packageId: "all" })}
++        />
++
++        {medicine && medicine.packages.length > 0 && (
++          <NativeSelect
++            aria-label="Package form"
++            className={selectClass}
++            value={value.packageId}
++            onChange={(e) => {
++              const id = medicine.packages.find(
++                (p) => p._id === e.target.value,
++              )?._id;
++              set({ packageId: id ?? "all" });
++            }}
++          >
++            <NativeSelectOption value="all">
++              All package forms
++            </NativeSelectOption>
++            {medicine.packages.map((p) => (
++              <NativeSelectOption key={p._id} value={p._id}>
++                {formatPackageForm(p)}
++              </NativeSelectOption>
++            ))}
++          </NativeSelect>
++        )}
++
++        {kind === "out" && (
++          <NativeSelect
++            aria-label="Reason"
++            className={selectClass}
++            value={value.reason}
++            onChange={(e) => set({ reason: e.target.value })}
++          >
++            <NativeSelectOption value="all">All reasons</NativeSelectOption>
++            {STOCK_OUT_REASONS.map((r) => (
++              <NativeSelectOption key={r} value={r}>
++                {r}
++              </NativeSelectOption>
++            ))}
++          </NativeSelect>
++        )}
++
++        {isFiltered && (
++          <Button
++            type="button"
++            variant="ghost"
++            size="sm"
++            className="h-9 gap-1.5"
++            onClick={onReset}
++          >
++            <RotateCcw className="size-3.5" />
++            Clear filters
++          </Button>
++        )}
++      </div>
++
++      {period.value === "custom" && (
++        <div className="flex flex-wrap items-center gap-2 text-sm">
++          <span className="text-muted-foreground">From</span>
++          <Input
++            type="date"
++            aria-label="From date"
++            className="h-9 w-auto bg-card"
++            value={period.from}
++            max={period.to || undefined}
++            onChange={(e) =>
++              set({ period: { ...period, from: e.target.value } })
++            }
++          />
++          <span className="text-muted-foreground">to</span>
++          <Input
++            type="date"
++            aria-label="To date"
++            className="h-9 w-auto bg-card"
++            value={period.to}
++            min={period.from || undefined}
++            onChange={(e) => set({ period: { ...period, to: e.target.value } })}
++          />
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index d9f5a7f..48dbb15 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -9,17 +9,34 @@ import {
+ // Shared by Stock In and Stock Out forms. Reason is only required for Stock Out.
+ // The package form is not editable here; it always comes from the chosen barcode.
+ export function movementFormSchema(kind: MovementKind) {
+-  const reason = z.string().trim().max(MAX_REASON_LENGTH, `Reason can be at most ${MAX_REASON_LENGTH} characters`);
++  const reason = z
++    .string()
++    .trim()
++    .max(
++      MAX_REASON_LENGTH,
++      `Reason can be at most ${MAX_REASON_LENGTH} characters`,
++    );
+   return z.object({
+     quantity: z.coerce
+       .number<string | number>()
+       .int("Quantity must be a whole number")
+       .min(1, "Quantity must be at least 1")
+-      .max(MAX_MOVEMENT_QUANTITY, `Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`),
+-    notes: z.string().trim().max(MAX_NOTES_LENGTH, `Notes can be at most ${MAX_NOTES_LENGTH} characters`),
++      .max(
++        MAX_MOVEMENT_QUANTITY,
++        `Quantity can be at most ${MAX_MOVEMENT_QUANTITY.toLocaleString()}`,
++      ),
++    notes: z
++      .string()
++      .trim()
++      .max(
++        MAX_NOTES_LENGTH,
++        `Notes can be at most ${MAX_NOTES_LENGTH} characters`,
++      ),
+     reason: kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
+   });
+ }
+ 
+ export type MovementFormInput = z.input<ReturnType<typeof movementFormSchema>>;
+-export type MovementFormValues = z.output<ReturnType<typeof movementFormSchema>>;
++export type MovementFormValues = z.output<
++  ReturnType<typeof movementFormSchema>
++>;
+diff --git a/src/components/stock/movement-log-section.tsx b/src/components/stock/movement-log-section.tsx
+index 0b2af46..c2872be 100644
+--- a/src/components/stock/movement-log-section.tsx
++++ b/src/components/stock/movement-log-section.tsx
+@@ -1,9 +1,10 @@
+ import { useState } from "react";
+-import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import type { MovementKind } from "@/convex/lib/stock.ts";
+-import { Label } from "@/components/ui/label.tsx";
+-import { Switch } from "@/components/ui/switch.tsx";
++import MovementFilterBar, {
++  type MovementFilters,
++} from "./movement-filter-bar.tsx";
+ import MovementLog, { type MovementLogFilter } from "./movement-log.tsx";
++import { ALL_TIME, periodRange } from "./movement-period.ts";
+ import type { StockSelection } from "./stock-drug-finder.tsx";
+ 
+ type Props = {
+@@ -13,59 +14,84 @@ type Props = {
+   barcodeMatched: boolean;
+ };
+ 
+-// Recent entries; narrowed to the selected drug, or to its package form via the switch
+-export default function MovementLogSection({ kind, title, selection, barcodeMatched }: Props) {
++function initialFilters(
++  selection: StockSelection | null,
++  barcodeMatched: boolean,
++): MovementFilters {
++  return {
++    period: ALL_TIME,
++    userId: "all",
++    reason: "all",
++    // A chosen drug narrows the list; a scanned barcode narrows it to that package form
++    medicine: selection?.drug ?? null,
++    packageId: selection && barcodeMatched ? selection.pkg._id : "all",
++  };
++}
++
++// Recent entries with filters. Picking a drug above pre-fills the medicine filter.
++export default function MovementLogSection({
++  kind,
++  title,
++  selection,
++  barcodeMatched,
++}: Props) {
+   return (
+     <section className="space-y-3 pt-6">
+-      {selection ? (
+-        // Re-key so a scanned barcode starts narrowed to that package form each time
+-        <FilteredLog
+-          key={`${selection.pkg._id}-${barcodeMatched}`}
+-          kind={kind}
+-          title={title}
+-          selection={selection}
+-          defaultPackageOnly={barcodeMatched}
+-        />
+-      ) : (
+-        <>
+-          <h2 className="text-lg font-bold">{title}</h2>
+-          <MovementLog kind={kind} />
+-        </>
+-      )}
++      <h2 className="text-lg font-bold">{title}</h2>
++      {/* Re-key so filters start from the newly chosen drug / barcode each time */}
++      <FilteredLog
++        key={`${selection?.pkg._id ?? "none"}-${barcodeMatched}`}
++        kind={kind}
++        defaults={initialFilters(selection, barcodeMatched)}
++      />
+     </section>
+   );
+ }
+ 
+-type FilteredProps = { kind: MovementKind; title: string; selection: StockSelection; defaultPackageOnly: boolean };
++function FilteredLog({
++  kind,
++  defaults,
++}: {
++  kind: MovementKind;
++  defaults: MovementFilters;
++}) {
++  const [filters, setFilters] = useState(defaults);
++  const cleared = initialFilters(null, false);
++  const isFiltered =
++    filters.period.value !== "all" ||
++    filters.userId !== "all" ||
++    filters.reason !== "all" ||
++    filters.medicine !== null;
+ 
+-function FilteredLog({ kind, title, selection, defaultPackageOnly }: FilteredProps) {
+-  const { drug, pkg } = selection;
+-  const [packageOnly, setPackageOnly] = useState(defaultPackageOnly);
+-  const filter: MovementLogFilter = packageOnly
+-    ? { type: "package", packageId: pkg._id }
+-    : { type: "drug", drugId: drug._id };
+-  const switchId = `package-only-${kind}`;
++  const scope: MovementLogFilter | undefined =
++    filters.packageId !== "all"
++      ? { type: "package", packageId: filters.packageId }
++      : filters.medicine
++        ? { type: "drug", drugId: filters.medicine._id }
++        : undefined;
+ 
+   return (
+     <>
+-      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+-        <div className="min-w-0">
+-          <h2 className="text-lg font-bold">{title}</h2>
+-          <p className="truncate text-sm text-muted-foreground">
+-            {drug.name} · <span className="font-mono">{drug.drugId}</span>
+-            {packageOnly && <> · {formatPackageForm(pkg)}</>}
+-          </p>
+-        </div>
+-        {drug.packages.length > 1 && (
+-          <div className="flex items-center gap-2">
+-            <Switch id={switchId} checked={packageOnly} onCheckedChange={setPackageOnly} className="cursor-pointer" />
+-            <Label htmlFor={switchId} className="cursor-pointer text-sm">
+-              Only {formatPackageForm(pkg)}
+-            </Label>
+-          </div>
+-        )}
+-      </div>
+-      <MovementLog kind={kind} filter={filter} />
++      <MovementFilterBar
++        kind={kind}
++        value={filters}
++        onChange={setFilters}
++        onReset={() => setFilters(cleared)}
++        isFiltered={isFiltered}
++      />
++      <MovementLog
++        kind={kind}
++        filter={scope}
++        extra={{
++          ...periodRange(filters.period),
++          userId: filters.userId === "all" ? undefined : filters.userId,
++          reason:
++            kind === "out" && filters.reason !== "all"
++              ? filters.reason
++              : undefined,
++        }}
++        isFiltered={isFiltered}
++      />
+     </>
+   );
+ }
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index 8e0f680..c3c1b34 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -26,13 +26,25 @@ export type MovementLogFilter =
+   | { type: "drug"; drugId: Id<"drugs"> }
+   | { type: "package"; packageId: Id<"drugPackages"> };
+ 
++// Time period, user and reason narrowing (applied on the server before paging)
++export type MovementLogExtra = {
++  since?: string;
++  until?: string;
++  userId?: Id<"users">;
++  reason?: string;
++};
++
++type Common = { extra?: MovementLogExtra; isFiltered?: boolean };
++
+ // Leaving out `kind` shows Stock In and Stock Out together (package form filter only)
+-type Props =
+-  | { kind: MovementKind; filter?: MovementLogFilter }
+-  | {
+-      kind?: undefined;
+-      filter: Extract<MovementLogFilter, { type: "package" }>;
+-    };
++type Props = Common &
++  (
++    | { kind: MovementKind; filter?: MovementLogFilter }
++    | {
++        kind?: undefined;
++        filter: Extract<MovementLogFilter, { type: "package" }>;
++      }
++  );
+ 
+ const KIND_LABEL: Record<MovementKind, string> = {
+   in: "Stock In",
+@@ -40,10 +52,15 @@ const KIND_LABEL: Record<MovementKind, string> = {
+ };
+ 
+ // Who recorded what, and when. Newest first.
+-export default function MovementLog({ kind, filter }: Props) {
++export default function MovementLog({
++  kind,
++  filter,
++  extra,
++  isFiltered,
++}: Props) {
+   const { results, status, loadMore } = usePaginatedQuery(
+     api.stock.listMovements,
+-    { kind, filter },
++    { kind, filter, ...extra },
+     { initialNumItems: PAGE_SIZE },
+   );
+   const currentUser = useCurrentUser();
+@@ -70,14 +87,18 @@ export default function MovementLog({ kind, filter }: Props) {
+             <History />
+           </EmptyMedia>
+           <EmptyTitle>
+-            {filter
+-              ? `No ${label} recorded for this ${filter.type === "drug" ? "drug" : "package form"} yet`
+-              : "Nothing recorded yet"}
++            {isFiltered
++              ? `No ${label} matches these filters`
++              : filter
++                ? `No ${label} recorded for this ${filter.type === "drug" ? "drug" : "package form"} yet`
++                : "Nothing recorded yet"}
+           </EmptyTitle>
+           <EmptyDescription>
+-            {filter
+-              ? "Earlier entries will appear here once they are recorded."
+-              : `Each ${label} will appear here with who recorded it.`}
++            {isFiltered
++              ? "Try a longer time period or clear some filters."
++              : filter
++                ? "Earlier entries will appear here once they are recorded."
++                : `Each ${label} will appear here with who recorded it.`}
+           </EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+diff --git a/src/components/stock/movement-period.test.ts b/src/components/stock/movement-period.test.ts
+new file mode 100644
+index 0000000..98d53a5
+--- /dev/null
++++ b/src/components/stock/movement-period.test.ts
+@@ -0,0 +1,41 @@
++import { describe, expect, it } from "vitest";
++import { ALL_TIME, periodRange } from "./movement-period.ts";
++
++// Local noon on 15 Mar 2026
++const NOW = new Date(2026, 2, 15, 12, 0, 0);
++
++describe("periodRange", () => {
++  it("has no limits for all time", () => {
++    expect(periodRange(ALL_TIME, NOW)).toEqual({});
++  });
++
++  it("starts at local midnight for today and rolling periods", () => {
++    expect(periodRange({ ...ALL_TIME, value: "today" }, NOW).since).toBe(
++      new Date(2026, 2, 15).toISOString(),
++    );
++    // Last 7 days includes today
++    expect(periodRange({ ...ALL_TIME, value: "7d" }, NOW).since).toBe(
++      new Date(2026, 2, 9).toISOString(),
++    );
++    expect(periodRange({ ...ALL_TIME, value: "month" }, NOW).since).toBe(
++      new Date(2026, 2, 1).toISOString(),
++    );
++  });
++
++  it("covers whole local days for a custom range", () => {
++    const range = periodRange(
++      { value: "custom", from: "2026-03-01", to: "2026-03-03" },
++      NOW,
++    );
++    expect(range.since).toBe(new Date(2026, 2, 1).toISOString());
++    expect(range.until).toBe(
++      new Date(2026, 2, 3, 23, 59, 59, 999).toISOString(),
++    );
++  });
++
++  it("ignores blank custom dates", () => {
++    expect(
++      periodRange({ value: "custom", from: "", to: "2026-03-03" }, NOW).since,
++    ).toBeUndefined();
++  });
++});
+diff --git a/src/components/stock/movement-period.ts b/src/components/stock/movement-period.ts
+new file mode 100644
+index 0000000..f74a3a4
+--- /dev/null
++++ b/src/components/stock/movement-period.ts
+@@ -0,0 +1,56 @@
++import {
++  endOfDay,
++  isValid,
++  parseISO,
++  startOfDay,
++  startOfMonth,
++  subDays,
++} from "date-fns";
++
++export const PERIODS = [
++  { value: "all", label: "All time" },
++  { value: "today", label: "Today" },
++  { value: "7d", label: "Last 7 days" },
++  { value: "30d", label: "Last 30 days" },
++  { value: "month", label: "This month" },
++  { value: "custom", label: "Custom dates" },
++] as const;
++
++export type PeriodValue = (typeof PERIODS)[number]["value"];
++
++// Custom range: calendar days (YYYY-MM-DD) in the user's local time zone
++export type Period = { value: PeriodValue; from: string; to: string };
++
++export const ALL_TIME: Period = { value: "all", from: "", to: "" };
++
++function localDay(day: string): Date | null {
++  const d = parseISO(day);
++  return isValid(d) ? d : null;
++}
++
++// UTC start/end instants for the chosen period (local days → ISO strings)
++export function periodRange(
++  period: Period,
++  now: Date = new Date(),
++): { since?: string; until?: string } {
++  switch (period.value) {
++    case "all":
++      return {};
++    case "today":
++      return { since: startOfDay(now).toISOString() };
++    case "7d":
++      return { since: startOfDay(subDays(now, 6)).toISOString() };
++    case "30d":
++      return { since: startOfDay(subDays(now, 29)).toISOString() };
++    case "month":
++      return { since: startOfMonth(now).toISOString() };
++    case "custom": {
++      const from = localDay(period.from);
++      const to = localDay(period.to);
++      return {
++        since: from ? startOfDay(from).toISOString() : undefined,
++        until: to ? endOfDay(to).toISOString() : undefined,
++      };
++    }
++  }
++}

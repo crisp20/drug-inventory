@@ -1,0 +1,1013 @@
+diff --git a/convex/canister.test.ts b/convex/canister.test.ts
+index 3d2ddc1..f8eaa6a 100644
+--- a/convex/canister.test.ts
++++ b/convex/canister.test.ts
+@@ -66,6 +66,49 @@ async function setup() {
+ 
+ const out = { quantity: 1, notes: "", reason: "Dispensed" };
+ 
++describe("Batch and expiry on any Stock Out", () => {
++  it("are optional and saved without canister access", async () => {
++    const { owner, staff, packageId } = await setup();
++    await staff.mutation(api.stock.recordOut, { packageId, ...out });
++    await staff.mutation(api.stock.recordOut, {
++      packageId,
++      ...out,
++      batch: " B77 ",
++      expiry: "2029-01-31",
++    });
++    const { page } = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(page[0]).toMatchObject({ batch: "B77", expiry: "2029-01-31" });
++    expect(page[0].canister).toBeUndefined();
++    expect(page[1].batch).toBeUndefined();
++    const log = await owner.query(api.activity.list, {
++      category: "stock_out",
++      paginationOpts: { numItems: 10, cursor: null },
++    });
++    expect(log.page[0].detail).toContain("Batch B77 · Exp 2029-01-31");
++  });
++
++  it("refuse expired or invalid dates", async () => {
++    const { staff, packageId } = await setup();
++    await expect(
++      staff.mutation(api.stock.recordOut, {
++        packageId,
++        ...out,
++        expiry: "2020-05-01",
++      }),
++    ).rejects.toThrow(/expired/);
++    await expect(
++      staff.mutation(api.stock.recordOut, {
++        packageId,
++        ...out,
++        expiry: "2029-02-30",
++      }),
++    ).rejects.toThrow(/valid expiry/);
++  });
++});
++
+ describe("Canister details on Stock Out", () => {
+   it("are refused while canister features are hidden for the person", async () => {
+     const { staff, packageId } = await setup();
+@@ -109,6 +152,20 @@ describe("Canister details on Stock Out", () => {
+   });
+ 
+   it("reject invalid details", async () => {
++    const { owner, packageId } = await setup();
++    await owner.mutation(api.settings.setCanisterRollout, {
++      canisterForEveryone: true,
++    });
++    await expect(
++      owner.mutation(api.stock.recordOut, {
++        packageId,
++        ...out,
++        canister: { ...canister, expiry: "2020-01-01" },
++      }),
++    ).rejects.toThrow(/expired/);
++  });
++
++  it("reject invalid details (bad date)", async () => {
+     const { owner, packageId } = await setup();
+     await owner.mutation(api.settings.setCanisterRollout, {
+       canisterForEveryone: true,
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index fcd21ee..bcaf9b3 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -1,7 +1,7 @@
+ import type { MutationCtx } from "../_generated/server";
+ import type { Doc, Id } from "../_generated/dataModel";
+ import { formatPackageForm } from "./barcode";
+-import { formatCanister } from "./canister";
++import { formatBatchExpiry, formatCanister } from "./canister";
+ import type { PackageInput } from "./drugs";
+ 
+ // Filter / badge labels for each kind of activity (matches schema/activity.ts)
+@@ -109,7 +109,13 @@ function plural(n: number, word: string) {
+ 
+ type SavedPackage = Pick<
+   Doc<"drugPackages">,
+-  "_id" | "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount" | "stock" | "imageIds"
++  | "_id"
++  | "barcode"
++  | "qtyPerUnit"
++  | "baseUnit"
++  | "unitCount"
++  | "stock"
++  | "imageIds"
+ >;
+ 
+ function diffPackage(before: SavedPackage, after: PackageInput): Change[] {
+@@ -266,10 +272,17 @@ export async function logDrugImport(
+   for (const p of s.afterPackages) {
+     const old = p.packageId ? byId.get(p.packageId) : undefined;
+     if (!old) {
+-      changes.push({ field: "Package form added", before: "", after: packageLabel(p) });
++      changes.push({
++        field: "Package form added",
++        before: "",
++        after: packageLabel(p),
++      });
+     } else {
+       for (const c of diffPackage(old, p)) {
+-        changes.push({ ...c, field: `${c.field} (${old.barcode || "no barcode"})` });
++        changes.push({
++          ...c,
++          field: `${c.field} (${old.barcode || "no barcode"})`,
++        });
+       }
+     }
+   }
+@@ -322,7 +335,7 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
+         m.barcode || "No barcode",
+         `Stock ${m.stockBefore} → ${m.stockAfter}`,
+         m.reason ?? "",
+-        m.canister ? formatCanister(m.canister) : "",
++        m.canister ? formatCanister(m.canister) : formatBatchExpiry(m),
+         m.notes,
+       ]
+         .filter(Boolean)
+diff --git a/convex/lib/canister.ts b/convex/lib/canister.ts
+index 5e3508d..b8303ab 100644
+--- a/convex/lib/canister.ts
++++ b/convex/lib/canister.ts
+@@ -70,3 +70,26 @@ export function cleanCanisterInput(raw: CanisterInput): CanisterInput {
+ export function formatCanister(c: CanisterInput): string {
+   return `Canister: Batch ${c.batch} · Exp ${c.expiry} · Qty ${c.quantity} · Type ${c.type}`;
+ }
++
++export type BatchExpiry = { batch?: string; expiry?: string };
++
++// Optional Batch / Expiry on any Stock Out: blanks are dropped, given values are checked
++export function cleanBatchExpiry(raw: BatchExpiry): BatchExpiry {
++  const batch = raw.batch?.trim() || undefined;
++  const expiry = raw.expiry?.trim() || undefined;
++  if (batch && batch.length > MAX_BATCH_LENGTH)
++    bad(`Batch can be at most ${MAX_BATCH_LENGTH} characters`);
++  if (expiry) {
++    if (!isCalendarDay(expiry)) bad("Enter a valid expiry date");
++    if (isExpiredOnServer(expiry, new Date()))
++      bad("This stock has expired and cannot be used.");
++  }
++  return { batch, expiry };
++}
++
++// "Batch X · Exp Y" for entries without a canister (canister text already has both)
++export function formatBatchExpiry(m: BatchExpiry): string {
++  return [m.batch && `Batch ${m.batch}`, m.expiry && `Exp ${m.expiry}`]
++    .filter(Boolean)
++    .join(" · ");
++}
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index 95187bc..d02b809 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -28,6 +28,9 @@ export const stockMovementsTable = defineTable({
+   notes: v.string(),
+   // Stock Out only (e.g. "Dispensed")
+   reason: v.optional(v.string()),
++  // Stock Out: batch and expiry (calendar day YYYY-MM-DD) of the stock taken, if entered
++  batch: v.optional(v.string()),
++  expiry: v.optional(v.string()),
+   // Stock Out into a canister (only when "Fill canister" was switched on)
+   canister: v.optional(
+     v.object({
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 0ab4503..e080eda 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -6,7 +6,9 @@ import { requireActiveUser, requireAdmin } from "./lib/access";
+ import { logMovement, logUndo } from "./lib/activity";
+ import {
+   canUseCanister,
++  cleanBatchExpiry,
+   cleanCanisterInput,
++  type BatchExpiry,
+   type CanisterInput,
+ } from "./lib/canister";
+ import { withinPeriod } from "./lib/period";
+@@ -34,6 +36,7 @@ async function recordMovement(
+   raw: MovementInput,
+   reason?: string,
+   canister?: CanisterInput,
++  batchExpiry: BatchExpiry = {},
+ ) {
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+@@ -69,6 +72,8 @@ async function recordMovement(
+     stockAfter,
+     notes: input.notes,
+     reason,
++    batch: batchExpiry.batch,
++    expiry: batchExpiry.expiry,
+     canister,
+     userRef: user._id,
+     userName: user.name ?? user.email ?? "Unknown user",
+@@ -93,6 +98,8 @@ export const recordOut = mutation({
+   args: {
+     ...movementArgs,
+     reason: v.string(),
++    batch: v.optional(v.string()),
++    expiry: v.optional(v.string()),
+     canister: v.optional(
+       v.object({
+         batch: v.string(),
+@@ -102,7 +109,10 @@ export const recordOut = mutation({
+       }),
+     ),
+   },
+-  handler: async (ctx, { packageId, reason, canister, ...rest }) => {
++  handler: async (
++    ctx,
++    { packageId, reason, canister, batch, expiry, ...rest },
++  ) => {
+     let cleanedCanister: CanisterInput | undefined;
+     if (canister) {
+       const user = await requireActiveUser(ctx);
+@@ -115,6 +125,10 @@ export const recordOut = mutation({
+       }
+       cleanedCanister = cleanCanisterInput(canister);
+     }
++    // A canister always carries the batch and expiry of the stock taken
++    const batchExpiry = cleanedCanister
++      ? { batch: cleanedCanister.batch, expiry: cleanedCanister.expiry }
++      : cleanBatchExpiry({ batch, expiry });
+     return await recordMovement(
+       ctx,
+       "out",
+@@ -122,6 +136,7 @@ export const recordOut = mutation({
+       rest,
+       cleanReason(reason),
+       cleanedCanister,
++      batchExpiry,
+     );
+   },
+ });
+diff --git a/src/components/stock/batch-expiry-fields.tsx b/src/components/stock/batch-expiry-fields.tsx
+new file mode 100644
+index 0000000..a4d962c
+--- /dev/null
++++ b/src/components/stock/batch-expiry-fields.tsx
+@@ -0,0 +1,212 @@
++import { useState, type KeyboardEvent } from "react";
++import { useFormContext, useWatch } from "react-hook-form";
++import { AlertTriangle, Camera } from "lucide-react";
++import { format, parseISO } from "date-fns";
++import { toast } from "sonner";
++import { barcodesMatch } from "@/convex/lib/barcode.ts";
++import { isCalendarDay } from "@/convex/lib/canister.ts";
++import { expiryStatus, toCalendarDay } from "@/convex/lib/expiry.ts";
++import { parseGs1 } from "@/convex/lib/gs1.ts";
++import { Button } from "@/components/ui/button.tsx";
++import {
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from "@/components/ui/form.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
++import { useScannerInput } from "@/hooks/use-scanner-input.ts";
++import type {
++  MovementFormInput,
++  MovementFormValues,
++} from "./movement-form-schema.ts";
++
++type Props = {
++  packageBarcode: string;
++  // Months ahead that count as "expiring soon" (from Settings)
++  warningMonths: number;
++  // Expiry from the scan that found the medicine, if it was already expired
++  scannedExpired: string | null;
++  // Required only while "Fill canister" is on
++  required: boolean;
++};
++
++const inputClass = "h-10 bg-background";
++
++const showDay = (day: string) => format(parseISO(day), "d MMM yyyy");
++
++// Batch and Expiry on Stock Out, with a GS1 scan box that fills both
++export default function BatchExpiryFields({
++  packageBarcode,
++  warningMonths,
++  scannedExpired,
++  required,
++}: Props) {
++  const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
++  const expiry = useWatch({ control: form.control, name: "expiry" });
++  // Last scanned expiry that was refused because it had passed
++  const [expiredScan, setExpiredScan] = useState(scannedExpired);
++  const today = toCalendarDay(new Date());
++  const status = isCalendarDay(expiry)
++    ? expiryStatus(expiry, today, warningMonths)
++    : null;
++  const optional = required ? "" : " (optional)";
++
++  return (
++    <div className="space-y-3">
++      <Gs1ScanBox packageBarcode={packageBarcode} onExpired={setExpiredScan} />
++      {expiredScan && !expiry && (
++        <div
++          role="alert"
++          className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive"
++        >
++          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
++          <span>
++            The scanned stock expired on {showDay(expiredScan)}. Expired stock
++            cannot be used. Please use another box.
++          </span>
++        </div>
++      )}
++      <div className="grid gap-3 sm:grid-cols-2">
++        <FormField
++          control={form.control}
++          name="batch"
++          render={({ field }) => (
++            <FormItem>
++              <FormLabel>Batch{optional}</FormLabel>
++              <FormControl>
++                <Input
++                  {...field}
++                  placeholder="e.g. 50803-3"
++                  className={inputClass}
++                />
++              </FormControl>
++              <FormMessage />
++            </FormItem>
++          )}
++        />
++        <FormField
++          control={form.control}
++          name="expiry"
++          render={({ field }) => (
++            <FormItem>
++              <FormLabel>Expiry{optional}</FormLabel>
++              <FormControl>
++                <Input
++                  {...field}
++                  type="date"
++                  min={today}
++                  className={inputClass}
++                />
++              </FormControl>
++              <FormMessage />
++              {status === "soon" && !form.formState.errors.expiry && (
++                <p className="flex items-center gap-1.5 text-sm font-medium text-orange-600 dark:text-orange-400">
++                  <AlertTriangle className="size-4 shrink-0" />
++                  Expiring soon (within {warningMonths} month
++                  {warningMonths === 1 ? "" : "s"})
++                </p>
++              )}
++            </FormItem>
++          )}
++        />
++      </div>
++    </div>
++  );
++}
++
++// Scan the box's GS1 code here to fill Batch and Expiry
++function Gs1ScanBox({
++  packageBarcode,
++  onExpired,
++}: {
++  packageBarcode: string;
++  onExpired: (expiry: string | null) => void;
++}) {
++  const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
++  const [value, setValue] = useState("");
++  const [camera, setCamera] = useState(false);
++  const {
++    inputRef,
++    onKeyDown: scannerKeyDown,
++    setValue: setScanned,
++    display,
++  } = useScannerInput(setValue);
++
++  const apply = (code: string) => {
++    const data = parseGs1(code);
++    setValue("");
++    if (!data || (!data.batch && !data.expiry)) {
++      toast.error("No batch or expiry found in that code", {
++        description: "Scan the GS1 code (the square DataMatrix) on the box.",
++      });
++      return;
++    }
++    if (
++      data.gtin &&
++      packageBarcode &&
++      !barcodesMatch(data.gtin, packageBarcode)
++    ) {
++      toast.error("This code is for a different product", {
++        description: "Check you scanned the box for the selected package form.",
++      });
++      return;
++    }
++    const opts = { shouldDirty: true, shouldValidate: true };
++    if (data.batch) form.setValue("batch", data.batch, opts);
++    if (data.expiry && data.expiry < toCalendarDay(new Date())) {
++      // Expired: keep Expiry empty so this box can't be recorded with it
++      form.setValue("expiry", "", { shouldDirty: true });
++      onExpired(data.expiry);
++      toast.error("This stock has expired", {
++        description: `Expired on ${showDay(data.expiry)}. It cannot be used.`,
++      });
++      return;
++    }
++    onExpired(null);
++    if (data.expiry) form.setValue("expiry", data.expiry, opts);
++    toast.success("Batch and expiry filled from scan");
++  };
++
++  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
++    const rebuilt = scannerKeyDown(e);
++    if (e.key !== "Enter") return;
++    // Enter here fills the fields; it must not record the Stock Out
++    e.preventDefault();
++    const code = rebuilt ?? e.currentTarget.value;
++    if (code.trim()) apply(code);
++  };
++
++  return (
++    <div className="flex gap-2">
++      <Input
++        ref={inputRef}
++        value={display(value)}
++        onChange={(e) => setScanned(e.target.value)}
++        onKeyDown={handleKeyDown}
++        placeholder="Scan GS1 code to fill batch and expiry"
++        aria-label="Scan GS1 code to fill batch and expiry"
++        className={inputClass}
++      />
++      <Button
++        type="button"
++        variant="secondary"
++        className="h-10 shrink-0"
++        onClick={() => setCamera(true)}
++        aria-label="Scan with camera"
++      >
++        <Camera />
++      </Button>
++      <BarcodeScannerDialog
++        open={camera}
++        onOpenChange={setCamera}
++        onDetected={(code) => {
++          setCamera(false);
++          apply(code);
++        }}
++      />
++    </div>
++  );
++}
+diff --git a/src/components/stock/canister-section.tsx b/src/components/stock/canister-section.tsx
+index 2dd2332..31c2465 100644
+--- a/src/components/stock/canister-section.tsx
++++ b/src/components/stock/canister-section.tsx
+@@ -1,13 +1,7 @@
+-import { useState, type KeyboardEvent } from "react";
++import { useState } from "react";
+ import { useFormContext, useWatch } from "react-hook-form";
+-import { AlertTriangle, Camera, Pill } from "lucide-react";
+-import { format, parseISO } from "date-fns";
+-import { toast } from "sonner";
+-import { barcodesMatch } from "@/convex/lib/barcode.ts";
+-import { CANISTER_TYPES, isCalendarDay } from "@/convex/lib/canister.ts";
+-import { expiryStatus, toCalendarDay } from "@/convex/lib/expiry.ts";
+-import { parseGs1 } from "@/convex/lib/gs1.ts";
+-import { Button } from "@/components/ui/button.tsx";
++import { Pill } from "lucide-react";
++import { CANISTER_TYPES } from "@/convex/lib/canister.ts";
+ import {
+   FormControl,
+   FormField,
+@@ -21,8 +15,6 @@ import {
+   NativeSelectOption,
+ } from "@/components/ui/native-select.tsx";
+ import { Switch } from "@/components/ui/switch.tsx";
+-import BarcodeScannerDialog from "@/components/barcode-scanner-dialog.tsx";
+-import { useScannerInput } from "@/hooks/use-scanner-input.ts";
+ import type {
+   MovementFormInput,
+   MovementFormValues,
+@@ -32,36 +24,17 @@ type Props = {
+   // Tablets/capsules in what is being taken out (used when Canister QTY is left blank)
+   autoQty: number;
+   pieceName: string;
+-  packageBarcode: string;
+-  // Months ahead that count as "expiring soon" (from Settings)
+-  warningMonths: number;
+-  // Expiry from the scan that found the medicine, if it was already expired
+-  scannedExpired: string | null;
+ };
+ 
+ const inputClass = "h-10 bg-background";
+ 
+-const showDay = (day: string) => format(parseISO(day), "d MMM yyyy");
+-
+-// "Fill canister" switch plus Batch, Expiry, Canister QTY and Canister Type
+-export default function CanisterSection({
+-  autoQty,
+-  pieceName,
+-  packageBarcode,
+-  warningMonths,
+-  scannedExpired,
+-}: Props) {
++// "Fill canister" switch plus Canister QTY and Canister Type.
++// Batch and Expiry sit in the main Stock Out form and become required while this is on.
++export default function CanisterSection({ autoQty, pieceName }: Props) {
+   const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
+   const on = useWatch({ control: form.control, name: "canisterOn" });
+-  const expiry = useWatch({ control: form.control, name: "expiry" });
+   // Follows the quantity taken out until the user types their own number
+   const [qtyEdited, setQtyEdited] = useState(false);
+-  // Last scanned expiry that was refused because it had passed
+-  const [expiredScan, setExpiredScan] = useState(scannedExpired);
+-  const today = toCalendarDay(new Date());
+-  const status = isCalendarDay(expiry)
+-    ? expiryStatus(expiry, today, warningMonths)
+-    : null;
+ 
+   return (
+     <div className="space-y-4 rounded-xl border border-dashed border-primary/40 bg-secondary/40 p-3">
+@@ -77,7 +50,12 @@ export default function CanisterSection({
+             <FormControl>
+               <Switch
+                 checked={field.value}
+-                onCheckedChange={field.onChange}
++                onCheckedChange={(v) => {
++                  field.onChange(v);
++                  // Batch/Expiry errors depend on the switch, so re-check them
++                  if (form.formState.isSubmitted)
++                    void form.trigger(["batch", "expiry"]);
++                }}
+                 className="cursor-pointer"
+               />
+             </FormControl>
+@@ -86,65 +64,10 @@ export default function CanisterSection({
+       />
+       {on && (
+         <>
+-          <Gs1ScanBox
+-            packageBarcode={packageBarcode}
+-            onExpired={setExpiredScan}
+-          />
+-          {expiredScan && !expiry && (
+-            <div
+-              role="alert"
+-              className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive"
+-            >
+-              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+-              <span>
+-                The scanned stock expired on {showDay(expiredScan)}. Expired
+-                stock cannot go into a canister. Please use another box.
+-              </span>
+-            </div>
+-          )}
++          <p className="text-sm text-muted-foreground">
++            Batch and Expiry above are required when filling a canister.
++          </p>
+           <div className="grid gap-3 sm:grid-cols-2">
+-            <FormField
+-              control={form.control}
+-              name="batch"
+-              render={({ field }) => (
+-                <FormItem>
+-                  <FormLabel>Batch</FormLabel>
+-                  <FormControl>
+-                    <Input
+-                      {...field}
+-                      placeholder="e.g. 50803-3"
+-                      className={inputClass}
+-                    />
+-                  </FormControl>
+-                  <FormMessage />
+-                </FormItem>
+-              )}
+-            />
+-            <FormField
+-              control={form.control}
+-              name="expiry"
+-              render={({ field }) => (
+-                <FormItem>
+-                  <FormLabel>Expiry</FormLabel>
+-                  <FormControl>
+-                    <Input
+-                      {...field}
+-                      type="date"
+-                      min={today}
+-                      className={inputClass}
+-                    />
+-                  </FormControl>
+-                  <FormMessage />
+-                  {status === "soon" && !form.formState.errors.expiry && (
+-                    <p className="flex items-center gap-1.5 text-sm font-medium text-orange-600 dark:text-orange-400">
+-                      <AlertTriangle className="size-4 shrink-0" />
+-                      Expiring soon (within {warningMonths} month
+-                      {warningMonths === 1 ? "" : "s"})
+-                    </p>
+-                  )}
+-                </FormItem>
+-              )}
+-            />
+             <FormField
+               control={form.control}
+               name="canisterQty"
+@@ -199,97 +122,3 @@ export default function CanisterSection({
+     </div>
+   );
+ }
+-
+-// Scan the box's GS1 code here to fill Batch and Expiry
+-function Gs1ScanBox({
+-  packageBarcode,
+-  onExpired,
+-}: {
+-  packageBarcode: string;
+-  onExpired: (expiry: string | null) => void;
+-}) {
+-  const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
+-  const [value, setValue] = useState("");
+-  const [camera, setCamera] = useState(false);
+-  const {
+-    inputRef,
+-    onKeyDown: scannerKeyDown,
+-    setValue: setScanned,
+-    display,
+-  } = useScannerInput(setValue);
+-
+-  const apply = (code: string) => {
+-    const data = parseGs1(code);
+-    setValue("");
+-    if (!data || (!data.batch && !data.expiry)) {
+-      toast.error("No batch or expiry found in that code", {
+-        description: "Scan the GS1 code (the square DataMatrix) on the box.",
+-      });
+-      return;
+-    }
+-    if (
+-      data.gtin &&
+-      packageBarcode &&
+-      !barcodesMatch(data.gtin, packageBarcode)
+-    ) {
+-      toast.error("This code is for a different product", {
+-        description: "Check you scanned the box for the selected package form.",
+-      });
+-      return;
+-    }
+-    const opts = { shouldDirty: true, shouldValidate: true };
+-    if (data.batch) form.setValue("batch", data.batch, opts);
+-    if (data.expiry && data.expiry < toCalendarDay(new Date())) {
+-      // Expired: keep Expiry empty so this box can't be recorded
+-      form.setValue("expiry", "", { shouldDirty: true });
+-      onExpired(data.expiry);
+-      toast.error("This stock has expired", {
+-        description: `Expired on ${showDay(data.expiry)}. It cannot go into a canister.`,
+-      });
+-      return;
+-    }
+-    onExpired(null);
+-    if (data.expiry) form.setValue("expiry", data.expiry, opts);
+-    toast.success("Batch and expiry filled from scan");
+-  };
+-
+-  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+-    const rebuilt = scannerKeyDown(e);
+-    if (e.key !== "Enter") return;
+-    // Enter here fills the fields; it must not record the Stock Out
+-    e.preventDefault();
+-    const code = rebuilt ?? e.currentTarget.value;
+-    if (code.trim()) apply(code);
+-  };
+-
+-  return (
+-    <div className="flex gap-2">
+-      <Input
+-        ref={inputRef}
+-        value={display(value)}
+-        onChange={(e) => setScanned(e.target.value)}
+-        onKeyDown={handleKeyDown}
+-        placeholder="Scan GS1 code to fill batch and expiry"
+-        aria-label="Scan GS1 code to fill batch and expiry"
+-        className={inputClass}
+-      />
+-      <Button
+-        type="button"
+-        variant="secondary"
+-        className="h-10 shrink-0"
+-        onClick={() => setCamera(true)}
+-        aria-label="Scan with camera"
+-      >
+-        <Camera />
+-      </Button>
+-      <BarcodeScannerDialog
+-        open={camera}
+-        onOpenChange={setCamera}
+-        onDetected={(code) => {
+-          setCamera(false);
+-          apply(code);
+-        }}
+-      />
+-    </div>
+-  );
+-}
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index aed8c7a..c74722e 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -50,24 +50,31 @@ export function movementFormSchema(kind: MovementKind) {
+       canisterType: z.string(),
+     })
+     .superRefine((v, ctx) => {
+-      if (!v.canisterOn) return;
+-      if (!v.batch)
++      // Batch and Expiry are optional on any Stock Out, but checked when given
++      if (v.batch.length > MAX_BATCH_LENGTH)
+         ctx.addIssue({
+           code: "custom",
+           path: ["batch"],
+-          message: "Enter the batch number",
++          message: `Batch can be at most ${MAX_BATCH_LENGTH} characters`,
+         });
+-      else if (v.batch.length > MAX_BATCH_LENGTH)
++      else if (v.canisterOn && !v.batch)
+         ctx.addIssue({
+           code: "custom",
+           path: ["batch"],
+-          message: `Batch can be at most ${MAX_BATCH_LENGTH} characters`,
++          message: "Enter the batch number",
+         });
+-      if (!isCalendarDay(v.expiry))
++      if (v.expiry === "") {
++        if (v.canisterOn)
++          ctx.addIssue({
++            code: "custom",
++            path: ["expiry"],
++            message: "Enter the expiry date",
++          });
++      } else if (!isCalendarDay(v.expiry))
+         ctx.addIssue({
+           code: "custom",
+           path: ["expiry"],
+-          message: "Enter the expiry date",
++          message: "Enter a valid expiry date",
+         });
+       else if (v.expiry < toCalendarDay(new Date()))
+         ctx.addIssue({
+@@ -75,6 +82,7 @@ export function movementFormSchema(kind: MovementKind) {
+           path: ["expiry"],
+           message: "Expiry date can't be before today",
+         });
++      if (!v.canisterOn) return;
+       // Blank means "work it out from the quantity taken out"
+       const qty = Number(v.canisterQty);
+       if (
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 610b3a6..6ba8265 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -53,6 +53,7 @@ import {
+   type MovementFormValues,
+ } from "./movement-form-schema.ts";
+ import CanisterSection from "./canister-section.tsx";
++import BatchExpiryFields from "./batch-expiry-fields.tsx";
+ import PackageFormSummary from "./package-form-summary.tsx";
+ import ReasonField from "./reason-field.tsx";
+ import type { StockSelection } from "./stock-drug-finder.tsx";
+@@ -105,8 +106,8 @@ export default function MovementForm({
+   const recordIn = useMutation(api.stock.recordIn);
+   const recordOut = useMutation(api.stock.recordOut);
+   const canisterEnabled = useCanisterEnabled() && kind === "out";
+-  // A scanned GS1 code already carries the batch and expiry
+-  const scanned = scannedCode ? parseGs1(scannedCode) : null;
++  // A scanned GS1 code already carries the batch and expiry (Stock Out only)
++  const scanned = scannedCode && kind === "out" ? parseGs1(scannedCode) : null;
+   const today = toCalendarDay(new Date());
+   // Expired stock found by scanning: leave Expiry empty and say why
+   const scannedExpired =
+@@ -131,6 +132,7 @@ export default function MovementForm({
+     if (await confirmDiscard()) onDone();
+   };
+   const quantity = Math.max(0, toNumber(watched.quantity));
++  const canisterOn = watched.canisterOn === true;
+   const stockAfter =
+     kind === "in" ? pkg.stock + quantity : pkg.stock - quantity;
+   const notEnough = kind === "out" && stockAfter < 0;
+@@ -185,14 +187,14 @@ export default function MovementForm({
+       }
+     }
+     const useCanister = canisterEnabled && canisterOn;
+-    // Short-dated stock going into a canister: ask before saving
++    // Short-dated stock: ask before saving, whenever an expiry is entered
+     if (
+-      useCanister &&
++      expiry &&
+       expiryStatus(expiry, toCalendarDay(new Date()), warningMonths) === "soon"
+     ) {
+       const ok = await confirm({
+         title: "This stock is expiring soon",
+-        description: `This stock expires on ${format(parseISO(expiry), "d MMM yyyy")}, within ${warningMonths} month(s). Are you sure you want to put it in the canister?`,
++        description: `This stock expires on ${format(parseISO(expiry), "d MMM yyyy")}, within ${warningMonths} month(s). Are you sure you want to continue?`,
+         confirmLabel: "Yes, continue",
+         cancelLabel: "Go back",
+       });
+@@ -217,7 +219,7 @@ export default function MovementForm({
+       const result =
+         kind === "in"
+           ? await recordIn(args)
+-          : await recordOut({ ...args, reason, canister });
++          : await recordOut({ ...args, reason, batch, expiry, canister });
+       toast.success(
+         `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
+         {
+@@ -278,13 +280,19 @@ export default function MovementForm({
+ 
+         {kind === "out" && <ReasonField control={form.control} />}
+ 
++        {kind === "out" && (
++          <BatchExpiryFields
++            packageBarcode={pkg.barcode}
++            warningMonths={warningMonths}
++            scannedExpired={scannedExpired}
++            required={canisterEnabled && canisterOn}
++          />
++        )}
++
+         {canisterEnabled && (
+           <CanisterSection
+             autoQty={canisterQtyFor(Math.max(1, quantity), pkg)}
+             pieceName={drug.pieceName}
+-            packageBarcode={pkg.barcode}
+-            warningMonths={warningMonths}
+-            scannedExpired={scannedExpired}
+           />
+         )}
+ 
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index adcd550..a74a87e 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -165,6 +165,17 @@ export default function MovementLog({
+                   · Qty {m.canister.quantity} · Type {m.canister.type}
+                 </p>
+               )}
++              {!m.canister && (m.batch || m.expiry) && (
++                <p className="text-xs font-medium text-muted-foreground">
++                  {[
++                    m.batch && `Batch ${m.batch}`,
++                    m.expiry &&
++                      `Exp ${format(new Date(`${m.expiry}T00:00:00`), "d MMM yyyy")}`,
++                  ]
++                    .filter(Boolean)
++                    .join(" · ")}
++                </p>
++              )}
+               {m.notes && (
+                 <p className="whitespace-pre-line text-sm">{m.notes}</p>
+               )}
+diff --git a/src/components/stock/package-form-summary.tsx b/src/components/stock/package-form-summary.tsx
+index 370c505..58f9bce 100644
+--- a/src/components/stock/package-form-summary.tsx
++++ b/src/components/stock/package-form-summary.tsx
+@@ -15,8 +15,12 @@ export default function PackageFormSummary({ pkg, pieceName }: Props) {
+       <div className="grid grid-cols-[1fr_1.4fr_1fr] gap-2">
+         {FIELDS.map((f) => (
+           <div key={f.label} className="space-y-1.5">
+-            <div className="text-xs font-medium text-muted-foreground">{f.label}</div>
+-            <div className="flex h-11 items-center justify-center rounded-md bg-muted px-3 font-semibold">{f.value(pkg)}</div>
++            <div className="text-xs font-medium text-muted-foreground">
++              {f.label}
++            </div>
++            <div className="flex h-11 items-center justify-center rounded-md bg-muted px-3 font-semibold">
++              {f.value(pkg)}
++            </div>
+           </div>
+         ))}
+       </div>
+diff --git a/src/components/stock/reason-field.tsx b/src/components/stock/reason-field.tsx
+index b729b5b..52b8204 100644
+--- a/src/components/stock/reason-field.tsx
++++ b/src/components/stock/reason-field.tsx
+@@ -1,11 +1,22 @@
+ import type { Control } from "react-hook-form";
+ import { STOCK_OUT_REASONS } from "@/convex/lib/stock.ts";
+-import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form.tsx";
++import {
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++  FormMessage,
++} from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+ import { cn } from "@/lib/utils.ts";
+-import type { MovementFormInput, MovementFormValues } from "./movement-form-schema.ts";
++import type {
++  MovementFormInput,
++  MovementFormValues,
++} from "./movement-form-schema.ts";
+ 
+-type Props = { control: Control<MovementFormInput, unknown, MovementFormValues> };
++type Props = {
++  control: Control<MovementFormInput, unknown, MovementFormValues>;
++};
+ 
+ // Quick-pick reason chips plus a free-text box for anything else
+ export default function ReasonField({ control }: Props) {
+@@ -34,7 +45,11 @@ export default function ReasonField({ control }: Props) {
+             ))}
+           </div>
+           <FormControl>
+-            <Input {...field} placeholder="Or type another reason" className="h-10 bg-background" />
++            <Input
++              {...field}
++              placeholder="Or type another reason"
++              className="h-10 bg-background"
++            />
+           </FormControl>
+           <FormMessage />
+         </FormItem>
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index 0ababef..802e236 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -34,7 +34,10 @@ type Props = {
+ };
+ 
+ // Finds the package form whose barcode matches the scanned/typed term exactly
+-function findBarcodeMatch(drugs: DrugWithDetails[], term: string): StockSelection | null {
++function findBarcodeMatch(
++  drugs: DrugWithDetails[],
++  term: string,
++): StockSelection | null {
+   const key = normalizeBarcode(term);
+   for (const drug of drugs) {
+     const pkg = drug.packages.find((p) => p.barcodeKey && p.barcodeKey === key);
+@@ -68,10 +71,15 @@ export default function StockDrugFinder({ children }: Props) {
+ 
+   // Read selection from live results so stock numbers stay current
+   const pickedSelection = picked
+-    ? (results ?? []).flatMap((drug) => drug.packages.filter((p) => p._id === picked).map((pkg) => ({ drug, pkg })))[0]
++    ? (results ?? []).flatMap((drug) =>
++        drug.packages
++          .filter((p) => p._id === picked)
++          .map((pkg) => ({ drug, pkg })),
++      )[0]
+     : undefined;
+   const match = results && term ? findBarcodeMatch(results, term) : null;
+-  const selection: StockSelection | null = pickedSelection ?? (showAll ? null : match);
++  const selection: StockSelection | null =
++    pickedSelection ?? (showAll ? null : match);
+ 
+   const confirmDiscard = useConfirmDiscard();
+ 
+@@ -103,9 +111,17 @@ export default function StockDrugFinder({ children }: Props) {
+ 
+   return (
+     <div className="space-y-4">
+-      <DrugSearchInput value={search} onChange={(v) => void handleSearch(v)} autoFocus focusSignal={focusSignal} />
++      <DrugSearchInput
++        value={search}
++        onChange={(v) => void handleSearch(v)}
++        autoFocus
++        focusSignal={focusSignal}
++      />
+       {!term ? (
+-        <Hint title="Scan or search a drug" description="Use a scanner, the camera, or type a barcode, name, brand or Drug ID." />
++        <Hint
++          title="Scan or search a drug"
++          description="Use a scanner, the camera, or type a barcode, name, brand or Drug ID."
++        />
+       ) : results === undefined ? (
+         <Skeleton className="h-32 w-full rounded-xl" />
+       ) : results.length === 0 ? (
+@@ -115,7 +131,10 @@ export default function StockDrugFinder({ children }: Props) {
+               <PackageSearch />
+             </EmptyMedia>
+             <EmptyTitle>No match for “{term}”</EmptyTitle>
+-            <EmptyDescription>Check the barcode, or ask an admin to add this drug to the inventory.</EmptyDescription>
++            <EmptyDescription>
++              Check the barcode, or ask an admin to add this drug to the
++              inventory.
++            </EmptyDescription>
+           </EmptyHeader>
+         </Empty>
+       ) : (
+@@ -140,7 +159,12 @@ export default function StockDrugFinder({ children }: Props) {
+           )}
+         </div>
+       )}
+-      {children({ selection, barcodeMatched: !!match && selection?.pkg._id === match.pkg._id, term, reset })}
++      {children({
++        selection,
++        barcodeMatched: !!match && selection?.pkg._id === match.pkg._id,
++        term,
++        reset,
++      })}
+     </div>
+   );
+ }

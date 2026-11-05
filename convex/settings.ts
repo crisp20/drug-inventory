@@ -7,7 +7,9 @@ import {
   DEFAULT_EXPIRY_WARNING_MONTHS,
 } from "./lib/expiry";
 import {
+  cleanIdleTimeoutMinutes,
   cleanLargeQuantityThreshold,
+  DEFAULT_IDLE_TIMEOUT_MINUTES,
   DEFAULT_LARGE_QUANTITY_THRESHOLD,
 } from "./lib/settings";
 
@@ -23,6 +25,8 @@ export const get = query({
       canisterForEveryone: row?.canisterForEveryone ?? false,
       expiryWarningMonths:
         row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS,
+      idleTimeoutMinutes:
+        row?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES,
       updatedAt: row?.updatedAt ?? null,
       updatedByName: row?.updatedByName ?? null,
     };
@@ -102,6 +106,39 @@ export const setExpiryWarning = mutation({
         ],
       });
     }
+    return null;
+  },
+});
+
+// Admin: after how many minutes without use the app must be refreshed (0 = off)
+export const setIdleTimeout = mutation({
+  args: { idleTimeoutMinutes: v.number() },
+  handler: async (ctx, args) => {
+    const admin = await requireAdmin(ctx);
+    const minutes = cleanIdleTimeoutMinutes(args.idleTimeoutMinutes);
+    const row = await ctx.db.query("settings").first();
+    const before = row?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES;
+    if (before === minutes) return null;
+    const fields = {
+      idleTimeoutMinutes: minutes,
+      updatedAt: new Date().toISOString(),
+      updatedByName: admin.name ?? admin.email ?? "Unknown user",
+    };
+    if (row) await ctx.db.patch("settings", row._id, fields);
+    else
+      await ctx.db.insert("settings", {
+        ...fields,
+        largeQuantityThreshold: DEFAULT_LARGE_QUANTITY_THRESHOLD,
+      });
+    const label = (m: number) => (m === 0 ? "Off" : `${m} minute(s)`);
+    await logActivity(ctx, actorOf(admin), {
+      category: "settings",
+      action: "Changed",
+      summary: "Changed the idle refresh time",
+      changes: [
+        { field: "Idle refresh", before: label(before), after: label(minutes) },
+      ],
+    });
     return null;
   },
 });

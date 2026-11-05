@@ -1,0 +1,555 @@
+diff --git a/src/components/app-layout.tsx b/src/components/app-layout.tsx
+index df2f007..7bcdeec 100644
+--- a/src/components/app-layout.tsx
++++ b/src/components/app-layout.tsx
+@@ -1,10 +1,12 @@
+-import { NavLink, Outlet } from "react-router-dom";
++import type { MouseEvent } from "react";
++import { NavLink, Outlet, useNavigate } from "react-router-dom";
+ import { AuthLoading, Authenticated, Unauthenticated } from "convex/react";
+ import { ArrowDownToLine, ArrowUpFromLine, Boxes, Users, type LucideIcon } from "lucide-react";
+ import { toast } from "sonner";
+ import { SignInButton } from "@/components/ui/signin.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
++import { useUnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { AwaitingApprovalScreen, SignedOutScreen } from "./access-screens.tsx";
+ import BrandLogo from "./brand-logo.tsx";
+@@ -20,6 +22,8 @@ const NAV: NavItem[] = [
+ ];
+ 
+ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
++  const navigate = useNavigate();
++  const { hasUnsaved, confirmDiscard } = useUnsavedChangesApi();
+   const base = compact
+     ? "flex flex-1 flex-col items-center gap-1 py-2 text-[11px] font-medium"
+     : "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors";
+@@ -35,10 +39,18 @@ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
+       </button>
+     );
+   }
++  const to = item.to;
++  // Leaving a page with a half-filled form asks first
++  const handleClick = (e: MouseEvent<HTMLAnchorElement>) => {
++    if (!hasUnsaved()) return;
++    e.preventDefault();
++    void confirmDiscard().then((ok) => ok && navigate(to));
++  };
+   return (
+     <NavLink
+-      to={item.to}
++      to={to}
+       end
++      onClick={handleClick}
+       className={({ isActive }) =>
+         cn(
+           base,
+diff --git a/src/components/providers/confirm.tsx b/src/components/providers/confirm.tsx
+new file mode 100644
+index 0000000..c6b94b1
+--- /dev/null
++++ b/src/components/providers/confirm.tsx
+@@ -0,0 +1,58 @@
++import { useCallback, useRef, useState, type ReactNode } from "react";
++import {
++  AlertDialog,
++  AlertDialogAction,
++  AlertDialogCancel,
++  AlertDialogContent,
++  AlertDialogDescription,
++  AlertDialogFooter,
++  AlertDialogHeader,
++  AlertDialogTitle,
++} from "@/components/ui/alert-dialog.tsx";
++import { ConfirmContext, type ConfirmFn, type ConfirmOptions } from "@/hooks/use-confirm.ts";
++
++// One app-wide confirmation pop-up, opened through useConfirm()
++export function ConfirmProvider({ children }: { children: ReactNode }) {
++  const [open, setOpen] = useState(false);
++  const [options, setOptions] = useState<ConfirmOptions>({ title: "" });
++  const resolverRef = useRef<((result: boolean) => void) | null>(null);
++
++  // Resolves once; Radix also fires onOpenChange(false) after the action click
++  const finish = useCallback((result: boolean) => {
++    resolverRef.current?.(result);
++    resolverRef.current = null;
++    setOpen(false);
++  }, []);
++
++  const confirm = useCallback<ConfirmFn>((next) => {
++    resolverRef.current?.(false);
++    setOptions(next);
++    setOpen(true);
++    return new Promise<boolean>((resolve) => {
++      resolverRef.current = resolve;
++    });
++  }, []);
++
++  return (
++    <ConfirmContext.Provider value={confirm}>
++      {children}
++      <AlertDialog open={open} onOpenChange={(o) => !o && finish(false)}>
++        <AlertDialogContent>
++          <AlertDialogHeader>
++            <AlertDialogTitle>{options.title}</AlertDialogTitle>
++            {options.description && <AlertDialogDescription>{options.description}</AlertDialogDescription>}
++          </AlertDialogHeader>
++          <AlertDialogFooter>
++            <AlertDialogCancel>{options.cancelLabel ?? "Cancel"}</AlertDialogCancel>
++            <AlertDialogAction
++              onClick={() => finish(true)}
++              className={options.destructive ? "bg-destructive text-white hover:bg-destructive/90" : undefined}
++            >
++              {options.confirmLabel ?? "Confirm"}
++            </AlertDialogAction>
++          </AlertDialogFooter>
++        </AlertDialogContent>
++      </AlertDialog>
++    </ConfirmContext.Provider>
++  );
++}
+diff --git a/src/components/providers/default.tsx b/src/components/providers/default.tsx
+index 241956b..b502088 100644
+--- a/src/components/providers/default.tsx
++++ b/src/components/providers/default.tsx
+@@ -1,4 +1,6 @@
+ import { AuthProvider } from "./auth.tsx";
++import { ConfirmProvider } from "./confirm.tsx";
++import { UnsavedChangesProvider } from "./unsaved-changes.tsx";
+ import { ConvexProvider } from "./convex.tsx";
+ import { QueryClientProvider } from "./query-client.tsx";
+ import { ThemeProvider } from "./theme.tsx";
+@@ -13,7 +15,9 @@ export function DefaultProviders({ children }: { children: React.ReactNode }) {
+           <TooltipProvider>
+             <ThemeProvider>
+               <Toaster />
+-              {children}
++              <ConfirmProvider>
++                <UnsavedChangesProvider>{children}</UnsavedChangesProvider>
++              </ConfirmProvider>
+             </ThemeProvider>
+           </TooltipProvider>
+         </QueryClientProvider>
+diff --git a/src/components/providers/unsaved-changes.tsx b/src/components/providers/unsaved-changes.tsx
+new file mode 100644
+index 0000000..b4f35b5
+--- /dev/null
++++ b/src/components/providers/unsaved-changes.tsx
+@@ -0,0 +1,42 @@
++import { useEffect, useMemo, useRef, type ReactNode } from "react";
++import { useConfirm } from "@/hooks/use-confirm.ts";
++import { UnsavedChangesContext, type UnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
++
++// Tracks forms with unsaved changes so closing or leaving asks first
++export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
++  const confirm = useConfirm();
++  const dirtyRef = useRef(new Set<string>());
++
++  // Browser refresh / tab close: show the browser's own "Leave site?" prompt
++  useEffect(() => {
++    const onBeforeUnload = (e: BeforeUnloadEvent) => {
++      if (dirtyRef.current.size > 0) e.preventDefault();
++    };
++    window.addEventListener("beforeunload", onBeforeUnload);
++    return () => window.removeEventListener("beforeunload", onBeforeUnload);
++  }, []);
++
++  const value = useMemo<UnsavedChangesApi>(
++    () => ({
++      register: (id) => {
++        dirtyRef.current.add(id);
++        return () => {
++          dirtyRef.current.delete(id);
++        };
++      },
++      hasUnsaved: () => dirtyRef.current.size > 0,
++      confirmDiscard: async () =>
++        dirtyRef.current.size === 0 ||
++        (await confirm({
++          title: "Discard unsaved changes?",
++          description: "You have changes that haven't been saved. If you leave now, they will be lost.",
++          confirmLabel: "Discard changes",
++          cancelLabel: "Keep editing",
++          destructive: true,
++        })),
++    }),
++    [confirm],
++  );
++
++  return <UnsavedChangesContext.Provider value={value}>{children}</UnsavedChangesContext.Provider>;
++}
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index afa3edb..90e3127 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { Textarea } from "@/components/ui/textarea.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
++import { useConfirmDiscard, useUnsavedChanges } from "@/hooks/use-unsaved-changes.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { movementFormSchema, type MovementFormInput, type MovementFormValues } from "./movement-form-schema.ts";
+ import PackageFormSummary from "./package-form-summary.tsx";
+@@ -61,6 +62,11 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+     },
+   });
+   const watched = useWatch({ control: form.control });
++  useUnsavedChanges(form.formState.isDirty);
++  const confirmDiscard = useConfirmDiscard();
++  const handleCancel = async () => {
++    if (await confirmDiscard()) onDone();
++  };
+   const quantity = Math.max(0, toNumber(watched.quantity));
+   const stockAfter = kind === "in" ? pkg.stock + quantity : pkg.stock - quantity;
+   const notEnough = kind === "out" && stockAfter < 0;
+@@ -140,7 +146,7 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+         </div>
+ 
+         <div className="flex gap-2">
+-          <Button type="button" variant="ghost" onClick={onDone}>
++          <Button type="button" variant="ghost" onClick={() => void handleCancel()}>
+             Cancel
+           </Button>
+           <Button type="submit" size="lg" className="flex-1" disabled={form.formState.isSubmitting || notEnough}>
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index b6b209f..5df4289 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -13,6 +13,7 @@ import {
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import DrugSearchInput from "@/components/drug-search-input.tsx";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
++import { useConfirmDiscard } from "@/hooks/use-unsaved-changes.ts";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import DrugPackagePicker from "./drug-package-picker.tsx";
+ 
+@@ -62,20 +63,33 @@ export default function StockDrugFinder({ children }: Props) {
+   const match = results && term ? findBarcodeMatch(results, term) : null;
+   const selection = pickedSelection ?? (showAll ? null : match);
+ 
++  const confirmDiscard = useConfirmDiscard();
++
+   const reset = () => {
+     setSearch("");
+     setPicked(null);
+     setShowAll(false);
+   };
+-  const handleSearch = (value: string) => {
++  // Switching drug or package form throws away a half-filled form, so ask first
++  const handleSearch = async (value: string) => {
++    if (!(await confirmDiscard())) return;
+     setSearch(value);
+     setPicked(null);
+     setShowAll(false);
+   };
++  const handlePick = async (pkgId: string) => {
++    if (pkgId === selection?.pkg._id || !(await confirmDiscard())) return;
++    setPicked(pkgId);
++  };
++  const handleShowAll = async () => {
++    if (!(await confirmDiscard())) return;
++    setPicked(null);
++    setShowAll(true);
++  };
+ 
+   return (
+     <div className="space-y-4">
+-      <DrugSearchInput value={search} onChange={handleSearch} autoFocus />
++      <DrugSearchInput value={search} onChange={(v) => void handleSearch(v)} autoFocus />
+       {!term ? (
+         <Hint title="Scan or search a drug" description="Use a scanner, the camera, or type a barcode, name, brand or Drug ID." />
+       ) : results === undefined ? (
+@@ -98,16 +112,13 @@ export default function StockDrugFinder({ children }: Props) {
+               drug={drug}
+               selectedPackageId={selection?.pkg._id}
+               matchedPackageId={match?.pkg._id}
+-              onPick={(p) => setPicked(p._id)}
++              onPick={(p) => void handlePick(p._id)}
+             />
+           ))}
+           {selection && results.length > 1 && (
+             <button
+               type="button"
+-              onClick={() => {
+-                setPicked(null);
+-                setShowAll(true);
+-              }}
++              onClick={() => void handleShowAll()}
+               className="cursor-pointer text-sm font-medium text-primary underline-offset-4 hover:underline"
+             >
+               Show all {results.length} matches
+diff --git a/src/hooks/use-confirm.ts b/src/hooks/use-confirm.ts
+new file mode 100644
+index 0000000..523c493
+--- /dev/null
++++ b/src/hooks/use-confirm.ts
+@@ -0,0 +1,21 @@
++import { createContext, useContext } from "react";
++
++export type ConfirmOptions = {
++  title: string;
++  description?: string;
++  confirmLabel?: string;
++  cancelLabel?: string;
++  // Red confirm button for deletes and other irreversible actions
++  destructive?: boolean;
++};
++
++export type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>;
++
++export const ConfirmContext = createContext<ConfirmFn | null>(null);
++
++// Opens the shared confirmation pop-up and resolves true when the user confirms
++export function useConfirm(): ConfirmFn {
++  const confirm = useContext(ConfirmContext);
++  if (!confirm) throw new Error("useConfirm must be used inside ConfirmProvider");
++  return confirm;
++}
+diff --git a/src/hooks/use-unsaved-changes.ts b/src/hooks/use-unsaved-changes.ts
+new file mode 100644
+index 0000000..38e2c63
+--- /dev/null
++++ b/src/hooks/use-unsaved-changes.ts
+@@ -0,0 +1,27 @@
++import { createContext, useContext, useEffect, useId } from "react";
++
++export type UnsavedChangesApi = {
++  register: (id: string) => () => void;
++  hasUnsaved: () => boolean;
++  // Resolves true when there is nothing unsaved or the user agrees to discard it
++  confirmDiscard: () => Promise<boolean>;
++};
++
++export const UnsavedChangesContext = createContext<UnsavedChangesApi | null>(null);
++
++export function useUnsavedChangesApi(): UnsavedChangesApi {
++  const api = useContext(UnsavedChangesContext);
++  if (!api) throw new Error("useUnsavedChangesApi must be used inside UnsavedChangesProvider");
++  return api;
++}
++
++// Marks the calling form as having unsaved changes while `dirty` is true
++export function useUnsavedChanges(dirty: boolean) {
++  const { register } = useUnsavedChangesApi();
++  const id = useId();
++  useEffect(() => (dirty ? register(id) : undefined), [register, dirty, id]);
++}
++
++export function useConfirmDiscard() {
++  return useUnsavedChangesApi().confirmDiscard;
++}
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 84f177e..219dc7a 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import { errorMessage } from "@/lib/errors.ts";
++import { useConfirmDiscard, useUnsavedChanges } from "@/hooks/use-unsaved-changes.ts";
+ import {
+   drugFormSchema,
+   type DrugFormInput,
+@@ -61,7 +62,7 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+   };
+ }
+ 
+-function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void }) {
++function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved: () => void; onCancel: () => void }) {
+   const create = useMutation(api.drugs.create);
+   const update = useMutation(api.drugs.update);
+   const form = useForm<DrugFormInput, unknown, DrugFormValues>({
+@@ -71,6 +72,8 @@ function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void
+   const [mainImage, setMainImage] = useState<PickedImage[]>(
+     drug?.imageId ? [{ id: drug.imageId, url: drug.imageUrl }] : [],
+   );
++  const imageChanged = (mainImage[0]?.id ?? null) !== (drug?.imageId ?? null);
++  useUnsavedChanges(form.formState.isDirty || imageChanged);
+ 
+   const onSubmit = async (values: DrugFormValues) => {
+     const payload = {
+@@ -82,7 +85,7 @@ function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void
+       if (drug) await update({ id: drug._id, ...payload });
+       else await create(payload);
+       toast.success(drug ? "Drug updated" : "Drug added");
+-      onDone();
++      onSaved();
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not save drug"));
+     }
+@@ -144,7 +147,7 @@ function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void
+           ) : null}
+         </div>
+         <DialogFooter>
+-          <Button type="button" variant="ghost" onClick={onDone}>
++          <Button type="button" variant="ghost" onClick={onCancel}>
+             Cancel
+           </Button>
+           <Button type="submit" disabled={form.formState.isSubmitting}>
+@@ -158,13 +161,25 @@ function DrugForm({ drug, onDone }: { drug?: DrugWithDetails; onDone: () => void
+ }
+ 
+ export default function DrugFormDialog({ open, onOpenChange, drug }: Props) {
++  const confirmDiscard = useConfirmDiscard();
++  // Closing by Cancel, Escape, the X or clicking outside asks first if anything changed
++  const requestClose = async () => {
++    if (await confirmDiscard()) onOpenChange(false);
++  };
+   return (
+-    <Dialog open={open} onOpenChange={onOpenChange}>
++    <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : void requestClose())}>
+       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+         <DialogHeader>
+           <DialogTitle>{drug ? `Edit ${drug.name}` : "Add drug"}</DialogTitle>
+         </DialogHeader>
+-        {open && <DrugForm key={drug?._id ?? "new"} drug={drug} onDone={() => onOpenChange(false)} />}
++        {open && (
++          <DrugForm
++            key={drug?._id ?? "new"}
++            drug={drug}
++            onSaved={() => onOpenChange(false)}
++            onCancel={() => void requestClose()}
++          />
++        )}
+       </DialogContent>
+     </Dialog>
+   );
+diff --git a/src/pages/inventory/_components/image-picker.tsx b/src/pages/inventory/_components/image-picker.tsx
+index 4372590..8474278 100644
+--- a/src/pages/inventory/_components/image-picker.tsx
++++ b/src/pages/inventory/_components/image-picker.tsx
+@@ -4,6 +4,7 @@ import { toast } from "sonner";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import CameraCaptureDialog from "@/components/camera-capture-dialog.tsx";
+ import { useUploadImage } from "@/hooks/use-upload-image.ts";
++import { useConfirm } from "@/hooks/use-confirm.ts";
+ import { cn } from "@/lib/utils.ts";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
+ 
+@@ -23,6 +24,7 @@ export default function ImagePicker({ images, onChange, max, size = "md" }: Prop
+   const upload = useUploadImage();
+   const [uploading, setUploading] = useState(false);
+   const [cameraOpen, setCameraOpen] = useState(false);
++  const confirm = useConfirm();
+   const tile = TILE[size];
+ 
+   const uploadFiles = async (files: File[]) => {
+@@ -44,6 +46,16 @@ export default function ImagePicker({ images, onChange, max, size = "md" }: Prop
+     }
+   };
+ 
++  const confirmRemove = async (id: Id<"_storage">) => {
++    const ok = await confirm({
++      title: "Remove this picture?",
++      description: "The picture will be removed when you save.",
++      confirmLabel: "Remove",
++      destructive: true,
++    });
++    if (ok) onChange(images.filter((i) => i.id !== id));
++  };
++
+   const actionTile = cn(
+     tile,
+     "flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed text-[11px] text-muted-foreground transition-colors hover:border-primary hover:text-primary disabled:cursor-wait",
+@@ -60,7 +72,7 @@ export default function ImagePicker({ images, onChange, max, size = "md" }: Prop
+           )}
+           <button
+             type="button"
+-            onClick={() => onChange(images.filter((i) => i.id !== img.id))}
++            onClick={() => void confirmRemove(img.id)}
+             className="absolute -right-2 -top-2 flex size-6 cursor-pointer items-center justify-center rounded-full bg-destructive text-white shadow"
+             aria-label="Remove picture"
+           >
+diff --git a/src/pages/inventory/_components/package-rows-editor.tsx b/src/pages/inventory/_components/package-rows-editor.tsx
+index b669ede..5997166 100644
+--- a/src/pages/inventory/_components/package-rows-editor.tsx
++++ b/src/pages/inventory/_components/package-rows-editor.tsx
+@@ -11,6 +11,7 @@ import {
+   SelectValue,
+ } from "@/components/ui/select.tsx";
+ import { BASE_UNITS, defaultUnitCount } from "@/convex/lib/barcode.ts";
++import { useConfirm } from "@/hooks/use-confirm.ts";
+ import {
+   newPackage,
+   type DrugFormInput,
+@@ -43,7 +44,20 @@ function ColumnHeaders() {
+ export default function PackageRowsEditor({ control }: Props) {
+   const { fields, append, remove } = useFieldArray({ control, name: "packages" });
+   const { setValue } = useFormContext<DrugFormInput, unknown, DrugFormValues>();
+-  const barcodes = useWatch({ control, name: "packages" }).map((p) => p.barcode);
++  const packages = useWatch({ control, name: "packages" });
++  const barcodes = packages.map((p) => p.barcode);
++  const confirm = useConfirm();
++
++  const confirmRemove = async (index: number) => {
++    const pkg = packages[index];
++    const ok = await confirm({
++      title: "Remove this package form?",
++      description: `${pkg?.barcode ? `Barcode ${pkg.barcode}` : "This package form (no barcode)"} and its stock and packaging pictures will be removed when you save.`,
++      confirmLabel: "Remove",
++      destructive: true,
++    });
++    if (ok) remove(index);
++  };
+ 
+   return (
+     <div className="space-y-3">
+@@ -66,7 +80,7 @@ export default function PackageRowsEditor({ control }: Props) {
+               variant="ghost"
+               size="icon"
+               className="justify-self-end sm:hidden"
+-              onClick={() => remove(index)}
++              onClick={() => void confirmRemove(index)}
+               aria-label="Remove package form"
+             >
+               <Trash2 />
+@@ -140,7 +154,7 @@ export default function PackageRowsEditor({ control }: Props) {
+               variant="ghost"
+               size="icon"
+               className="hidden sm:inline-flex"
+-              onClick={() => remove(index)}
++              onClick={() => void confirmRemove(index)}
+               aria-label="Remove package form"
+             >
+               <Trash2 />
+diff --git a/src/pages/users/page.tsx b/src/pages/users/page.tsx
+index 60676c0..57e2755 100644
+--- a/src/pages/users/page.tsx
++++ b/src/pages/users/page.tsx
+@@ -25,6 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
+ import PageHeader from "@/components/page-header.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
++import { useConfirm } from "@/hooks/use-confirm.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
+ type Status = "pending" | "active" | "disabled";
+@@ -43,6 +44,18 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+     }
+   };
+ 
++  const confirm = useConfirm();
++  const removeAccess = async () => {
++    const rejecting = user.status === "pending";
++    const ok = await confirm({
++      title: rejecting ? `Reject ${user.name ?? "this user"}?` : `Remove access for ${user.name ?? "this user"}?`,
++      description: "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
++      confirmLabel: rejecting ? "Reject" : "Remove access",
++      destructive: true,
++    });
++    if (ok) await save({ status: "disabled" }, rejecting ? "User rejected" : "Access removed");
++  };
++
+   return (
+     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
+       <div className="min-w-0 flex-1">
+@@ -69,7 +82,7 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+             </Button>
+           )}
+           {user.status !== "disabled" && (
+-            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void save({ status: "disabled" }, "Access removed")}>
++            <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void removeAccess()}>
+               <UserX /> {user.status === "pending" ? "Reject" : "Remove access"}
+             </Button>
+           )}

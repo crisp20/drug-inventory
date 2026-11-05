@@ -1,0 +1,343 @@
+diff --git a/src/components/drug-search-input.tsx b/src/components/drug-search-input.tsx
+index 0211684..6d2760e 100644
+--- a/src/components/drug-search-input.tsx
++++ b/src/components/drug-search-input.tsx
+@@ -21,7 +21,8 @@ export default function DrugSearchInput({
+   autoFocus,
+ }: Props) {
+   const [scanning, setScanning] = useState(false);
+-  const { inputRef, onKeyDown, setValue, warning } = useScannerInput(onChange);
++  const { inputRef, onKeyDown, setValue, display, warning } =
++    useScannerInput(onChange);
+   const handleDetected = useCallback(
+     (code: string) => {
+       setScanning(false);
+@@ -37,7 +38,7 @@ export default function DrugSearchInput({
+           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+           <Input
+             ref={inputRef}
+-            value={value}
++            value={display(value)}
+             autoFocus={autoFocus}
+             onChange={(e) => setValue(e.target.value)}
+             onKeyDown={(e) => void onKeyDown(e)}
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index a9f2491..a1abb8e 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -1,3 +1,4 @@
++import { useCallback } from "react";
+ import { useForm, useWatch } from "react-hook-form";
+ import { zodResolver } from "@hookform/resolvers/zod";
+ import { useMutation, useQuery } from "convex/react";
+@@ -14,6 +15,7 @@ import {
+   type MovementKind,
+ } from "@/convex/lib/stock.ts";
+ import { useConfirm } from "@/hooks/use-confirm.ts";
++import { useScanGuard } from "@/hooks/use-scan-guard.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+   Form,
+@@ -103,6 +105,26 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+   const threshold =
+     settings?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD;
+ 
++  // A barcode scanned while the cursor is in the quantity box: undo it and explain
++  const guardQuantity = useScanGuard(
++    useCallback(
++      (valueBefore: string) => {
++        const restored = /^\d+$/.test(valueBefore) ? valueBefore : "1";
++        form.setValue("quantity", restored, { shouldDirty: true });
++        form.setError("quantity", {
++          message:
++            "Scan detected in the quantity box, so it was ignored. Please scan in the search box above. 數量欄偵測到掃描，已忽略。",
++        });
++        toast.warning("Scan detected in the quantity box", {
++          description:
++            "The scanned code was ignored. Please scan in the search box.",
++        });
++        form.setFocus("quantity");
++      },
++      [form],
++    ),
++  );
++
+   const onSubmit = async ({ reason, ...values }: MovementFormValues) => {
+     // Large amounts are often a barcode scanned into the quantity box, so ask again
+     if (needsLargeQuantityConfirm(values.quantity, threshold)) {
+@@ -160,6 +182,7 @@ export default function MovementForm({ kind, selection, onDone }: Props) {
+                   value={String(field.value)}
+                   inputMode="numeric"
+                   autoFocus
++                  onKeyDown={guardQuantity}
+                   onFocus={(e) => e.target.select()}
+                   className="h-14 bg-background text-center text-2xl font-extrabold"
+                 />
+diff --git a/src/hooks/use-scan-guard.test.ts b/src/hooks/use-scan-guard.test.ts
+new file mode 100644
+index 0000000..4509af0
+--- /dev/null
++++ b/src/hooks/use-scan-guard.test.ts
+@@ -0,0 +1,85 @@
++import type { KeyboardEvent } from "react";
++import { act, renderHook } from "@testing-library/react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { useScanGuard } from "./use-scan-guard.ts";
++
++type FakeKey = { code: string; key: string; timeStamp: number; value: string };
++
++// Minimal keydown event with just what the guard reads
++function keyEvent({ code, key, timeStamp, value }: FakeKey) {
++  const preventDefault = vi.fn();
++  const target = { value, blur: vi.fn() };
++  const event = {
++    code,
++    key,
++    timeStamp,
++    shiftKey: false,
++    ctrlKey: false,
++    getModifierState: () => false,
++    currentTarget: target,
++    preventDefault,
++  };
++  return {
++    event: event as unknown as KeyboardEvent<HTMLInputElement>,
++    preventDefault,
++  };
++}
++
++function digits(text: string, gapMs: number, value: string) {
++  return [...text].map((d, i) =>
++    keyEvent({ code: `Digit${d}`, key: d, timeStamp: 1000 + i * gapMs, value }),
++  );
++}
++
++describe("useScanGuard", () => {
++  beforeEach(() => vi.useFakeTimers());
++  afterEach(() => vi.useRealTimers());
++
++  it("blocks a scan in the quantity box, including its Enter, and restores the old value", () => {
++    const onBlocked = vi.fn();
++    const { result } = renderHook(() => useScanGuard(onBlocked));
++    const keys = digits("010185742", 5, "12");
++    keys.forEach(({ event }) => result.current(event));
++    // First keys can't be told apart from typing; later ones are blocked
++    expect(keys[0].preventDefault).not.toHaveBeenCalled();
++    expect(keys[8].preventDefault).toHaveBeenCalled();
++
++    const enter = keyEvent({
++      code: "Enter",
++      key: "Enter",
++      timeStamp: 1050,
++      value: "01018",
++    });
++    act(() => result.current(enter.event));
++    expect(enter.preventDefault).toHaveBeenCalled();
++    expect(onBlocked).toHaveBeenCalledWith("12");
++  });
++
++  it("lets a person type a quantity and press Enter", () => {
++    const onBlocked = vi.fn();
++    const { result } = renderHook(() => useScanGuard(onBlocked));
++    const keys = digits("150", 200, "1");
++    keys.forEach(({ event }) => result.current(event));
++    const enter = keyEvent({
++      code: "Enter",
++      key: "Enter",
++      timeStamp: 2000,
++      value: "150",
++    });
++    act(() => result.current(enter.event));
++    act(() => vi.runAllTimers());
++    expect(keys.some((k) => k.preventDefault.mock.calls.length > 0)).toBe(
++      false,
++    );
++    expect(enter.preventDefault).not.toHaveBeenCalled();
++    expect(onBlocked).not.toHaveBeenCalled();
++  });
++
++  it("restores after a scan that ends without Enter", () => {
++    const onBlocked = vi.fn();
++    const { result } = renderHook(() => useScanGuard(onBlocked));
++    digits("85742000", 5, "3").forEach(({ event }) => result.current(event));
++    act(() => vi.runAllTimers());
++    expect(onBlocked).toHaveBeenCalledWith("3");
++  });
++});
+diff --git a/src/hooks/use-scan-guard.ts b/src/hooks/use-scan-guard.ts
+new file mode 100644
+index 0000000..c71aaee
+--- /dev/null
++++ b/src/hooks/use-scan-guard.ts
+@@ -0,0 +1,75 @@
++import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
++import {
++  SCAN_END_MS,
++  addKey,
++  isModifierCode,
++  keyFromCode,
++  scanResult,
++  type Burst,
++} from "@/lib/scanner-input.ts";
++
++// For boxes meant for typing by hand (e.g. quantity). If scanner-speed typing arrives,
++// further keys (including the scanner's Enter) are blocked, and once the burst ends
++// `onBlocked` gets the value the box had before the scan so it can be put back.
++export function useScanGuard(onBlocked: (valueBefore: string) => void) {
++  const burstRef = useRef<Burst | null>(null);
++  const timerRef = useRef<number | undefined>(undefined);
++  const blockedRef = useRef(false);
++  const inputRef = useRef<HTMLInputElement | null>(null);
++
++  useEffect(() => () => window.clearTimeout(timerRef.current), []);
++
++  const end = useCallback(() => {
++    window.clearTimeout(timerRef.current);
++    const burst = burstRef.current;
++    const blocked = blockedRef.current;
++    burstRef.current = null;
++    blockedRef.current = false;
++    if (!blocked || !burst) return;
++    // Ends any half-typed Chinese word so it can't land in the box afterwards
++    inputRef.current?.blur();
++    onBlocked(burst.prefix);
++  }, [onBlocked]);
++
++  return useCallback(
++    (e: KeyboardEvent<HTMLInputElement>) => {
++      inputRef.current = e.currentTarget;
++      const isEnter =
++        e.code === "Enter" || e.code === "NumpadEnter" || e.key === "Enter";
++      if (isEnter) {
++        // Stop the scanner's Enter from submitting the scanned number
++        if (blockedRef.current) {
++          e.preventDefault();
++          end();
++        }
++        return;
++      }
++      if (isModifierCode(e.code)) return;
++      const char =
++        e.code === ""
++          ? null
++          : keyFromCode(e.code, {
++              shift: e.shiftKey,
++              ctrl: e.ctrlKey,
++              capsLock: e.getModifierState("CapsLock"),
++            });
++      if (char === null && e.code !== "") {
++        burstRef.current = null;
++        return;
++      }
++      burstRef.current = addKey(
++        burstRef.current,
++        char,
++        e.timeStamp,
++        e.currentTarget.value,
++      );
++      if (scanResult(burstRef.current)) {
++        blockedRef.current = true;
++        e.preventDefault();
++      }
++      window.clearTimeout(timerRef.current);
++      timerRef.current = window.setTimeout(end, SCAN_END_MS);
++    },
++    [end],
++  );
++}
+diff --git a/src/hooks/use-scanner-input.ts b/src/hooks/use-scanner-input.ts
+index 56736e8..fcba951 100644
+--- a/src/hooks/use-scanner-input.ts
++++ b/src/hooks/use-scanner-input.ts
+@@ -20,22 +20,38 @@ const END_KEYS = new Set(["Enter", "NumpadEnter", "Tab"]);
+ const SETTLE_MS = 150;
+ 
+ // Makes scanner input correct even when a Chinese (or other) keyboard is switched on.
+-// Typing by hand is untouched; only very fast bursts (a scanner) are rebuilt.
++// While keys are still arriving, the text is held in the box and only handed on once
++// typing pauses, so a half-scanned code never triggers a search (and a jump to the
++// quantity box) before the scanner has finished.
+ export function useScannerInput(onChange: (value: string) => void) {
+   const inputRef = useRef<HTMLInputElement>(null);
+   const burstRef = useRef<Burst | null>(null);
+   const timerRef = useRef<number | undefined>(undefined);
+   const settleUntilRef = useRef(0);
++  const draftRef = useRef<string | null>(null);
++  const [draft, setDraft] = useState<string | null>(null);
+   const [warning, setWarning] = useState(false);
+ 
+   useEffect(() => () => window.clearTimeout(timerRef.current), []);
+ 
++  const setDraftValue = useCallback((value: string | null) => {
++    draftRef.current = value;
++    setDraft(value);
++  }, []);
++
+   // Ends the current burst. Returns the rebuilt code if it was a scan.
+   const finish = useCallback((): string | null => {
+     window.clearTimeout(timerRef.current);
++    timerRef.current = undefined;
+     const result = scanResult(burstRef.current);
+     burstRef.current = null;
+-    if (!result) return null;
++    const pending = draftRef.current;
++    setDraftValue(null);
++    if (!result) {
++      // Normal typing: hand on whatever was typed
++      if (pending !== null) onChange(pending);
++      return null;
++    }
+     settleUntilRef.current = performance.now() + SETTLE_MS;
+     const input = inputRef.current;
+     // Blur + focus ends any half-typed Chinese word so it can't overwrite the code
+@@ -46,7 +62,7 @@ export function useScannerInput(onChange: (value: string) => void) {
+     onChange(result.text);
+     setWarning(result.incomplete || hasNonAscii(result.text));
+     return result.text;
+-  }, [onChange]);
++  }, [onChange, setDraftValue]);
+ 
+   // Returns the rebuilt code when Enter/Tab ends a scan, so callers can act on the right value
+   const onKeyDown = useCallback(
+@@ -84,10 +100,15 @@ export function useScannerInput(onChange: (value: string) => void) {
+     (value: string) => {
+       if (performance.now() < settleUntilRef.current) return;
+       setWarning(false);
+-      onChange(value);
++      // Keys still arriving: hold the text until the burst ends
++      if (timerRef.current !== undefined) setDraftValue(value);
++      else onChange(value);
+     },
+-    [onChange],
++    [onChange, setDraftValue],
+   );
+ 
+-  return { inputRef, onKeyDown, setValue, warning };
++  // What the box should show: the held text while typing, otherwise the real value
++  const display = useCallback((value: string) => draft ?? value, [draft]);
++
++  return { inputRef, onKeyDown, setValue, display, warning };
+ }
+diff --git a/src/pages/inventory/_components/scan-field.tsx b/src/pages/inventory/_components/scan-field.tsx
+index 4168e2d..7bb5ffd 100644
+--- a/src/pages/inventory/_components/scan-field.tsx
++++ b/src/pages/inventory/_components/scan-field.tsx
+@@ -21,7 +21,8 @@ const ScanField = forwardRef<HTMLInputElement, Props>(function ScanField(
+   { label, value, onChange, onEnter, onCamera, className },
+   ref,
+ ) {
+-  const { inputRef, onKeyDown, setValue, warning } = useScannerInput(onChange);
++  const { inputRef, onKeyDown, setValue, display, warning } =
++    useScannerInput(onChange);
+ 
+   const setRefs = (el: HTMLInputElement | null) => {
+     inputRef.current = el;
+@@ -46,7 +47,7 @@ const ScanField = forwardRef<HTMLInputElement, Props>(function ScanField(
+           <ScanLine className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-accent-foreground/70" />
+           <Input
+             ref={setRefs}
+-            value={value}
++            value={display(value)}
+             onChange={(e) => setValue(e.target.value)}
+             onKeyDown={handleKeyDown}
+             placeholder={label}

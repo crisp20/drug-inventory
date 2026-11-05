@@ -1,0 +1,1560 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+new file mode 100644
+index 0000000..9baf1b9
+--- /dev/null
++++ b/convex/drugImport.test.ts
+@@ -0,0 +1,84 @@
++import { convexTest } from "convex-test";
++import { describe, expect, it } from "vitest";
++import { api } from "./_generated/api";
++import schema from "./schema";
++import { modules } from "./test.setup";
++
++const OWNER = { tokenIdentifier: "iss|owner", email: "hubert@activecaregroup.com", name: "Hubert" };
++const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
++
++const fileDrug = {
++  drugId: "32",
++  name: "Amantadine 100mg Tab",
++  brandName: "PK-Merz",
++  manufacturer: "JACOBSON",
++  pieceName: "TABLET",
++  dosageForm: "TABLET",
++  row: 2,
++  packages: [{ barcode: "4046222740115", qtyPerUnit: 100, baseUnit: "Box" as const, unitCount: 1 }],
++};
++
++async function setup() {
++  const t = convexTest(schema, modules);
++  const owner = t.withIdentity(OWNER);
++  const staff = t.withIdentity(STAFF);
++  await owner.mutation(api.users.updateCurrentUser, {});
++  await staff.mutation(api.users.updateCurrentUser, {});
++  return { owner, staff };
++}
++
++describe("drug import", () => {
++  it("is admin only", async () => {
++    const { staff } = await setup();
++    await expect(staff.query(api.drugImport.checkBatch, { drugs: [fileDrug] })).rejects.toThrow();
++    await expect(staff.mutation(api.drugImport.applyBatch, { items: [] })).rejects.toThrow();
++  });
++
++  it("creates new drugs, then reports a conflict and keeps stock when using the file", async () => {
++    const { owner } = await setup();
++    const [first] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
++    expect(first.status).toBe("new");
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
++
++    const [saved] = await owner.query(api.drugs.search, { term: "32" });
++    await owner.mutation(api.drugs.update, {
++      id: saved._id,
++      drugId: "32",
++      name: saved.name,
++      brandName: "Edited",
++      manufacturer: saved.manufacturer,
++      pieceName: saved.pieceName,
++      packages: saved.packages.map((p) => ({
++        packageId: p._id,
++        barcode: p.barcode,
++        qtyPerUnit: p.qtyPerUnit,
++        baseUnit: p.baseUnit,
++        unitCount: p.unitCount,
++        imageIds: p.imageIds,
++        stock: 7,
++      })),
++    });
++
++    const [again] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
++    expect(again.status).toBe("conflict");
++    expect(again.diff?.fields).toEqual([{ label: "Brand name", current: "Edited", file: "PK-Merz" }]);
++
++    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "update" }] });
++    expect(res).toMatchObject({ applied: 1, failures: [] });
++    const [updated] = await owner.query(api.drugs.search, { term: "32" });
++    expect(updated.brandName).toBe("PK-Merz");
++    expect(updated.packages[0].stock).toBe(7);
++  });
++
++  it("skips barcodes already used by another drug", async () => {
++    const { owner } = await setup();
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
++    const other = { ...fileDrug, drugId: "33", packages: [...fileDrug.packages, { ...fileDrug.packages[0], barcode: "", qtyPerUnit: 10, baseUnit: "Strip" as const }] };
++    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [other] });
++    expect(check.clashes).toHaveLength(1);
++    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: other, action: "create" }] });
++    expect(res.skipped).toEqual([{ drugId: "33", name: other.name, barcodes: ["4046222740115"] }]);
++    const [created] = await owner.query(api.drugs.search, { term: "33" });
++    expect(created.packages).toHaveLength(1);
++  });
++});
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+new file mode 100644
+index 0000000..28d8cf2
+--- /dev/null
++++ b/convex/drugImport.ts
+@@ -0,0 +1,274 @@
++import { paginationOptsValidator } from "convex/server";
++import { ConvexError, v } from "convex/values";
++import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
++import type { Doc, Id } from "./_generated/dataModel";
++import { requireAdmin } from "./lib/access";
++import { normalizeBarcode } from "./lib/barcode";
++import {
++  MAX_IMPORT_BATCH,
++  diffDrug,
++  packageMatchKey,
++  type ImportDrug,
++  type ImportPackage,
++} from "./lib/drugImport";
++import {
++  MAX_PACKAGES_PER_DRUG,
++  buildSearchText,
++  cleanDrugInput,
++  deleteDrug,
++  getPackages,
++  type PackageInput,
++} from "./lib/drugs";
++import { baseUnit } from "./schema/drugs";
++
++const importPackageArg = v.object({
++  barcode: v.string(),
++  qtyPerUnit: v.number(),
++  baseUnit: baseUnit,
++  unitCount: v.number(),
++});
++
++const importDrugArg = v.object({
++  drugId: v.string(),
++  name: v.string(),
++  brandName: v.string(),
++  manufacturer: v.string(),
++  pieceName: v.string(),
++  dosageForm: v.string(),
++  row: v.number(),
++  packages: v.array(importPackageArg),
++});
++
++function assertBatch(size: number) {
++  if (size > MAX_IMPORT_BATCH) {
++    throw new ConvexError({ code: "BAD_REQUEST", message: `Send at most ${MAX_IMPORT_BATCH} drugs at a time` });
++  }
++}
++
++async function findDrug(ctx: QueryCtx, drugId: string) {
++  return await ctx.db
++    .query("drugs")
++    .withIndex("by_drugId", (q) => q.eq("drugId", drugId.trim()))
++    .first();
++}
++
++type BarcodeClash = { barcode: string; otherDrugId: string; otherName: string };
++
++// Barcodes in the file that are already saved on a different drug
++async function findClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<"drugs"> | undefined) {
++  const clashes: BarcodeClash[] = [];
++  for (const p of packages) {
++    if (!p.barcode.trim()) continue;
++    const other = await ctx.db
++      .query("drugPackages")
++      .withIndex("by_barcodeKey", (q) => q.eq("barcodeKey", normalizeBarcode(p.barcode)))
++      .first();
++    if (!other || other.drugRef === ownRef) continue;
++    const otherDrug = await ctx.db.get("drugs", other.drugRef);
++    clashes.push({ barcode: p.barcode, otherDrugId: otherDrug?.drugId ?? "?", otherName: otherDrug?.name ?? "Unknown" });
++  }
++  return clashes;
++}
++
++function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
++  return {
++    name: drug.name,
++    brandName: drug.brandName,
++    manufacturer: drug.manufacturer,
++    pieceName: drug.pieceName,
++    packages: packages.map((p) => ({
++      barcode: p.barcode,
++      qtyPerUnit: p.qtyPerUnit,
++      baseUnit: p.baseUnit,
++      unitCount: p.unitCount,
++    })),
++  };
++}
++
++// Compares a batch of file drugs to the saved inventory
++export const checkBatch = query({
++  args: { drugs: v.array(importDrugArg) },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    assertBatch(args.drugs.length);
++    return await Promise.all(
++      args.drugs.map(async (d) => {
++        const existing = await findDrug(ctx, d.drugId);
++        const clashes = await findClashes(ctx, d.packages, existing?._id);
++        if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null };
++        const packages = await getPackages(ctx, existing._id);
++        const diff = diffDrug(d, toExisting(existing, packages));
++        return {
++          drugId: d.drugId,
++          status: diff.hasChanges ? ("conflict" as const) : ("same" as const),
++          clashes,
++          diff,
++        };
++      }),
++    );
++  },
++});
++
++// Every saved drug (one page at a time) so the import can find drugs missing from the file
++export const listForImport = query({
++  args: { paginationOpts: paginationOptsValidator },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    const result = await ctx.db.query("drugs").withIndex("by_drugId").paginate(args.paginationOpts);
++    return {
++      ...result,
++      page: await Promise.all(
++        result.page.map(async (d) => {
++          const packages = await getPackages(ctx, d._id);
++          return {
++            _id: d._id,
++            drugId: d.drugId,
++            name: d.name,
++            brandName: d.brandName,
++            stock: packages.reduce((sum, p) => sum + p.stock, 0),
++          };
++        }),
++      ),
++    };
++  },
++});
++
++type ApplyResult = { failure: string | null; skippedBarcodes: string[] };
++
++function failureMessage(error: unknown): string {
++  if (error instanceof ConvexError && typeof error.data?.message === "string") return error.data.message;
++  return "Could not be saved";
++}
++
++// Creates a new drug, or ("update") brings an existing drug in line with the file.
++// Stock, pictures and package forms that only exist in the app are never touched.
++async function applyDrug(ctx: MutationCtx, d: ImportDrug, action: "create" | "update"): Promise<ApplyResult> {
++  const existing = await findDrug(ctx, d.drugId);
++  if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
++  if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
++
++  const clashes = new Set((await findClashes(ctx, d.packages, existing?._id)).map((c) => c.barcode));
++  const usable = d.packages.filter((p) => !clashes.has(p.barcode));
++  const current = existing ? await getPackages(ctx, existing._id) : [];
++  const currentByKey = new Map(current.map((p) => [packageMatchKey(p), p]));
++
++  // Final list of package forms: everything already saved (forms refreshed from the file) plus new ones
++  const fileByKey = new Map(usable.map((p) => [packageMatchKey(p), p]));
++  const merged: PackageInput[] = current.map((p) => {
++    const fromFile = fileByKey.get(packageMatchKey(p));
++    return {
++      packageId: p._id,
++      barcode: p.barcode,
++      qtyPerUnit: fromFile?.qtyPerUnit ?? p.qtyPerUnit,
++      baseUnit: fromFile?.baseUnit ?? p.baseUnit,
++      unitCount: fromFile?.unitCount ?? p.unitCount,
++      stock: p.stock,
++      imageIds: p.imageIds,
++    };
++  });
++  for (const p of usable) {
++    if (currentByKey.has(packageMatchKey(p)) || merged.length >= MAX_PACKAGES_PER_DRUG) continue;
++    merged.push({ ...p, stock: 0, imageIds: [] });
++  }
++
++  try {
++    const input = cleanDrugInput({
++      drugId: d.drugId,
++      name: d.name,
++      brandName: d.brandName,
++      manufacturer: d.manufacturer,
++      pieceName: d.pieceName,
++      imageId: existing?.imageId,
++      packages: merged,
++    });
++    const fields = {
++      drugId: input.drugId,
++      name: input.name,
++      brandName: input.brandName,
++      manufacturer: input.manufacturer,
++      pieceName: input.pieceName,
++      searchText: buildSearchText(input),
++      updatedAt: new Date().toISOString(),
++    };
++    const drugRef = existing ? existing._id : await ctx.db.insert("drugs", fields);
++    if (existing) await ctx.db.patch("drugs", existing._id, fields);
++    for (const p of input.packages) {
++      const form = { qtyPerUnit: p.qtyPerUnit, baseUnit: p.baseUnit, unitCount: p.unitCount };
++      if (p.packageId) {
++        await ctx.db.patch("drugPackages", p.packageId, form);
++      } else {
++        await ctx.db.insert("drugPackages", {
++          drugRef,
++          barcode: p.barcode,
++          barcodeKey: p.barcode ? normalizeBarcode(p.barcode) : "",
++          ...form,
++          stock: 0,
++          imageIds: [],
++        });
++      }
++    }
++    return { failure: null, skippedBarcodes: [...clashes] };
++  } catch (error) {
++    return { failure: failureMessage(error), skippedBarcodes: [...clashes] };
++  }
++}
++
++export const applyBatch = mutation({
++  args: {
++    items: v.array(
++      v.object({ drug: importDrugArg, action: v.union(v.literal("create"), v.literal("update")) }),
++    ),
++  },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    assertBatch(args.items.length);
++    let applied = 0;
++    const failures: { drugId: string; name: string; message: string }[] = [];
++    const skipped: { drugId: string; name: string; barcodes: string[] }[] = [];
++    for (const { drug, action } of args.items) {
++      const result = await applyDrug(ctx, drug, action);
++      if (result.failure) failures.push({ drugId: drug.drugId, name: drug.name, message: result.failure });
++      else applied += 1;
++      if (result.skippedBarcodes.length > 0) {
++        skipped.push({ drugId: drug.drugId, name: drug.name, barcodes: result.skippedBarcodes });
++      }
++    }
++    return { applied, failures, skipped };
++  },
++});
++
++export const removeBatch = mutation({
++  args: { ids: v.array(v.id("drugs")) },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    assertBatch(args.ids.length);
++    let removed = 0;
++    for (const id of args.ids) {
++      const drug = await ctx.db.get("drugs", id);
++      if (!drug) continue;
++      await deleteDrug(ctx, drug);
++      removed += 1;
++    }
++    return removed;
++  },
++});
++
++// One-off population from a prepared file: adds drugs that are not saved yet, leaves existing ones alone
++export const seedNewDrugs = internalMutation({
++  args: { drugs: v.array(importDrugArg) },
++  handler: async (ctx, args) => {
++    let created = 0;
++    let existing = 0;
++    const failures: string[] = [];
++    for (const d of args.drugs) {
++      if (await findDrug(ctx, d.drugId)) {
++        existing += 1;
++        continue;
++      }
++      const result = await applyDrug(ctx, d, "create");
++      if (result.failure) failures.push(`${d.drugId}: ${result.failure}`);
++      else created += 1;
++    }
++    return { created, existing, failures };
++  },
++});
+diff --git a/convex/drugImportSeed.ts b/convex/drugImportSeed.ts
+new file mode 100644
+index 0000000..ba68e0c
+--- /dev/null
++++ b/convex/drugImportSeed.ts
+@@ -0,0 +1,30 @@
++import { v } from "convex/values";
++import readXlsxFile from "read-excel-file/universal";
++import { internal } from "./_generated/api";
++import { internalAction } from "./_generated/server";
++import { buildImportDrugs, sheetToRecords } from "./lib/drugImport";
++
++const SEED_BATCH = 100;
++
++// One-off: loads a hosted spreadsheet and adds drugs that are not saved yet (existing ones untouched)
++export const seedFromUrl = internalAction({
++  args: { url: v.string(), forms: v.array(v.string()) },
++  handler: async (ctx, args): Promise<{ created: number; existing: number; failures: string[] }> => {
++    if (!args.url.startsWith("https://hercules-cdn.com/")) throw new Error("Only Hercules file links are allowed");
++    const res = await fetch(args.url);
++    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
++    const sheets = await readXlsxFile(await res.arrayBuffer());
++    const { records, missingColumns } = sheetToRecords(sheets[0]?.data ?? []);
++    if (missingColumns.length > 0) throw new Error(`Missing columns: ${missingColumns.join(", ")}`);
++    const { drugs } = buildImportDrugs(records, args.forms);
++
++    const total = { created: 0, existing: 0, failures: [] as string[] };
++    for (let i = 0; i < drugs.length; i += SEED_BATCH) {
++      const r = await ctx.runMutation(internal.drugImport.seedNewDrugs, { drugs: drugs.slice(i, i + SEED_BATCH) });
++      total.created += r.created;
++      total.existing += r.existing;
++      total.failures.push(...r.failures);
++    }
++    return total;
++  },
++});
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 73b84a1..6e32ac4 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -9,6 +9,7 @@ import {
+   assertDrugIdFree,
+   buildSearchText,
+   cleanDrugInput,
++  deleteDrug,
+   deleteFiles,
+   filesOf,
+   getPackages,
+@@ -188,10 +189,7 @@ export const remove = mutation({
+     await requireAdmin(ctx);
+     const drug = await ctx.db.get("drugs", args.id);
+     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
+-    const packages = await getPackages(ctx, args.id);
+-    for (const p of packages) await ctx.db.delete("drugPackages", p._id);
+-    await deleteFiles(ctx, filesOf(drug, packages));
+-    await ctx.db.delete("drugs", args.id);
++    await deleteDrug(ctx, drug);
+     return null;
+   },
+ });
+diff --git a/convex/lib/drugImport.test.ts b/convex/lib/drugImport.test.ts
+new file mode 100644
+index 0000000..74dc49f
+--- /dev/null
++++ b/convex/lib/drugImport.test.ts
+@@ -0,0 +1,82 @@
++import { describe, expect, it } from "vitest";
++import { buildImportDrugs, diffDrug, listDosageForms, sheetToRecords, toBaseUnit } from "./drugImport";
++
++const HEADER = ["drugid", "printoutName", "brandName", "Manufacturer", "DosageForm", "drugPackageId", "drugId", "barcode", "form", "per", "amount"];
++
++function sheet(rows: (string | number | null)[][]) {
++  return sheetToRecords([HEADER, ...rows]).records;
++}
++
++describe("sheetToRecords", () => {
++  it("maps by header name, first duplicate column wins, and reports missing columns", () => {
++    const { records, missingColumns } = sheetToRecords([HEADER, ["7", "Amantadine", "PK-Merz", "--", "TABLET", "1", "99", "4046222740115", "Box", 100, 1]]);
++    expect(missingColumns).toEqual([]);
++    expect(records[0]).toMatchObject({ row: 2, values: { drugid: "7", per: "100" } });
++    expect(sheetToRecords([["drugid", "name"]]).missingColumns).toContain("barcode");
++  });
++});
++
++describe("buildImportDrugs", () => {
++  const rows = sheet([
++    ["32", "Amantadine 100mg Tab", "PK-Merz", "JACOBSON", "TABLET", "606", "32", null, "Strip", 20, 2],
++    // GS1 and plain versions of the same barcode collapse into one form
++    ["32", "Amantadine 100mg Tab", "PK-Merz", "JACOBSON", "TABLET", "22", "32", "0104046222740115112302151728011510B00023810", "Box", 100, 1],
++    ["32", "Amantadine 100mg Tab", "PK-Merz", "JACOBSON", "TABLET", "21", "32", "4046222740115", "Box", 100, 1],
++    ["1", "Ammo Mixt", "A&I", "--", "ML", "5", "1", "123", "Bot", 100, 1],
++    ["2", "Vit K4 Tab", "Vit K4", "--", "TABLET", null, null, null, null, null, null],
++    ["3", "Odd Cap", "Odd", "--", "CAPSULE", "9", "3", "999", "Tube", 10, 1],
++  ]);
++
++  it("keeps chosen forms, drugs with package forms, and collapses GS1 duplicates", () => {
++    const { drugs, withoutPackages, problems } = buildImportDrugs(rows, ["TABLET", "CAPSULE"]);
++    expect(drugs.map((d) => d.drugId)).toEqual(["32"]);
++    expect(drugs[0].packages).toEqual([
++      { barcode: "", qtyPerUnit: 20, baseUnit: "Strip", unitCount: 2 },
++      { barcode: "4046222740115", qtyPerUnit: 100, baseUnit: "Box", unitCount: 1 },
++    ]);
++    expect(drugs[0].pieceName).toBe("TABLET");
++    // "Vit K4" has no package form; "Odd Cap" has an unreadable one
++    expect(withoutPackages).toBe(2);
++    expect(problems.map((p) => p.drugId)).toEqual(["3"]);
++  });
++
++  it("blanks the '--' manufacturer placeholder and maps Bot to Bottle", () => {
++    const { drugs } = buildImportDrugs(rows, ["ML"]);
++    expect(drugs[0]).toMatchObject({ manufacturer: "", packages: [{ baseUnit: "Bottle" }] });
++    expect(toBaseUnit("bot")).toBe("Bottle");
++    expect(toBaseUnit("Tube")).toBeNull();
++  });
++
++  it("counts distinct drugs per dosage form", () => {
++    expect(listDosageForms(rows)[0]).toEqual({ form: "TABLET", drugs: 2 });
++  });
++});
++
++describe("diffDrug", () => {
++  const file = buildImportDrugs(
++    sheet([["32", "Amantadine 100mg Tab", "PK-Merz", "JACOBSON", "TABLET", "1", "32", "4046222740115", "Box", 100, 1]]),
++    ["TABLET"],
++  ).drugs[0];
++  const current = {
++    name: "Amantadine 100mg Tab",
++    brandName: "PK-Merz",
++    manufacturer: "JACOBSON",
++    pieceName: "TABLET",
++    packages: [{ barcode: "(01)04046222740115", qtyPerUnit: 100, baseUnit: "Box" as const, unitCount: 1 }],
++  };
++
++  it("finds no changes when the barcode matches in another format", () => {
++    expect(diffDrug(file, current).hasChanges).toBe(false);
++  });
++
++  it("reports changed fields, new and changed package forms", () => {
++    const d = diffDrug(file, {
++      ...current,
++      brandName: "Old",
++      packages: [{ ...current.packages[0], qtyPerUnit: 50 }],
++    });
++    expect(d.fields).toEqual([{ label: "Brand name", current: "Old", file: "PK-Merz" }]);
++    expect(d.changed).toHaveLength(1);
++    expect(diffDrug(file, { ...current, packages: [] }).added).toHaveLength(1);
++  });
++});
+diff --git a/convex/lib/drugImport.ts b/convex/lib/drugImport.ts
+new file mode 100644
+index 0000000..db765af
+--- /dev/null
++++ b/convex/lib/drugImport.ts
+@@ -0,0 +1,222 @@
++// Shared by backend and frontend: turns spreadsheet rows (same columns as the
++// pharmacy system export) into drugs with package forms, and compares them to
++// what is already saved.
++import { BASE_UNITS, normalizeBarcode, toStoredBarcode, type BaseUnit } from "./barcode";
++import { MAX_PACKAGES_PER_DRUG } from "./drugs";
++
++export const MAX_IMPORT_BATCH = 50;
++
++export type ImportPackage = {
++  barcode: string;
++  qtyPerUnit: number;
++  baseUnit: BaseUnit;
++  unitCount: number;
++};
++
++export type ImportDrug = {
++  drugId: string;
++  name: string;
++  brandName: string;
++  manufacturer: string;
++  pieceName: string;
++  dosageForm: string;
++  // First spreadsheet row of this drug (1 = header row)
++  row: number;
++  packages: ImportPackage[];
++};
++
++export type ImportProblem = { row: number; drugId: string; name: string; message: string };
++
++export type SheetRecord = { row: number; values: Record<string, string> };
++
++// Header names after normalizing (lower case, no spaces/underscores)
++export const COLUMNS = {
++  drugId: "drugid",
++  name: "printoutname",
++  brandName: "brandname",
++  manufacturer: "manufacturer",
++  dosageForm: "dosageform",
++  barcode: "barcode",
++  form: "form",
++  per: "per",
++  amount: "amount",
++} as const;
++
++const REQUIRED = Object.values(COLUMNS);
++
++export function normalizeHeader(header: string): string {
++  return header.trim().toLowerCase().replace(/[\s_-]+/g, "");
++}
++
++function cellText(cell: unknown): string {
++  if (cell === null || cell === undefined) return "";
++  if (cell instanceof Date) return cell.toISOString();
++  return String(cell).trim();
++}
++
++// First row is the header. When a header appears twice, the first column wins.
++export function sheetToRecords(rows: unknown[][]): { records: SheetRecord[]; missingColumns: string[] } {
++  const [header = [], ...body] = rows;
++  const columnIndex = new Map<string, number>();
++  header.forEach((h, i) => {
++    const key = normalizeHeader(cellText(h));
++    if (key && !columnIndex.has(key)) columnIndex.set(key, i);
++  });
++  const missingColumns = REQUIRED.filter((c) => !columnIndex.has(c));
++  const records: SheetRecord[] = [];
++  body.forEach((cells, i) => {
++    if (cells.every((c) => cellText(c) === "")) return;
++    const values: Record<string, string> = {};
++    for (const [key, idx] of columnIndex) values[key] = cellText(cells[idx]);
++    records.push({ row: i + 2, values });
++  });
++  return { records, missingColumns };
++}
++
++function dosageFormOf(r: SheetRecord): string {
++  return r.values[COLUMNS.dosageForm].toUpperCase();
++}
++
++// Each dosage form in the file with how many distinct drugs use it
++export function listDosageForms(records: SheetRecord[]): { form: string; drugs: number }[] {
++  const byForm = new Map<string, Set<string>>();
++  for (const r of records) {
++    const form = dosageFormOf(r) || "(BLANK)";
++    const ids = byForm.get(form) ?? new Set<string>();
++    ids.add(r.values[COLUMNS.drugId]);
++    byForm.set(form, ids);
++  }
++  return [...byForm.entries()]
++    .map(([form, ids]) => ({ form, drugs: ids.size }))
++    .sort((a, b) => b.drugs - a.drugs);
++}
++
++export function toBaseUnit(raw: string): BaseUnit | null {
++  const v = raw.trim().toLowerCase();
++  if (v === "bot" || v === "btl") return "Bottle";
++  return BASE_UNITS.find((u) => u.toLowerCase() === v) ?? null;
++}
++
++function positiveInt(raw: string): number | null {
++  const n = Number(raw);
++  return Number.isInteger(n) && n > 0 ? n : null;
++}
++
++// Identifies "the same package form" across file and app: barcode if present, else the form itself
++export function packageMatchKey(p: ImportPackage): string {
++  return p.barcode.trim()
++    ? `bc:${normalizeBarcode(p.barcode)}`
++    : `form:${p.qtyPerUnit}/${p.baseUnit}x${p.unitCount}`;
++}
++
++function sameForm(a: ImportPackage, b: ImportPackage) {
++  return a.qtyPerUnit === b.qtyPerUnit && a.baseUnit === b.baseUnit && a.unitCount === b.unitCount;
++}
++
++function cleanManufacturer(raw: string) {
++  return /^-+$/.test(raw) ? "" : raw;
++}
++
++// Groups rows by Drug ID, keeps only the chosen dosage forms and drugs with at least one package form
++export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
++  const wanted = new Set(forms.map((f) => f.toUpperCase()));
++  const problems: ImportProblem[] = [];
++  const grouped = new Map<string, SheetRecord[]>();
++  for (const r of records) {
++    if (!wanted.has(dosageFormOf(r) || "(BLANK)")) continue;
++    const id = r.values[COLUMNS.drugId];
++    if (!id) {
++      problems.push({ row: r.row, drugId: "", name: r.values[COLUMNS.name], message: "Missing Drug ID, row skipped" });
++      continue;
++    }
++    const list = grouped.get(id) ?? [];
++    list.push(r);
++    grouped.set(id, list);
++  }
++
++  const drugs: ImportDrug[] = [];
++  let withoutPackages = 0;
++  for (const [drugId, rows] of grouped) {
++    const first = rows[0];
++    const name = first.values[COLUMNS.name];
++    const report = (row: number, message: string) => problems.push({ row, drugId, name, message });
++    if (!name) {
++      report(first.row, "Missing drug name, drug skipped");
++      continue;
++    }
++    const packages = new Map<string, ImportPackage>();
++    for (const r of rows) {
++      const formRaw = r.values[COLUMNS.form];
++      const rawBarcode = r.values[COLUMNS.barcode];
++      if (!formRaw && !rawBarcode) continue; // Drug row with no package form
++      const baseUnit = toBaseUnit(formRaw);
++      const qtyPerUnit = positiveInt(r.values[COLUMNS.per]);
++      const unitCount = positiveInt(r.values[COLUMNS.amount]);
++      if (!baseUnit || !qtyPerUnit || !unitCount) {
++        report(r.row, `Package form "${r.values[COLUMNS.per]}/${formRaw} x${r.values[COLUMNS.amount]}" could not be read, skipped`);
++        continue;
++      }
++      const pkg: ImportPackage = { barcode: toStoredBarcode(rawBarcode), qtyPerUnit, baseUnit, unitCount };
++      const key = packageMatchKey(pkg);
++      const seen = packages.get(key);
++      if (seen) {
++        // GS1 and plain versions of the same barcode collapse into one package form
++        if (!sameForm(seen, pkg)) report(r.row, `Barcode ${pkg.barcode} is listed with two different package forms, first one kept`);
++        continue;
++      }
++      if (packages.size >= MAX_PACKAGES_PER_DRUG) {
++        report(r.row, `More than ${MAX_PACKAGES_PER_DRUG} package forms, extra ones skipped`);
++        continue;
++      }
++      packages.set(key, pkg);
++    }
++    if (packages.size === 0) {
++      withoutPackages += 1;
++      continue;
++    }
++    drugs.push({
++      drugId,
++      name,
++      brandName: first.values[COLUMNS.brandName],
++      manufacturer: cleanManufacturer(first.values[COLUMNS.manufacturer]),
++      pieceName: dosageFormOf(first) || "PIECE",
++      dosageForm: dosageFormOf(first),
++      row: first.row,
++      packages: [...packages.values()],
++    });
++  }
++  return { drugs, problems, withoutPackages };
++}
++
++export type ExistingDrug = {
++  name: string;
++  brandName: string;
++  manufacturer: string;
++  pieceName: string;
++  packages: ImportPackage[];
++};
++
++export const DIFF_FIELDS = [
++  { key: "name", label: "Drug name" },
++  { key: "brandName", label: "Brand name" },
++  { key: "manufacturer", label: "Manufacturer" },
++  { key: "pieceName", label: "Pieces are called" },
++] as const;
++
++export type FieldChange = { label: string; current: string; file: string };
++
++// What "Use file" would change. Package forms only in the app are always kept.
++export function diffDrug(file: ImportDrug, current: ExistingDrug) {
++  const fields: FieldChange[] = DIFF_FIELDS.filter(
++    (f) => file[f.key].trim() !== current[f.key].trim(),
++  ).map((f) => ({ label: f.label, current: current[f.key], file: file[f.key] }));
++  const byKey = new Map(current.packages.map((p) => [packageMatchKey(p), p]));
++  const added: ImportPackage[] = [];
++  const changed: { current: ImportPackage; file: ImportPackage }[] = [];
++  for (const p of file.packages) {
++    const match = byKey.get(packageMatchKey(p));
++    if (!match) added.push(p);
++    else if (!sameForm(match, p)) changed.push({ current: match, file: p });
++  }
++  return { fields, added, changed, hasChanges: fields.length + added.length + changed.length > 0 };
++}
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index b4fe9e3..f384cac 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -137,6 +137,14 @@ export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
+   return { ...drug, imageUrl, packages };
+ }
+ 
++// Removes a drug with its package forms and pictures. The stock log keeps its copied details.
++export async function deleteDrug(ctx: MutationCtx, drug: Doc<"drugs">) {
++  const packages = await getPackages(ctx, drug._id);
++  for (const p of packages) await ctx.db.delete("drugPackages", p._id);
++  await deleteFiles(ctx, filesOf(drug, packages));
++  await ctx.db.delete("drugs", drug._id);
++}
++
+ export async function deleteFiles(ctx: MutationCtx, ids: Id<"_storage">[]) {
+   for (const id of ids) {
+     const meta = await ctx.db.system.get("_storage", id);
+diff --git a/package.json b/package.json
+index ebdf886..b301d3c 100644
+--- a/package.json
++++ b/package.json
+@@ -31,6 +31,7 @@
+     "motion": "^14.3.0",
+     "next-themes": "^0.4.6",
+     "oidc-client-ts": "^3.5.0",
++    "papaparse": "^5.7.0",
+     "radix-ui": "^1.8.1",
+     "react": "^19.3.1",
+     "react-day-picker": "^10.0.2",
+@@ -39,6 +40,7 @@
+     "react-oidc-context": "^3.3.1",
+     "react-resizable-panels": "^4.14.5",
+     "react-router-dom": "^7.18.4",
++    "read-excel-file": "^9.3.14",
+     "recharts": "^3.10.1",
+     "sonner": "^2.0.8",
+     "tailwind-merge": "^3.7.0",
+@@ -56,6 +58,7 @@
+     "@testing-library/react": "^16.3.3",
+     "@testing-library/user-event": "^14.6.8",
+     "@types/node": "^26.6.5",
++    "@types/papaparse": "^5.5.2",
+     "@types/react": "^19.3.0",
+     "@types/react-dom": "^19.3.0",
+     "@usehercules/eslint-plugin": "^1.0.41",
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+new file mode 100644
+index 0000000..4ffd518
+--- /dev/null
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -0,0 +1,111 @@
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import type { ImportPackage } from "@/convex/lib/drugImport.ts";
++import { Badge } from "@/components/ui/badge.tsx";
++import { cn } from "@/lib/utils.ts";
++import type { ReviewItem } from "../_hooks/use-drug-import.ts";
++
++export type Choice = "keep" | "file";
++
++function pkgLabel(p: ImportPackage) {
++  return `${formatPackageForm(p)}${p.barcode ? ` · ${p.barcode}` : " · no barcode"}`;
++}
++
++function ChoiceButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      className={cn(
++        "cursor-pointer rounded-md px-3 py-1.5 text-xs font-semibold transition-colors",
++        active ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground hover:bg-accent",
++      )}
++    >
++      {children}
++    </button>
++  );
++}
++
++export default function ImportConflictCard({
++  item,
++  choice,
++  onChoose,
++}: {
++  item: ReviewItem;
++  choice: Choice;
++  onChoose: (c: Choice) => void;
++}) {
++  const diff = item.check.diff;
++  if (!diff) return null;
++  return (
++    <div className="space-y-3 rounded-xl border bg-card p-3">
++      <div className="flex flex-wrap items-start justify-between gap-2">
++        <div className="min-w-0">
++          <div className="truncate font-semibold">{item.drug.name}</div>
++          <div className="text-xs text-muted-foreground">
++            Drug ID {item.drug.drugId} · row {item.drug.row}
++          </div>
++        </div>
++        <div className="flex gap-1">
++          <ChoiceButton active={choice === "keep"} onClick={() => onChoose("keep")}>
++            Keep current
++          </ChoiceButton>
++          <ChoiceButton active={choice === "file"} onClick={() => onChoose("file")}>
++            Use file
++          </ChoiceButton>
++        </div>
++      </div>
++
++      {diff.fields.length > 0 && (
++        <div className="overflow-hidden rounded-lg border text-sm">
++          <div className="grid grid-cols-[7rem_1fr_1fr] bg-muted px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
++            <span />
++            <span>Current</span>
++            <span>In file</span>
++          </div>
++          {diff.fields.map((f) => (
++            <div key={f.label} className="grid grid-cols-[7rem_1fr_1fr] gap-2 border-t px-2 py-1.5">
++              <span className="text-muted-foreground">{f.label}</span>
++              <span className={cn("min-w-0 break-words", choice === "file" && "line-through opacity-60")}>
++                {f.current || "(blank)"}
++              </span>
++              <span className={cn("min-w-0 break-words font-medium", choice === "keep" && "opacity-60")}>
++                {f.file || "(blank)"}
++              </span>
++            </div>
++          ))}
++        </div>
++      )}
++
++      {(diff.added.length > 0 || diff.changed.length > 0) && (
++        <div className="space-y-1 text-sm">
++          {diff.added.map((p) => (
++            <div key={pkgLabel(p)} className="flex flex-wrap items-center gap-2">
++              <Badge variant="secondary">New package form</Badge>
++              <span>{pkgLabel(p)}</span>
++            </div>
++          ))}
++          {diff.changed.map((c) => (
++            <div key={pkgLabel(c.file)} className="flex flex-wrap items-center gap-2">
++              <Badge variant="secondary">Form differs</Badge>
++              <span>
++                {c.file.barcode || "no barcode"}: {formatPackageForm(c.current)} → {formatPackageForm(c.file)}
++              </span>
++            </div>
++          ))}
++        </div>
++      )}
++      {item.check.clashes.length > 0 && <ClashNote item={item} />}
++    </div>
++  );
++}
++
++export function ClashNote({ item }: { item: ReviewItem }) {
++  return (
++    <p className="rounded-md bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
++      {item.check.clashes
++        .map((c) => `Barcode ${c.barcode} already belongs to ${c.otherName} (${c.otherDrugId})`)
++        .join("; ")}
++      . It will be skipped.
++    </p>
++  );
++}
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+new file mode 100644
+index 0000000..cae2b21
+--- /dev/null
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -0,0 +1,437 @@
++import { useMemo, useState } from "react";
++import { toast } from "sonner";
++import { AlertTriangle, CheckCircle2, FileSpreadsheet, Upload } from "lucide-react";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import { listDosageForms, sheetToRecords, type SheetRecord } from "@/convex/lib/drugImport.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.tsx";
++import { Progress } from "@/components/ui/progress.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
++import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { useConfirm } from "@/hooks/use-confirm.ts";
++import { errorMessage } from "@/lib/errors.ts";
++import { cn } from "@/lib/utils.ts";
++import { readImportFile } from "../_lib/read-import-file.ts";
++import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
++import ImportConflictCard, { ClashNote, type Choice } from "./import-conflict-card.tsx";
++
++const DEFAULT_FORMS = ["TABLET", "CAPSULE"];
++const PAGE = 40;
++
++type Loaded = { fileName: string; records: SheetRecord[]; forms: { form: string; drugs: number }[] };
++
++type Step =
++  | { name: "pick" }
++  | { name: "forms"; loaded: Loaded }
++  | { name: "review"; loaded: Loaded; review: ImportReview }
++  | { name: "done"; report: ImportReport };
++
++export default function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
++  const [step, setStep] = useState<Step>({ name: "pick" });
++  const importer = useDrugImport();
++  const reset = (o: boolean) => {
++    if (!o) setStep({ name: "pick" });
++    onOpenChange(o);
++  };
++  return (
++    // Closing mid-import would stop the remaining batches, so block it while busy
++    <Dialog open={open} onOpenChange={(o) => !importer.progress && reset(o)}>
++      <DialogContent className="flex max-h-[90vh] flex-col gap-4 sm:max-w-3xl">
++        <DialogHeader>
++          <DialogTitle>Import inventory file</DialogTitle>
++          <DialogDescription>
++            Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
++            form, per and amount.
++          </DialogDescription>
++        </DialogHeader>
++        <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++type Importer = ReturnType<typeof useDrugImport>;
++
++function ImportSteps({
++  step,
++  setStep,
++  importer,
++  onClose,
++}: {
++  step: Step;
++  setStep: (s: Step) => void;
++  importer: Importer;
++  onClose: () => void;
++}) {
++  const [reading, setReading] = useState(false);
++  const [forms, setForms] = useState<string[]>(DEFAULT_FORMS);
++
++  const onFile = async (file: File | undefined) => {
++    if (!file) return;
++    setReading(true);
++    try {
++      const rows = await readImportFile(file);
++      const { records, missingColumns } = sheetToRecords(rows);
++      if (missingColumns.length > 0) {
++        toast.error(`The file is missing these columns: ${missingColumns.join(", ")}`);
++        return;
++      }
++      if (records.length === 0) {
++        toast.error("The file has no rows");
++        return;
++      }
++      const available = listDosageForms(records);
++      setForms(DEFAULT_FORMS.filter((f) => available.some((a) => a.form === f)));
++      setStep({ name: "forms", loaded: { fileName: file.name, records, forms: available } });
++    } catch (error) {
++      toast.error(error instanceof Error ? error.message : "The file could not be read");
++    } finally {
++      setReading(false);
++    }
++  };
++
++  if (importer.progress) {
++    const { label, done, total } = importer.progress;
++    return (
++      <div className="space-y-3 py-8 text-center">
++        <Spinner className="mx-auto" />
++        <div className="font-medium">{label}…</div>
++        {total > 0 && <Progress value={(done / total) * 100} className="mx-auto max-w-sm" />}
++        <p className="text-xs text-muted-foreground">Keep this window open until it finishes.</p>
++      </div>
++    );
++  }
++
++  if (step.name === "pick") {
++    return (
++      <label
++        className={cn(
++          "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
++          reading && "pointer-events-none opacity-60",
++        )}
++      >
++        {reading ? <Spinner /> : <Upload className="size-8 text-primary" />}
++        <div className="font-semibold">{reading ? "Reading file…" : "Choose an Excel (.xlsx) or CSV file"}</div>
++        <div className="text-sm text-muted-foreground">Nothing is saved until you review and confirm.</div>
++        <input
++          type="file"
++          accept=".xlsx,.csv"
++          className="sr-only"
++          onChange={(e) => {
++            void onFile(e.target.files?.[0]);
++            e.target.value = "";
++          }}
++        />
++      </label>
++    );
++  }
++
++  if (step.name === "forms") {
++    const { loaded } = step;
++    const startCheck = async () => {
++      try {
++        const review = await importer.check(loaded.records, forms);
++        setStep({ name: "review", loaded, review });
++      } catch (error) {
++        toast.error(errorMessage(error, "Could not compare the file with your inventory"));
++      }
++    };
++    return (
++      <>
++        <div className="min-h-0 space-y-3 overflow-y-auto">
++          <div className="flex items-center gap-2 text-sm">
++            <FileSpreadsheet className="size-4 text-primary" />
++            <span className="font-medium">{loaded.fileName}</span>
++            <span className="text-muted-foreground">· {loaded.records.length.toLocaleString()} rows</span>
++          </div>
++          <div className="text-sm font-semibold">Which drug forms should be imported?</div>
++          <div className="flex flex-wrap gap-2">
++            {loaded.forms.map(({ form, drugs }) => {
++              const on = forms.includes(form);
++              return (
++                <button
++                  key={form}
++                  type="button"
++                  onClick={() => setForms(on ? forms.filter((f) => f !== form) : [...forms, form])}
++                  className={cn(
++                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
++                    on ? "border-primary bg-primary/10 font-semibold" : "hover:bg-muted",
++                  )}
++                >
++                  <Checkbox checked={on} tabIndex={-1} className="pointer-events-none" />
++                  {form}
++                  <span className="text-xs text-muted-foreground">{drugs.toLocaleString()}</span>
++                </button>
++              );
++            })}
++          </div>
++          <p className="text-xs text-muted-foreground">
++            Only drugs with at least one barcode or package form are imported.
++          </p>
++        </div>
++        <DialogFooter>
++          <Button variant="ghost" onClick={() => setStep({ name: "pick" })}>
++            Choose another file
++          </Button>
++          <Button disabled={forms.length === 0} onClick={() => void startCheck()}>
++            Check file
++          </Button>
++        </DialogFooter>
++      </>
++    );
++  }
++
++  if (step.name === "review") {
++    return <ReviewStep review={step.review} importer={importer} onDone={(report) => setStep({ name: "done", report })} />;
++  }
++
++  return <DoneStep report={step.report} onClose={onClose} />;
++}
++
++function ReviewStep({
++  review,
++  importer,
++  onDone,
++}: {
++  review: ImportReview;
++  importer: Importer;
++  onDone: (r: ImportReport) => void;
++}) {
++  const confirm = useConfirm();
++  const [addNew, setAddNew] = useState(true);
++  const [choices, setChoices] = useState<Record<string, Choice>>({});
++  const [remove, setRemove] = useState<Set<Id<"drugs">>>(new Set());
++  const [shownConflicts, setShownConflicts] = useState(PAGE);
++  const [shownMissing, setShownMissing] = useState(PAGE);
++
++  const choiceOf = (drugId: string): Choice => choices[drugId] ?? "keep";
++  const useFileCount = useMemo(
++    () => review.conflicts.filter((c) => (choices[c.drug.drugId] ?? "keep") === "file").length,
++    [review.conflicts, choices],
++  );
++  const setAll = (c: Choice) => setChoices(Object.fromEntries(review.conflicts.map((i) => [i.drug.drugId, c])));
++  const newWithClashes = review.newDrugs.filter((n) => n.check.clashes.length > 0);
++
++  const submit = async () => {
++    const items = [
++      ...(addNew ? review.newDrugs.map((i) => ({ drug: i.drug, action: "create" as const })) : []),
++      ...review.conflicts
++        .filter((i) => choiceOf(i.drug.drugId) === "file")
++        .map((i) => ({ drug: i.drug, action: "update" as const })),
++    ];
++    if (items.length === 0 && remove.size === 0) {
++      toast.info("Nothing to change");
++      return;
++    }
++    if (remove.size > 0) {
++      const ok = await confirm({
++        title: `Delete ${remove.size} drug${remove.size === 1 ? "" : "s"}?`,
++        description: "They are not in the file. Their package forms, stock and pictures are removed. The stock log is kept.",
++        confirmLabel: "Delete and import",
++        destructive: true,
++      });
++      if (!ok) return;
++    }
++    try {
++      onDone(await importer.run(items, [...remove]));
++    } catch (error) {
++      toast.error(errorMessage(error, "The import stopped part way. Check the file again to continue."));
++    }
++  };
++
++  return (
++    <>
++      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
++        <Stat label="New drugs" value={review.newDrugs.length} />
++        <Stat label="Conflicts" value={review.conflicts.length} highlight={review.conflicts.length > 0} />
++        <Stat label="Already the same" value={review.unchanged} />
++        <Stat label="Not in file" value={review.missing.length} highlight={review.missing.length > 0} />
++      </div>
++      <Tabs defaultValue={review.conflicts.length > 0 ? "conflicts" : "new"} className="min-h-0 flex-1">
++        <TabsList className="w-full overflow-x-auto">
++          <TabsTrigger value="new">New ({review.newDrugs.length})</TabsTrigger>
++          <TabsTrigger value="conflicts">Conflicts ({review.conflicts.length})</TabsTrigger>
++          <TabsTrigger value="missing">Not in file ({review.missing.length})</TabsTrigger>
++          <TabsTrigger value="problems">Skipped ({review.problems.length})</TabsTrigger>
++        </TabsList>
++
++        <TabsContent value="new" className="min-h-0 space-y-2 overflow-y-auto pr-1 [max-height:45vh]">
++          <label className="flex cursor-pointer items-center justify-between rounded-lg bg-muted p-3 text-sm">
++            <span>Add all {review.newDrugs.length.toLocaleString()} new drugs (stock starts at 0)</span>
++            <Switch checked={addNew} onCheckedChange={setAddNew} />
++          </label>
++          {newWithClashes.map((i) => (
++            <div key={i.drug.drugId} className="space-y-1 rounded-lg border p-2 text-sm">
++              <div className="font-medium">
++                {i.drug.name} <span className="text-muted-foreground">· {i.drug.drugId}</span>
++              </div>
++              <ClashNote item={i} />
++            </div>
++          ))}
++          {review.withoutPackages > 0 && (
++            <p className="text-xs text-muted-foreground">
++              {review.withoutPackages.toLocaleString()} drugs have no barcode or package form and were left out.
++            </p>
++          )}
++        </TabsContent>
++
++        <TabsContent value="conflicts" className="min-h-0 space-y-2 overflow-y-auto pr-1 [max-height:45vh]">
++          {review.conflicts.length === 0 ? (
++            <Note>No conflicts. Saved drugs already match the file.</Note>
++          ) : (
++            <>
++              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
++                <span>
++                  {useFileCount} of {review.conflicts.length} will use the file
++                </span>
++                <div className="flex gap-2">
++                  <Button size="sm" variant="secondary" onClick={() => setAll("keep")}>
++                    Keep all current
++                  </Button>
++                  <Button size="sm" onClick={() => setAll("file")}>
++                    Use file for all
++                  </Button>
++                </div>
++              </div>
++              <p className="text-xs text-muted-foreground">
++                Stock, pictures and package forms that are only in the app are always kept.
++              </p>
++              {review.conflicts.slice(0, shownConflicts).map((item) => (
++                <ImportConflictCard
++                  key={item.drug.drugId}
++                  item={item}
++                  choice={choiceOf(item.drug.drugId)}
++                  onChoose={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
++                />
++              ))}
++              {shownConflicts < review.conflicts.length && (
++                <Button variant="secondary" className="w-full" onClick={() => setShownConflicts(shownConflicts + PAGE)}>
++                  Show more
++                </Button>
++              )}
++            </>
++          )}
++        </TabsContent>
++
++        <TabsContent value="missing" className="min-h-0 space-y-2 overflow-y-auto pr-1 [max-height:45vh]">
++          {review.missing.length === 0 ? (
++            <Note>Every saved drug is in the file.</Note>
++          ) : (
++            <>
++              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
++                <span>Tick the drugs you want to delete. Unticked drugs are left alone.</span>
++                <Button
++                  size="sm"
++                  variant="secondary"
++                  onClick={() =>
++                    setRemove(remove.size === review.missing.length ? new Set() : new Set(review.missing.map((m) => m._id)))
++                  }
++                >
++                  {remove.size === review.missing.length ? "Untick all" : "Tick all"}
++                </Button>
++              </div>
++              {review.missing.slice(0, shownMissing).map((m) => (
++                <label key={m._id} className="flex cursor-pointer items-center gap-3 rounded-lg border p-2 text-sm hover:bg-muted/50">
++                  <Checkbox
++                    checked={remove.has(m._id)}
++                    onCheckedChange={(on) => {
++                      const next = new Set(remove);
++                      if (on) next.add(m._id);
++                      else next.delete(m._id);
++                      setRemove(next);
++                    }}
++                  />
++                  <div className="min-w-0 flex-1">
++                    <div className="truncate font-medium">{m.name}</div>
++                    <div className="truncate text-xs text-muted-foreground">
++                      {m.drugId} · {m.brandName || "No brand"}
++                    </div>
++                  </div>
++                  <span className="text-xs text-muted-foreground">{m.stock} in stock</span>
++                </label>
++              ))}
++              {shownMissing < review.missing.length && (
++                <Button variant="secondary" className="w-full" onClick={() => setShownMissing(shownMissing + PAGE)}>
++                  Show more
++                </Button>
++              )}
++            </>
++          )}
++        </TabsContent>
++
++        <TabsContent value="problems" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
++          {review.problems.length === 0 ? (
++            <Note>Every row could be read.</Note>
++          ) : (
++            review.problems.map((p, i) => (
++              <div key={`${p.row}-${i}`} className="rounded-md border px-2 py-1.5 text-xs">
++                <span className="font-semibold">Row {p.row}</span> · {p.drugId || "no ID"} {p.name} — {p.message}
++              </div>
++            ))
++          )}
++        </TabsContent>
++      </Tabs>
++      <DialogFooter>
++        <Button onClick={() => void submit()}>Import</Button>
++      </DialogFooter>
++    </>
++  );
++}
++
++function Stat({ label, value, highlight }: { label: string; value: number; highlight?: boolean }) {
++  return (
++    <div className={cn("rounded-lg border p-2 text-center", highlight && "border-chart-3 bg-chart-3/10")}>
++      <div className="text-xl font-bold">{value.toLocaleString()}</div>
++      <div className="text-xs text-muted-foreground">{label}</div>
++    </div>
++  );
++}
++
++function Note({ children }: { children: string }) {
++  return <p className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">{children}</p>;
++}
++
++function DoneStep({ report, onClose }: { report: ImportReport; onClose: () => void }) {
++  const problems = report.failures.length + report.skipped.length;
++  return (
++    <>
++      <div className="min-h-0 space-y-3 overflow-y-auto">
++        <div className="flex items-center gap-2 font-semibold">
++          {problems > 0 ? (
++            <AlertTriangle className="size-5 text-chart-3" />
++          ) : (
++            <CheckCircle2 className="size-5 text-primary" />
++          )}
++          Import finished
++        </div>
++        <div className="grid grid-cols-3 gap-2">
++          <Stat label="Added" value={report.created} />
++          <Stat label="Updated" value={report.updated} />
++          <Stat label="Deleted" value={report.removed} />
++        </div>
++        {report.failures.map((f) => (
++          <div key={`f-${f.drugId}`} className="rounded-md bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
++            {f.drugId} {f.name}: {f.message}
++          </div>
++        ))}
++        {report.skipped.map((s) => (
++          <div key={`s-${s.drugId}`} className="rounded-md bg-muted px-2 py-1.5 text-xs">
++            {s.drugId} {s.name}: barcode {s.barcodes.join(", ")} skipped (already used by another drug)
++          </div>
++        ))}
++      </div>
++      <DialogFooter>
++        <Button onClick={onClose}>Done</Button>
++      </DialogFooter>
++    </>
++  );
++}
+diff --git a/src/pages/inventory/_hooks/use-drug-import.ts b/src/pages/inventory/_hooks/use-drug-import.ts
+new file mode 100644
+index 0000000..76a558e
+--- /dev/null
++++ b/src/pages/inventory/_hooks/use-drug-import.ts
+@@ -0,0 +1,116 @@
++import { useState } from "react";
++import { useConvex, useMutation } from "convex/react";
++import type { FunctionReturnType } from "convex/server";
++import { api } from "@/convex/_generated/api.js";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import {
++  COLUMNS,
++  MAX_IMPORT_BATCH,
++  buildImportDrugs,
++  type ImportDrug,
++  type ImportProblem,
++  type SheetRecord,
++} from "@/convex/lib/drugImport.ts";
++
++export type CheckResult = FunctionReturnType<typeof api.drugImport.checkBatch>[number];
++export type MissingDrug = FunctionReturnType<typeof api.drugImport.listForImport>["page"][number];
++
++export type ReviewItem = { drug: ImportDrug; check: CheckResult };
++
++export type ImportReview = {
++  newDrugs: ReviewItem[];
++  conflicts: ReviewItem[];
++  unchanged: number;
++  missing: MissingDrug[];
++  problems: ImportProblem[];
++  withoutPackages: number;
++};
++
++export type ImportReport = {
++  created: number;
++  updated: number;
++  removed: number;
++  failures: { drugId: string; name: string; message: string }[];
++  skipped: { drugId: string; name: string; barcodes: string[] }[];
++};
++
++function chunks<T>(items: T[], size = MAX_IMPORT_BATCH): T[][] {
++  const out: T[][] = [];
++  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
++  return out;
++}
++
++// Runs the check (compare file with saved inventory) and the final import in small batches
++export function useDrugImport() {
++  const convex = useConvex();
++  const applyBatch = useMutation(api.drugImport.applyBatch);
++  const removeBatch = useMutation(api.drugImport.removeBatch);
++  const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
++
++  const check = async (records: SheetRecord[], forms: string[]): Promise<ImportReview> => {
++    const { drugs, problems, withoutPackages } = buildImportDrugs(records, forms);
++    const batches = chunks(drugs);
++    const review: ImportReview = { newDrugs: [], conflicts: [], unchanged: 0, missing: [], problems, withoutPackages };
++    try {
++      for (let i = 0; i < batches.length; i++) {
++        setProgress({ label: "Comparing with your inventory", done: i, total: batches.length });
++        const results = await convex.query(api.drugImport.checkBatch, { drugs: batches[i] });
++        results.forEach((check, j) => {
++          const item = { drug: batches[i][j], check };
++          if (check.status === "new") review.newDrugs.push(item);
++          else if (check.status === "conflict") review.conflicts.push(item);
++          else review.unchanged += 1;
++        });
++      }
++      // A saved drug counts as "in the file" when its Drug ID appears on any row, whatever the form
++      const fileIds = new Set(records.map((r) => r.values[COLUMNS.drugId]));
++      let cursor: string | null = null;
++      for (;;) {
++        setProgress({ label: "Looking for drugs missing from the file", done: 0, total: 0 });
++        const page: FunctionReturnType<typeof api.drugImport.listForImport> = await convex.query(
++          api.drugImport.listForImport,
++          { paginationOpts: { numItems: 200, cursor } },
++        );
++        review.missing.push(...page.page.filter((d) => !fileIds.has(d.drugId)));
++        if (page.isDone) break;
++        cursor = page.continueCursor;
++      }
++      return review;
++    } finally {
++      setProgress(null);
++    }
++  };
++
++  const run = async (
++    items: { drug: ImportDrug; action: "create" | "update" }[],
++    removeIds: Id<"drugs">[],
++  ): Promise<ImportReport> => {
++    const report: ImportReport = { created: 0, updated: 0, removed: 0, failures: [], skipped: [] };
++    const batches = chunks(items);
++    const removeBatches = chunks(removeIds);
++    const total = batches.length + removeBatches.length;
++    try {
++      for (let i = 0; i < batches.length; i++) {
++        setProgress({ label: "Saving drugs", done: i, total });
++        const res = await applyBatch({ items: batches[i] });
++        const failed = new Set(res.failures.map((f) => f.drugId));
++        for (const it of batches[i]) {
++          if (failed.has(it.drug.drugId)) continue;
++          if (it.action === "create") report.created += 1;
++          else report.updated += 1;
++        }
++        report.failures.push(...res.failures);
++        report.skipped.push(...res.skipped);
++      }
++      for (let i = 0; i < removeBatches.length; i++) {
++        setProgress({ label: "Deleting drugs", done: batches.length + i, total });
++        report.removed += await removeBatch({ ids: removeBatches[i] });
++      }
++      return report;
++    } finally {
++      setProgress(null);
++    }
++  };
++
++  return { check, run, progress };
++}
+diff --git a/src/pages/inventory/_lib/read-import-file.ts b/src/pages/inventory/_lib/read-import-file.ts
+new file mode 100644
+index 0000000..e854d5b
+--- /dev/null
++++ b/src/pages/inventory/_lib/read-import-file.ts
+@@ -0,0 +1,25 @@
++import Papa from "papaparse";
++import readXlsxFile from "read-excel-file/browser";
++
++export const MAX_IMPORT_FILE_BYTES = 20 * 1024 * 1024;
++
++// Reads the first sheet of an .xlsx file, or a .csv file, as rows of cells
++export async function readImportFile(file: File): Promise<unknown[][]> {
++  const name = file.name.toLowerCase();
++  if (file.size > MAX_IMPORT_FILE_BYTES) throw new Error("File is larger than 20 MB");
++  if (name.endsWith(".xlsx")) {
++    const sheets = await readXlsxFile(file);
++    const first = sheets[0];
++    if (!first) throw new Error("The spreadsheet has no sheets");
++    return first.data;
++  }
++  if (name.endsWith(".csv")) {
++    const text = await file.text();
++    const result = Papa.parse<string[]>(text, { skipEmptyLines: true, dynamicTyping: false });
++    // Broken quoting makes row boundaries unreliable, so refuse the file
++    const fatal = result.errors.find((e) => e.type === "Quotes" || e.type === "Delimiter");
++    if (fatal) throw new Error(`The CSV file could not be read: ${fatal.message}`);
++    return result.data;
++  }
++  throw new Error("Choose an Excel (.xlsx) or CSV file");
++}
+diff --git a/src/pages/inventory/page.tsx b/src/pages/inventory/page.tsx
+index 04c5e11..9ff3cee 100644
+--- a/src/pages/inventory/page.tsx
++++ b/src/pages/inventory/page.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from "react";
+ import { usePaginatedQuery, useQuery } from "convex/react";
+-import { PackageSearch, Plus } from "lucide-react";
++import { PackageSearch, Plus, Upload } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+@@ -20,6 +20,7 @@ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import DrugDetailSheet from "./_components/drug-detail-sheet.tsx";
+ import DrugFormDialog from "./_components/drug-form-dialog.tsx";
+ import DrugRow from "./_components/drug-row.tsx";
++import ImportDialog from "./_components/import-dialog.tsx";
+ 
+ function ListSkeleton() {
+   return (
+@@ -105,6 +106,7 @@ export default function InventoryPage() {
+   const [selected, setSelected] = useState<DrugWithDetails | null>(null);
+   const [formOpen, setFormOpen] = useState(false);
+   const [editing, setEditing] = useState<DrugWithDetails | undefined>();
++  const [importOpen, setImportOpen] = useState(false);
+ 
+   // Keep the open detail panel in sync with live data
+   const live = useQuery(api.drugs.get, selected ? { id: selected._id } : "skip");
+@@ -122,9 +124,14 @@ export default function InventoryPage() {
+         description="Every drug, barcode and package form with its stock on hand."
+         actions={
+           isAdmin && (
+-            <Button onClick={openAdd}>
+-              <Plus /> Add drug
+-            </Button>
++            <>
++              <Button variant="secondary" onClick={() => setImportOpen(true)}>
++                <Upload /> Import file
++              </Button>
++              <Button onClick={openAdd}>
++                <Plus /> Add drug
++              </Button>
++            </>
+           )
+         }
+       />
+@@ -146,6 +153,7 @@ export default function InventoryPage() {
+         }}
+       />
+       <DrugFormDialog open={formOpen} onOpenChange={setFormOpen} drug={editing} />
++      {isAdmin && <ImportDialog open={importOpen} onOpenChange={setImportOpen} />}
+     </div>
+   );
+ }

@@ -1,0 +1,640 @@
+diff --git a/convex/lib/canister.ts b/convex/lib/canister.ts
+index 850698f..5e3508d 100644
+--- a/convex/lib/canister.ts
++++ b/convex/lib/canister.ts
+@@ -1,5 +1,6 @@
+ import { ConvexError } from "convex/values";
+ import type { Doc } from "../_generated/dataModel";
++import { isExpiredOnServer } from "./expiry";
+ 
+ // Fraction of a tablet per canister slot, like the canister machine's own list
+ export const CANISTER_TYPES = [1, 0.5, 0.33, 0.25, 0.125] as const;
+@@ -51,6 +52,8 @@ export function cleanCanisterInput(raw: CanisterInput): CanisterInput {
+   if (batch.length > MAX_BATCH_LENGTH)
+     bad(`Batch can be at most ${MAX_BATCH_LENGTH} characters`);
+   if (!isCalendarDay(raw.expiry)) bad("Enter a valid expiry date");
++  if (isExpiredOnServer(raw.expiry, new Date()))
++    bad("This stock has expired. Expired stock cannot go into a canister.");
+   if (
+     !Number.isInteger(raw.quantity) ||
+     raw.quantity < 1 ||
+diff --git a/convex/lib/expiry.test.ts b/convex/lib/expiry.test.ts
+new file mode 100644
+index 0000000..fe88514
+--- /dev/null
++++ b/convex/lib/expiry.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it } from "vitest";
++import {
++  cleanExpiryWarningMonths,
++  expiryStatus,
++  isExpiredOnServer,
++  warningUntil,
++} from "./expiry";
++import { cleanCanisterInput } from "./canister";
++
++describe("expiryStatus", () => {
++  const today = "2026-11-03";
++  it("treats dates before today as expired", () => {
++    expect(expiryStatus("2026-11-02", today, 1)).toBe("expired");
++    expect(expiryStatus("2025-12-04", today, 1)).toBe("expired");
++  });
++  it("lets stock be used on its expiry day, with a warning", () => {
++    expect(expiryStatus("2026-11-03", today, 1)).toBe("soon");
++  });
++  it("warns within the chosen months, inclusive", () => {
++    expect(expiryStatus("2026-12-03", today, 1)).toBe("soon");
++    expect(expiryStatus("2026-12-04", today, 1)).toBe("ok");
++    expect(expiryStatus("2027-02-01", today, 3)).toBe("soon");
++  });
++  it("never warns when set to 0, but still blocks expired", () => {
++    expect(expiryStatus("2026-11-04", today, 0)).toBe("ok");
++    expect(expiryStatus("2026-11-02", today, 0)).toBe("expired");
++  });
++  it("handles month ends", () => {
++    expect(warningUntil("2026-01-31", 1)).toBe("2026-02-28");
++  });
++});
++
++describe("expiry rules on the server", () => {
++  const now = new Date("2026-11-03T02:00:00Z");
++  it("allows a one-day grace for time zones ahead of UTC", () => {
++    expect(isExpiredOnServer("2026-11-02", now)).toBe(false);
++    expect(isExpiredOnServer("2026-11-01", now)).toBe(true);
++  });
++  it("refuses expired canister stock", () => {
++    expect(() =>
++      cleanCanisterInput({
++        batch: "B1",
++        expiry: "2020-01-01",
++        quantity: 10,
++        type: 1,
++      }),
++    ).toThrow(/expired/);
++  });
++  it("validates the warning months", () => {
++    expect(cleanExpiryWarningMonths(0)).toBe(0);
++    expect(cleanExpiryWarningMonths(6)).toBe(6);
++    for (const bad of [-1, 1.5, 25]) {
++      expect(() => cleanExpiryWarningMonths(bad)).toThrow();
++    }
++  });
++});
+diff --git a/convex/lib/expiry.ts b/convex/lib/expiry.ts
+new file mode 100644
+index 0000000..6f215e3
+--- /dev/null
++++ b/convex/lib/expiry.ts
+@@ -0,0 +1,53 @@
++import { addMonths, format, parseISO, subDays } from "date-fns";
++import { ConvexError } from "convex/values";
++
++// Canister stock expiring within this many months asks the user to confirm
++export const DEFAULT_EXPIRY_WARNING_MONTHS = 1;
++export const MAX_EXPIRY_WARNING_MONTHS = 24;
++
++export type ExpiryStatus = "expired" | "soon" | "ok";
++
++const DAY_FORMAT = "yyyy-MM-dd";
++
++// Today's calendar day (YYYY-MM-DD) in the given date's local time zone
++export function toCalendarDay(date: Date): string {
++  return format(date, DAY_FORMAT);
++}
++
++// Last calendar day still counted as "expiring soon"
++export function warningUntil(today: string, months: number): string {
++  return toCalendarDay(addMonths(parseISO(today), months));
++}
++
++// Days are YYYY-MM-DD, so plain string comparison orders them correctly.
++// Stock is still usable on its expiry day itself.
++export function expiryStatus(
++  expiry: string,
++  today: string,
++  months: number,
++): ExpiryStatus {
++  if (expiry < today) return "expired";
++  if (months > 0 && expiry <= warningUntil(today, months)) return "soon";
++  return "ok";
++}
++
++export function cleanExpiryWarningMonths(value: number): number {
++  if (
++    !Number.isInteger(value) ||
++    value < 0 ||
++    value > MAX_EXPIRY_WARNING_MONTHS
++  ) {
++    throw new ConvexError({
++      code: "BAD_REQUEST",
++      message: `Enter a whole number of months from 0 to ${MAX_EXPIRY_WARNING_MONTHS}`,
++    });
++  }
++  return value;
++}
++
++// The server only knows UTC, while the user picks dates in their own time zone
++// (up to a day ahead of UTC), so it allows yesterday's UTC date as well.
++export function isExpiredOnServer(expiry: string, now: Date): boolean {
++  const earliest = subDays(now, 1).toISOString().slice(0, 10);
++  return expiry < earliest;
++}
+diff --git a/convex/schema/settings.ts b/convex/schema/settings.ts
+index 9cf90fa..a1980d5 100644
+--- a/convex/schema/settings.ts
++++ b/convex/schema/settings.ts
+@@ -7,6 +7,8 @@ export const settingsTable = defineTable({
+   largeQuantityThreshold: v.number(),
+   // Canister features shown to everyone (otherwise only to people switched on)
+   canisterForEveryone: v.optional(v.boolean()),
++  // Canister stock expiring within this many months asks the user to confirm (0 = off)
++  expiryWarningMonths: v.optional(v.number()),
+   updatedAt: v.string(),
+   updatedByName: v.string(),
+ });
+diff --git a/convex/settings.test.ts b/convex/settings.test.ts
+index 66a9751..eaebc74 100644
+--- a/convex/settings.test.ts
++++ b/convex/settings.test.ts
+@@ -66,3 +66,26 @@ describe("Large quantity setting", () => {
+     expect(needsLargeQuantityConfirm(85742, 100)).toBe(true);
+   });
+ });
++
++describe("Expiry warning setting", () => {
++  it("defaults to 1 month and only admins can change it", async () => {
++    const { owner, staff } = await setup();
++    expect((await staff.query(api.settings.get, {})).expiryWarningMonths).toBe(
++      1,
++    );
++    await expect(
++      staff.mutation(api.settings.setExpiryWarning, { expiryWarningMonths: 3 }),
++    ).rejects.toThrow(/admins/);
++    await owner.mutation(api.settings.setExpiryWarning, {
++      expiryWarningMonths: 3,
++    });
++    expect((await staff.query(api.settings.get, {})).expiryWarningMonths).toBe(
++      3,
++    );
++    await expect(
++      owner.mutation(api.settings.setExpiryWarning, {
++        expiryWarningMonths: 99,
++      }),
++    ).rejects.toThrow(/months/);
++  });
++});
+diff --git a/convex/settings.ts b/convex/settings.ts
+index 67a9fb3..4ccc45d 100644
+--- a/convex/settings.ts
++++ b/convex/settings.ts
+@@ -2,6 +2,10 @@ import { v } from "convex/values";
+ import { mutation, query } from "./_generated/server";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
+ import { actorOf, logActivity } from "./lib/activity";
++import {
++  cleanExpiryWarningMonths,
++  DEFAULT_EXPIRY_WARNING_MONTHS,
++} from "./lib/expiry";
+ import {
+   cleanLargeQuantityThreshold,
+   DEFAULT_LARGE_QUANTITY_THRESHOLD,
+@@ -17,6 +21,8 @@ export const get = query({
+       largeQuantityThreshold:
+         row?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD,
+       canisterForEveryone: row?.canisterForEveryone ?? false,
++      expiryWarningMonths:
++        row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS,
+       updatedAt: row?.updatedAt ?? null,
+       updatedByName: row?.updatedByName ?? null,
+     };
+@@ -61,6 +67,45 @@ export const setCanisterRollout = mutation({
+   },
+ });
+ 
++// Admin: how many months ahead canister stock counts as "expiring soon"
++export const setExpiryWarning = mutation({
++  args: { expiryWarningMonths: v.number() },
++  handler: async (ctx, args) => {
++    const admin = await requireAdmin(ctx);
++    const months = cleanExpiryWarningMonths(args.expiryWarningMonths);
++    const row = await ctx.db.query("settings").first();
++    const before = row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS;
++    if (row && before === months) return null;
++    const fields = {
++      expiryWarningMonths: months,
++      updatedAt: new Date().toISOString(),
++      updatedByName: admin.name ?? admin.email ?? "Unknown user",
++    };
++    if (row) await ctx.db.patch("settings", row._id, fields);
++    else
++      await ctx.db.insert("settings", {
++        ...fields,
++        largeQuantityThreshold: DEFAULT_LARGE_QUANTITY_THRESHOLD,
++      });
++    if (before !== months) {
++      const label = (m: number) => (m === 0 ? "Off" : `${m} month(s)`);
++      await logActivity(ctx, actorOf(admin), {
++        category: "settings",
++        action: "Changed",
++        summary: "Changed the expiry warning",
++        changes: [
++          {
++            field: "Expiry warning",
++            before: label(before),
++            after: label(months),
++          },
++        ],
++      });
++    }
++    return null;
++  },
++});
++
+ export const update = mutation({
+   args: { largeQuantityThreshold: v.number() },
+   handler: async (ctx, args) => {
+diff --git a/src/components/stock/canister-section.tsx b/src/components/stock/canister-section.tsx
+index dd6f107..2dd2332 100644
+--- a/src/components/stock/canister-section.tsx
++++ b/src/components/stock/canister-section.tsx
+@@ -1,9 +1,11 @@
+ import { useState, type KeyboardEvent } from "react";
+ import { useFormContext, useWatch } from "react-hook-form";
+-import { Camera, Pill } from "lucide-react";
++import { AlertTriangle, Camera, Pill } from "lucide-react";
++import { format, parseISO } from "date-fns";
+ import { toast } from "sonner";
+ import { barcodesMatch } from "@/convex/lib/barcode.ts";
+-import { CANISTER_TYPES } from "@/convex/lib/canister.ts";
++import { CANISTER_TYPES, isCalendarDay } from "@/convex/lib/canister.ts";
++import { expiryStatus, toCalendarDay } from "@/convex/lib/expiry.ts";
+ import { parseGs1 } from "@/convex/lib/gs1.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+@@ -31,20 +33,35 @@ type Props = {
+   autoQty: number;
+   pieceName: string;
+   packageBarcode: string;
++  // Months ahead that count as "expiring soon" (from Settings)
++  warningMonths: number;
++  // Expiry from the scan that found the medicine, if it was already expired
++  scannedExpired: string | null;
+ };
+ 
+ const inputClass = "h-10 bg-background";
+ 
++const showDay = (day: string) => format(parseISO(day), "d MMM yyyy");
++
+ // "Fill canister" switch plus Batch, Expiry, Canister QTY and Canister Type
+ export default function CanisterSection({
+   autoQty,
+   pieceName,
+   packageBarcode,
++  warningMonths,
++  scannedExpired,
+ }: Props) {
+   const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
+   const on = useWatch({ control: form.control, name: "canisterOn" });
++  const expiry = useWatch({ control: form.control, name: "expiry" });
+   // Follows the quantity taken out until the user types their own number
+   const [qtyEdited, setQtyEdited] = useState(false);
++  // Last scanned expiry that was refused because it had passed
++  const [expiredScan, setExpiredScan] = useState(scannedExpired);
++  const today = toCalendarDay(new Date());
++  const status = isCalendarDay(expiry)
++    ? expiryStatus(expiry, today, warningMonths)
++    : null;
+ 
+   return (
+     <div className="space-y-4 rounded-xl border border-dashed border-primary/40 bg-secondary/40 p-3">
+@@ -69,7 +86,22 @@ export default function CanisterSection({
+       />
+       {on && (
+         <>
+-          <Gs1ScanBox packageBarcode={packageBarcode} />
++          <Gs1ScanBox
++            packageBarcode={packageBarcode}
++            onExpired={setExpiredScan}
++          />
++          {expiredScan && !expiry && (
++            <div
++              role="alert"
++              className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive"
++            >
++              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
++              <span>
++                The scanned stock expired on {showDay(expiredScan)}. Expired
++                stock cannot go into a canister. Please use another box.
++              </span>
++            </div>
++          )}
+           <div className="grid gap-3 sm:grid-cols-2">
+             <FormField
+               control={form.control}
+@@ -95,9 +127,21 @@ export default function CanisterSection({
+                 <FormItem>
+                   <FormLabel>Expiry</FormLabel>
+                   <FormControl>
+-                    <Input {...field} type="date" className={inputClass} />
++                    <Input
++                      {...field}
++                      type="date"
++                      min={today}
++                      className={inputClass}
++                    />
+                   </FormControl>
+                   <FormMessage />
++                  {status === "soon" && !form.formState.errors.expiry && (
++                    <p className="flex items-center gap-1.5 text-sm font-medium text-orange-600 dark:text-orange-400">
++                      <AlertTriangle className="size-4 shrink-0" />
++                      Expiring soon (within {warningMonths} month
++                      {warningMonths === 1 ? "" : "s"})
++                    </p>
++                  )}
+                 </FormItem>
+               )}
+             />
+@@ -157,7 +201,13 @@ export default function CanisterSection({
+ }
+ 
+ // Scan the box's GS1 code here to fill Batch and Expiry
+-function Gs1ScanBox({ packageBarcode }: { packageBarcode: string }) {
++function Gs1ScanBox({
++  packageBarcode,
++  onExpired,
++}: {
++  packageBarcode: string;
++  onExpired: (expiry: string | null) => void;
++}) {
+   const form = useFormContext<MovementFormInput, unknown, MovementFormValues>();
+   const [value, setValue] = useState("");
+   const [camera, setCamera] = useState(false);
+@@ -189,6 +239,16 @@ function Gs1ScanBox({ packageBarcode }: { packageBarcode: string }) {
+     }
+     const opts = { shouldDirty: true, shouldValidate: true };
+     if (data.batch) form.setValue("batch", data.batch, opts);
++    if (data.expiry && data.expiry < toCalendarDay(new Date())) {
++      // Expired: keep Expiry empty so this box can't be recorded
++      form.setValue("expiry", "", { shouldDirty: true });
++      onExpired(data.expiry);
++      toast.error("This stock has expired", {
++        description: `Expired on ${showDay(data.expiry)}. It cannot go into a canister.`,
++      });
++      return;
++    }
++    onExpired(null);
+     if (data.expiry) form.setValue("expiry", data.expiry, opts);
+     toast.success("Batch and expiry filled from scan");
+   };
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index afa3b39..aed8c7a 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -5,6 +5,7 @@ import {
+   MAX_BATCH_LENGTH,
+   MAX_CANISTER_QTY,
+ } from "@/convex/lib/canister.ts";
++import { toCalendarDay } from "@/convex/lib/expiry.ts";
+ import {
+   MAX_MOVEMENT_QUANTITY,
+   MAX_NOTES_LENGTH,
+@@ -68,6 +69,12 @@ export function movementFormSchema(kind: MovementKind) {
+           path: ["expiry"],
+           message: "Enter the expiry date",
+         });
++      else if (v.expiry < toCalendarDay(new Date()))
++        ctx.addIssue({
++          code: "custom",
++          path: ["expiry"],
++          message: "Expiry date can't be before today",
++        });
+       // Blank means "work it out from the quantity taken out"
+       const qty = Number(v.canisterQty);
+       if (
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 5133d1c..610b3a6 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -10,6 +10,12 @@ import {
+   canisterQtyFor,
+   DEFAULT_CANISTER_TYPE,
+ } from "@/convex/lib/canister.ts";
++import {
++  DEFAULT_EXPIRY_WARNING_MONTHS,
++  expiryStatus,
++  toCalendarDay,
++} from "@/convex/lib/expiry.ts";
++import { format, parseISO } from "date-fns";
+ import { parseGs1 } from "@/convex/lib/gs1.ts";
+ import {
+   DEFAULT_LARGE_QUANTITY_THRESHOLD,
+@@ -101,6 +107,10 @@ export default function MovementForm({
+   const canisterEnabled = useCanisterEnabled() && kind === "out";
+   // A scanned GS1 code already carries the batch and expiry
+   const scanned = scannedCode ? parseGs1(scannedCode) : null;
++  const today = toCalendarDay(new Date());
++  // Expired stock found by scanning: leave Expiry empty and say why
++  const scannedExpired =
++    scanned?.expiry && scanned.expiry < today ? scanned.expiry : null;
+   const form = useForm<MovementFormInput, unknown, MovementFormValues>({
+     resolver: zodResolver(movementFormSchema(kind)),
+     defaultValues: {
+@@ -109,7 +119,7 @@ export default function MovementForm({
+       reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
+       canisterOn: false,
+       batch: scanned?.batch ?? "",
+-      expiry: scanned?.expiry ?? "",
++      expiry: scannedExpired ? "" : (scanned?.expiry ?? ""),
+       canisterQty: "",
+       canisterType: String(DEFAULT_CANISTER_TYPE),
+     },
+@@ -129,6 +139,8 @@ export default function MovementForm({
+   const settings = useQuery(api.settings.get, {});
+   const threshold =
+     settings?.largeQuantityThreshold ?? DEFAULT_LARGE_QUANTITY_THRESHOLD;
++  const warningMonths =
++    settings?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS;
+ 
+   // A barcode scanned while the cursor is in the quantity box: undo it and explain
+   const guardQuantity = useScanGuard(
+@@ -172,20 +184,36 @@ export default function MovementForm({
+         return;
+       }
+     }
++    const useCanister = canisterEnabled && canisterOn;
++    // Short-dated stock going into a canister: ask before saving
++    if (
++      useCanister &&
++      expiryStatus(expiry, toCalendarDay(new Date()), warningMonths) === "soon"
++    ) {
++      const ok = await confirm({
++        title: "This stock is expiring soon",
++        description: `This stock expires on ${format(parseISO(expiry), "d MMM yyyy")}, within ${warningMonths} month(s). Are you sure you want to put it in the canister?`,
++        confirmLabel: "Yes, continue",
++        cancelLabel: "Go back",
++      });
++      if (!ok) {
++        form.setFocus("expiry");
++        return;
++      }
++    }
+     try {
+       const args = { packageId: pkg._id, ...values };
+-      const canister =
+-        canisterEnabled && canisterOn
+-          ? {
+-              batch,
+-              expiry,
+-              quantity:
+-                canisterQty === ""
+-                  ? canisterQtyFor(values.quantity, pkg)
+-                  : Number(canisterQty),
+-              type: Number(canisterType),
+-            }
+-          : undefined;
++      const canister = useCanister
++        ? {
++            batch,
++            expiry,
++            quantity:
++              canisterQty === ""
++                ? canisterQtyFor(values.quantity, pkg)
++                : Number(canisterQty),
++            type: Number(canisterType),
++          }
++        : undefined;
+       const result =
+         kind === "in"
+           ? await recordIn(args)
+@@ -255,6 +283,8 @@ export default function MovementForm({
+             autoQty={canisterQtyFor(Math.max(1, quantity), pkg)}
+             pieceName={drug.pieceName}
+             packageBarcode={pkg.barcode}
++            warningMonths={warningMonths}
++            scannedExpired={scannedExpired}
+           />
+         )}
+ 
+diff --git a/src/pages/settings/page.tsx b/src/pages/settings/page.tsx
+index fe615b9..362b5ad 100644
+--- a/src/pages/settings/page.tsx
++++ b/src/pages/settings/page.tsx
+@@ -2,9 +2,10 @@ import { useState } from "react";
+ import { useMutation, useQuery } from "convex/react";
+ import { Navigate } from "react-router-dom";
+ import { format } from "date-fns";
+-import { Pill, ShieldAlert } from "lucide-react";
++import { CalendarClock, Pill, ShieldAlert } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
++import { MAX_EXPIRY_WARNING_MONTHS } from "@/convex/lib/expiry.ts";
+ import { MAX_MOVEMENT_QUANTITY } from "@/convex/lib/stock.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+@@ -28,12 +29,106 @@ export default function SettingsPage() {
+       />
+       <div className="space-y-6">
+         <LargeQuantitySetting />
++        <ExpiryWarningSetting />
+         <CanisterRolloutSetting />
+       </div>
+     </div>
+   );
+ }
+ 
++function ExpiryWarningSetting() {
++  const settings = useQuery(api.settings.get, {});
++  if (settings === undefined)
++    return <Skeleton className="h-40 w-full rounded-xl" />;
++  return (
++    <ExpiryWarningForm
++      key={settings.expiryWarningMonths}
++      months={settings.expiryWarningMonths}
++    />
++  );
++}
++
++function ExpiryWarningForm({ months }: { months: number }) {
++  const save = useMutation(api.settings.setExpiryWarning);
++  const [value, setValue] = useState(String(months));
++  const [saving, setSaving] = useState(false);
++  const n = Number(value);
++  const valid =
++    value !== "" &&
++    Number.isInteger(n) &&
++    n >= 0 &&
++    n <= MAX_EXPIRY_WARNING_MONTHS;
++
++  const handleSave = async () => {
++    setSaving(true);
++    try {
++      await save({ expiryWarningMonths: n });
++      toast.success(
++        n === 0
++          ? "Expiry warning turned off"
++          : `Expiry warning set to ${n} month(s)`,
++      );
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not save setting"));
++    } finally {
++      setSaving(false);
++    }
++  };
++
++  return (
++    <section className="space-y-4 rounded-xl border bg-card p-5">
++      <div className="flex items-start gap-3">
++        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-foreground">
++          <CalendarClock className="size-5" />
++        </div>
++        <div>
++          <h2 className="font-bold">Expiry warning</h2>
++          <p className="text-sm text-muted-foreground">
++            When filling a canister, stock expiring within this many months
++            shows a warning and asks staff to confirm. Expired stock is always
++            blocked. Set to 0 to turn the warning off.
++          </p>
++        </div>
++      </div>
++      <form
++        className="flex flex-wrap items-end gap-3"
++        onSubmit={(e) => {
++          e.preventDefault();
++          if (valid && n !== months) void handleSave();
++        }}
++      >
++        <div className="space-y-1.5">
++          <Label htmlFor="expiry-months">
++            Warn if expiring within (months)
++          </Label>
++          <Input
++            id="expiry-months"
++            inputMode="numeric"
++            value={value}
++            onChange={(e) =>
++              setValue(e.target.value.replace(/\D/g, "").slice(0, 2))
++            }
++            className="h-11 w-40 text-lg font-bold"
++          />
++        </div>
++        <Button
++          type="submit"
++          className="h-11"
++          disabled={!valid || n === months || saving}
++        >
++          {saving && <Spinner />}
++          Save
++        </Button>
++      </form>
++      {!valid && (
++        <p className="text-sm text-destructive">
++          Enter a whole number from 0 to {MAX_EXPIRY_WARNING_MONTHS}
++        </p>
++      )}
++    </section>
++  );
++}
++
+ function CanisterRolloutSetting() {
+   const settings = useQuery(api.settings.get, {});
+   const setRollout = useMutation(api.settings.setCanisterRollout);

@@ -1,0 +1,75 @@
+diff --git a/src/components/drug-search-input.tsx b/src/components/drug-search-input.tsx
+index 6d2760e..f8386dc 100644
+--- a/src/components/drug-search-input.tsx
++++ b/src/components/drug-search-input.tsx
+@@ -1,4 +1,4 @@
+-import { useCallback, useState } from "react";
++import { useCallback, useEffect, useState } from "react";
+ import { ScanLine, Search, X } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+@@ -11,6 +11,8 @@ type Props = {
+   onChange: (value: string) => void;
+   placeholder?: string;
+   autoFocus?: boolean;
++  // Change this number to put the cursor back in the box (e.g. after a form is done)
++  focusSignal?: number;
+ };
+ 
+ // Works with keyboards, USB/Bluetooth scanners (they type + Enter) and the camera
+@@ -19,10 +21,27 @@ export default function DrugSearchInput({
+   onChange,
+   placeholder,
+   autoFocus,
++  focusSignal,
+ }: Props) {
+   const [scanning, setScanning] = useState(false);
+   const { inputRef, onKeyDown, setValue, display, warning } =
+     useScannerInput(onChange);
++  // Focus is a DOM side effect, so it has to run after the page has re-rendered.
++  // Tried again shortly after, because a closing confirm dialog hands focus back to its button.
++  useEffect(() => {
++    if (!focusSignal) return;
++    inputRef.current?.focus();
++    const retry = window.setTimeout(() => {
++      const active = document.activeElement;
++      if (!(
++        active instanceof HTMLInputElement ||
++        active instanceof HTMLTextAreaElement
++      )) {
++        inputRef.current?.focus();
++      }
++    }, 300);
++    return () => window.clearTimeout(retry);
++  }, [focusSignal, inputRef]);
+   const handleDetected = useCallback(
+     (code: string) => {
+       setScanning(false);
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index 9be3dc1..9f29855 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -73,10 +73,14 @@ export default function StockDrugFinder({ children }: Props) {
+ 
+   const confirmDiscard = useConfirmDiscard();
+ 
++  // Bumped after each record/cancel so the cursor goes straight back to the search box
++  const [focusSignal, setFocusSignal] = useState(0);
++
+   const reset = () => {
+     setSearch("");
+     setPicked(null);
+     setShowAll(false);
++    setFocusSignal((n) => n + 1);
+   };
+   // Switching drug or package form throws away a half-filled form, so ask first
+   const handleSearch = async (value: string) => {
+@@ -97,7 +101,7 @@ export default function StockDrugFinder({ children }: Props) {
+ 
+   return (
+     <div className="space-y-4">
+-      <DrugSearchInput value={search} onChange={(v) => void handleSearch(v)} autoFocus />
++      <DrugSearchInput value={search} onChange={(v) => void handleSearch(v)} autoFocus focusSignal={focusSignal} />
+       {!term ? (
+         <Hint title="Scan or search a drug" description="Use a scanner, the camera, or type a barcode, name, brand or Drug ID." />
+       ) : results === undefined ? (

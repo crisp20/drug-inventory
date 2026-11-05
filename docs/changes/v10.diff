@@ -1,0 +1,322 @@
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index be7af53..34c62b3 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -33,4 +33,5 @@ export const stockMovementsTable = defineTable({
+   occurredAt: v.string(),
+ })
+   .index("by_kind_and_occurredAt", ["kind", "occurredAt"])
+-  .index("by_drug_and_occurredAt", ["drugRef", "occurredAt"]);
++  .index("by_kind_and_drug_and_occurredAt", ["kind", "drugRef", "occurredAt"])
++  .index("by_kind_and_package_and_occurredAt", ["kind", "packageRef", "occurredAt"]);
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index 5c5cc79..20e9c48 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -114,3 +114,53 @@ describe("Stock Out", () => {
+     await expect(staff.mutation(api.stock.recordOut, { packageId, ...out })).rejects.toThrow(/approval/);
+   });
+ });
++
++describe("Filtered log", () => {
++  it("narrows entries to one drug or one package form", async () => {
++    const { owner, packageId, drugRef } = await setup();
++    // A second package form on the same drug, and a different drug
++    await owner.mutation(api.drugs.update, {
++      id: drugRef,
++      ...drug,
++      packages: [
++        { ...drug.packages[0], packageId },
++        { barcode: "", qtyPerUnit: 20, baseUnit: "Box" as const, unitCount: 1, stock: 5, imageIds: [] },
++      ],
++    });
++    const updated = await owner.query(api.drugs.get, { id: drugRef });
++    const otherPkg = updated!.packages.find((p) => p._id !== packageId)!._id;
++    const otherDrug = await owner.mutation(api.drugs.create, {
++      ...drug,
++      drugId: "IBU200",
++      name: "Ibuprofen",
++      packages: [{ ...drug.packages[0], barcode: "9300000000001" }],
++    });
++    const otherDrugPkg = (await owner.query(api.drugs.get, { id: otherDrug }))!.packages[0]._id;
++
++    await owner.mutation(api.stock.recordIn, { packageId, ...entry });
++    await owner.mutation(api.stock.recordIn, { packageId: otherPkg, ...entry });
++    await owner.mutation(api.stock.recordIn, { packageId: otherDrugPkg, ...entry });
++
++    const page = { numItems: 10, cursor: null };
++    const all = await owner.query(api.stock.listMovements, { kind: "in", paginationOpts: page });
++    expect(all.page).toHaveLength(3);
++    const byDrug = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      filter: { type: "drug", drugId: drugRef },
++      paginationOpts: page,
++    });
++    expect(byDrug.page).toHaveLength(2);
++    const byPkg = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      filter: { type: "package", packageId: otherPkg },
++      paginationOpts: page,
++    });
++    expect(byPkg.page.map((m) => m.packageRef)).toEqual([otherPkg]);
++    const outByDrug = await owner.query(api.stock.listMovements, {
++      kind: "out",
++      filter: { type: "drug", drugId: drugRef },
++      paginationOpts: page,
++    });
++    expect(outByDrug.page).toHaveLength(0);
++  });
++});
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 8d1a6b1..2ebbf91 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -75,15 +75,28 @@ export const recordOut = mutation({
+   },
+ });
+ 
++// Optional narrowing: one drug (all its package forms) or one package form (barcode)
++const movementFilter = v.optional(
++  v.union(
++    v.object({ type: v.literal("drug"), drugId: v.id("drugs") }),
++    v.object({ type: v.literal("package"), packageId: v.id("drugPackages") }),
++  ),
++);
++
+ // Newest first
+ export const listMovements = query({
+-  args: { kind: movementKind, paginationOpts: paginationOptsValidator },
+-  handler: async (ctx, args) => {
++  args: { kind: movementKind, filter: movementFilter, paginationOpts: paginationOptsValidator },
++  handler: async (ctx, { kind, filter, paginationOpts }) => {
+     await requireActiveUser(ctx);
+-    return await ctx.db
+-      .query("stockMovements")
+-      .withIndex("by_kind_and_occurredAt", (q) => q.eq("kind", args.kind))
+-      .order("desc")
+-      .paginate(args.paginationOpts);
++    const table = ctx.db.query("stockMovements");
++    const scoped =
++      filter?.type === "drug"
++        ? table.withIndex("by_kind_and_drug_and_occurredAt", (q) => q.eq("kind", kind).eq("drugRef", filter.drugId))
++        : filter?.type === "package"
++          ? table.withIndex("by_kind_and_package_and_occurredAt", (q) =>
++              q.eq("kind", kind).eq("packageRef", filter.packageId),
++            )
++          : table.withIndex("by_kind_and_occurredAt", (q) => q.eq("kind", kind));
++    return await scoped.order("desc").paginate(paginationOpts);
+   },
+ });
+diff --git a/src/components/stock/movement-log-section.tsx b/src/components/stock/movement-log-section.tsx
+new file mode 100644
+index 0000000..0b2af46
+--- /dev/null
++++ b/src/components/stock/movement-log-section.tsx
+@@ -0,0 +1,71 @@
++import { useState } from "react";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import type { MovementKind } from "@/convex/lib/stock.ts";
++import { Label } from "@/components/ui/label.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
++import MovementLog, { type MovementLogFilter } from "./movement-log.tsx";
++import type { StockSelection } from "./stock-drug-finder.tsx";
++
++type Props = {
++  kind: MovementKind;
++  title: string;
++  selection: StockSelection | null;
++  barcodeMatched: boolean;
++};
++
++// Recent entries; narrowed to the selected drug, or to its package form via the switch
++export default function MovementLogSection({ kind, title, selection, barcodeMatched }: Props) {
++  return (
++    <section className="space-y-3 pt-6">
++      {selection ? (
++        // Re-key so a scanned barcode starts narrowed to that package form each time
++        <FilteredLog
++          key={`${selection.pkg._id}-${barcodeMatched}`}
++          kind={kind}
++          title={title}
++          selection={selection}
++          defaultPackageOnly={barcodeMatched}
++        />
++      ) : (
++        <>
++          <h2 className="text-lg font-bold">{title}</h2>
++          <MovementLog kind={kind} />
++        </>
++      )}
++    </section>
++  );
++}
++
++type FilteredProps = { kind: MovementKind; title: string; selection: StockSelection; defaultPackageOnly: boolean };
++
++function FilteredLog({ kind, title, selection, defaultPackageOnly }: FilteredProps) {
++  const { drug, pkg } = selection;
++  const [packageOnly, setPackageOnly] = useState(defaultPackageOnly);
++  const filter: MovementLogFilter = packageOnly
++    ? { type: "package", packageId: pkg._id }
++    : { type: "drug", drugId: drug._id };
++  const switchId = `package-only-${kind}`;
++
++  return (
++    <>
++      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
++        <div className="min-w-0">
++          <h2 className="text-lg font-bold">{title}</h2>
++          <p className="truncate text-sm text-muted-foreground">
++            {drug.name} · <span className="font-mono">{drug.drugId}</span>
++            {packageOnly && <> · {formatPackageForm(pkg)}</>}
++          </p>
++        </div>
++        {drug.packages.length > 1 && (
++          <div className="flex items-center gap-2">
++            <Switch id={switchId} checked={packageOnly} onCheckedChange={setPackageOnly} className="cursor-pointer" />
++            <Label htmlFor={switchId} className="cursor-pointer text-sm">
++              Only {formatPackageForm(pkg)}
++            </Label>
++          </div>
++        )}
++      </div>
++      <MovementLog kind={kind} filter={filter} />
++    </>
++  );
++}
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index 27024f9..e0bf761 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -4,6 +4,7 @@ import { History } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import type { MovementKind } from "@/convex/lib/stock.ts";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
+ import { Badge } from "@/components/ui/badge.tsx";
+ import { Button } from "@/components/ui/button.tsx";
+ import {
+@@ -17,10 +18,21 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ 
+ const PAGE_SIZE = 25;
+ 
++export type MovementLogFilter =
++  | { type: "drug"; drugId: Id<"drugs"> }
++  | { type: "package"; packageId: Id<"drugPackages"> };
++
++type Props = { kind: MovementKind; filter?: MovementLogFilter };
++
+ // Who recorded what, and when. Newest first.
+-export default function MovementLog({ kind }: { kind: MovementKind }) {
+-  const { results, status, loadMore } = usePaginatedQuery(api.stock.listMovements, { kind }, { initialNumItems: PAGE_SIZE });
++export default function MovementLog({ kind, filter }: Props) {
++  const { results, status, loadMore } = usePaginatedQuery(
++    api.stock.listMovements,
++    { kind, filter },
++    { initialNumItems: PAGE_SIZE },
++  );
+   const sign = kind === "in" ? "+" : "−";
++  const label = kind === "in" ? "Stock In" : "Stock Out";
+ 
+   if (status === "LoadingFirstPage") {
+     return (
+@@ -38,8 +50,12 @@ export default function MovementLog({ kind }: { kind: MovementKind }) {
+           <EmptyMedia variant="icon">
+             <History />
+           </EmptyMedia>
+-          <EmptyTitle>Nothing recorded yet</EmptyTitle>
+-          <EmptyDescription>Each {kind === "in" ? "Stock In" : "Stock Out"} will appear here with who recorded it.</EmptyDescription>
++          <EmptyTitle>{filter ? `No ${label} recorded for this ${filter.type === "drug" ? "drug" : "package form"} yet` : "Nothing recorded yet"}</EmptyTitle>
++          <EmptyDescription>
++            {filter
++              ? "Earlier entries will appear here once they are recorded."
++              : `Each ${label} will appear here with who recorded it.`}
++          </EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+     );
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index 5df4289..9be3dc1 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -19,8 +19,16 @@ import DrugPackagePicker from "./drug-package-picker.tsx";
+ 
+ export type StockSelection = { drug: DrugWithDetails; pkg: DrugPackage };
+ 
++export type FinderState = {
++  // Set once a package form is chosen (by tapping it or by scanning its barcode)
++  selection: StockSelection | null;
++  // True when the selection came from typing or scanning that package form's barcode
++  barcodeMatched: boolean;
++  reset: () => void;
++};
++
+ type Props = {
+-  children: (selection: StockSelection, reset: () => void) => ReactNode;
++  children: (state: FinderState) => ReactNode;
+ };
+ 
+ // Finds the package form whose barcode matches the scanned/typed term exactly
+@@ -61,7 +69,7 @@ export default function StockDrugFinder({ children }: Props) {
+     ? (results ?? []).flatMap((drug) => drug.packages.filter((p) => p._id === picked).map((pkg) => ({ drug, pkg })))[0]
+     : undefined;
+   const match = results && term ? findBarcodeMatch(results, term) : null;
+-  const selection = pickedSelection ?? (showAll ? null : match);
++  const selection: StockSelection | null = pickedSelection ?? (showAll ? null : match);
+ 
+   const confirmDiscard = useConfirmDiscard();
+ 
+@@ -126,7 +134,7 @@ export default function StockDrugFinder({ children }: Props) {
+           )}
+         </div>
+       )}
+-      {selection && children(selection, reset)}
++      {children({ selection, barcodeMatched: !!match && selection?.pkg._id === match.pkg._id, reset })}
+     </div>
+   );
+ }
+diff --git a/src/components/stock/stock-movement-page.tsx b/src/components/stock/stock-movement-page.tsx
+index af1c733..6364b2f 100644
+--- a/src/components/stock/stock-movement-page.tsx
++++ b/src/components/stock/stock-movement-page.tsx
+@@ -1,7 +1,7 @@
+ import type { MovementKind } from "@/convex/lib/stock.ts";
+ import PageHeader from "@/components/page-header.tsx";
+ import MovementForm from "./movement-form.tsx";
+-import MovementLog from "./movement-log.tsx";
++import MovementLogSection from "./movement-log-section.tsx";
+ import StockDrugFinder from "./stock-drug-finder.tsx";
+ 
+ const COPY = {
+@@ -21,19 +21,18 @@ const COPY = {
+ export default function StockMovementPage({ kind }: { kind: MovementKind }) {
+   const copy = COPY[kind];
+   return (
+-    <div className="mx-auto max-w-3xl space-y-10 p-4 md:p-8">
+-      <div>
+-        <PageHeader title={copy.title} description={copy.description} />
+-        <StockDrugFinder key={kind}>
+-          {(selection, reset) => (
+-            <MovementForm key={selection.pkg._id} kind={kind} selection={selection} onDone={reset} />
+-          )}
+-        </StockDrugFinder>
+-      </div>
+-      <section className="space-y-3">
+-        <h2 className="text-lg font-bold">{copy.logTitle}</h2>
+-        <MovementLog kind={kind} />
+-      </section>
++    <div className="mx-auto max-w-3xl p-4 md:p-8">
++      <PageHeader title={copy.title} description={copy.description} />
++      <StockDrugFinder key={kind}>
++        {({ selection, barcodeMatched, reset }) => (
++          <>
++            {selection && (
++              <MovementForm key={selection.pkg._id} kind={kind} selection={selection} onDone={reset} />
++            )}
++            <MovementLogSection kind={kind} title={copy.logTitle} selection={selection} barcodeMatched={barcodeMatched} />
++          </>
++        )}
++      </StockDrugFinder>
+     </div>
+   );
+ }

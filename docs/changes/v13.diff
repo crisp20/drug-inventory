@@ -1,0 +1,25 @@
+diff --git a/index.html b/index.html
+index 1e5f80a..6acc9f9 100644
+--- a/index.html
++++ b/index.html
+@@ -6,7 +6,7 @@
+ 
+     <title>ACP Stock</title>
+     <meta name="description" content="ACP drug inventory with Stock In and Stock Out tracking" />
+-    <link rel="icon" href="https://hercules-cdn.com/file_dkdBmZjvujS4j60tQ7PD7rpl" />
++    <link rel="icon" href="https://hercules-cdn.com/file_1CrjBA7oz550P1YuXycIxorr" />
+ 
+     <!-- Fonts -->
+     <link rel="preconnect" href="https://fonts.googleapis.com" />
+diff --git a/src/components/brand-logo.tsx b/src/components/brand-logo.tsx
+index 12be8b9..7511f9b 100644
+--- a/src/components/brand-logo.tsx
++++ b/src/components/brand-logo.tsx
+@@ -1,6 +1,6 @@
+ import { cn } from "@/lib/utils.ts";
+ 
+-export const LOGO_URL = "https://hercules-cdn.com/file_dkdBmZjvujS4j60tQ7PD7rpl";
++export const LOGO_URL = "https://hercules-cdn.com/file_1CrjBA7oz550P1YuXycIxorr";
+ 
+ export default function BrandLogo({
+   className,

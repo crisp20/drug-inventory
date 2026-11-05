@@ -1,6 +1,7 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import AppLayout from "./components/app-layout.tsx";
 import { DefaultProviders } from "./components/providers/default.tsx";
+import ChangesPage from "./pages/changes/page.tsx";
 import Index from "./pages/Index.tsx";
 import LogPage from "./pages/log/page.tsx";
 import NotFound from "./pages/NotFound.tsx";
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="/users" element={<UsersPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/log" element={<LogPage />} />
+            <Route path="/changes" element={<ChangesPage />} />
           </Route>
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

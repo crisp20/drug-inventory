@@ -1,0 +1,170 @@
+diff --git a/convex/lib/canister.test.ts b/convex/lib/canister.test.ts
+index 095e7d1..e095ce4 100644
+--- a/convex/lib/canister.test.ts
++++ b/convex/lib/canister.test.ts
+@@ -38,6 +38,31 @@ describe("parseGs1", () => {
+   it("returns null for plain barcodes", () => {
+     expect(parseGs1("9312345678907")).toBeNull();
+   });
++
++  // Keyboard-mode scanners often drop the invisible separator after the serial
++  it("reads serial, batch and expiry when the scanner drops separators", () => {
++    expect(
++      parseGs1(
++        "0104897133761542" + "2110304962804256" + "10RC4304" + "17281130",
++      ),
++    ).toEqual({
++      gtin: "04897133761542",
++      batch: "RC4304",
++      expiry: "2028-11-30",
++    });
++  });
++
++  it("still uses separators when they are sent", () => {
++    expect(
++      parseGs1(
++        "0104897133761542\u001d2110304962804256\u001d10RC4304\u001d17281100",
++      ),
++    ).toEqual({
++      gtin: "04897133761542",
++      batch: "RC4304",
++      expiry: "2028-11-30",
++    });
++  });
+ });
+ 
+ describe("gs1DateToDay", () => {
+diff --git a/convex/lib/gs1.ts b/convex/lib/gs1.ts
+index 2cb3801..e25ec58 100644
+--- a/convex/lib/gs1.ts
++++ b/convex/lib/gs1.ts
+@@ -17,18 +17,29 @@ const FIXED: Record<string, number> = {
+   "17": 6,
+   "20": 2,
+ };
+-// Variable-length AIs that can appear on pharma packs (ended by GS or end of code)
+-const VARIABLE_2 = new Set(["10", "21", "22", "30", "37", "90", "91", "92"]);
+-const VARIABLE_3 = new Set([
+-  "240",
+-  "241",
+-  "242",
+-  "710",
+-  "711",
+-  "712",
+-  "713",
+-  "714",
+-]);
++// Variable-length AIs that can appear on pharma packs (ended by GS or end of code),
++// with their maximum data length
++const VARIABLE: Record<string, number> = {
++  "10": 20,
++  "21": 20,
++  "22": 20,
++  "30": 8,
++  "37": 8,
++  "90": 30,
++  "91": 90,
++  "92": 90,
++  "240": 30,
++  "241": 30,
++  "242": 6,
++  "710": 20,
++  "711": 20,
++  "712": 20,
++  "713": 20,
++  "714": 20,
++};
++const DATE_AIS = new Set(["11", "12", "13", "15", "16", "17"]);
++// Fields that usually follow one another on medicine boxes
++const COMMON = new Set(["01", "10", "11", "17", "21"]);
+ 
+ export type Gs1Data = { gtin?: string; batch?: string; expiry?: string };
+ 
+@@ -59,30 +70,67 @@ function parseBracketed(code: string): Record<string, string> {
+   return fields;
+ }
+ 
++function validFixed(ai: string, value: string): boolean {
++  if (value.length !== FIXED[ai] || !/^\d+$/.test(value)) return false;
++  return !DATE_AIS.has(ai) || gs1DateToDay(value) !== undefined;
++}
++
++// Many keyboard-mode scanners drop the invisible GS separator, so a variable
++// field (like the serial number) has no marked end. When that happens we try
++// each possible end and keep the one that lets the rest of the code read cleanly.
+ function parseRaw(code: string): Record<string, string> {
+-  const fields: Record<string, string> = {};
+-  let i = 0;
+-  while (i < code.length) {
+-    if (code[i] === GS) {
+-      i++;
+-      continue;
+-    }
++  const failed = new Set<number>();
++
++  // Try the end of the code and ends followed by a common medicine-box field first
++  const candidateEnds = (start: number, limit: number): number[] => {
++    const all = Array.from({ length: limit - start }, (_, k) => start + 1 + k);
++    const likely = all.filter(
++      (end) => end === code.length || COMMON.has(code.slice(end, end + 2)),
++    );
++    return [...likely, ...all.filter((end) => !likely.includes(end))];
++  };
++
++  const solve = (i: number): Record<string, string> | null => {
++    if (i >= code.length) return {};
++    if (failed.has(i)) return null;
++    if (code[i] === GS) return solve(i + 1);
++    const result = solveField(i);
++    if (!result) failed.add(i);
++    return result;
++  };
++
++  const solveField = (i: number): Record<string, string> | null => {
+     const ai2 = code.slice(i, i + 2);
+-    const ai3 = code.slice(i, i + 3);
+     if (FIXED[ai2] !== undefined) {
+-      fields[ai2] = code.slice(i + 2, i + 2 + FIXED[ai2]);
+-      i += 2 + FIXED[ai2];
+-    } else if (VARIABLE_2.has(ai2) || VARIABLE_3.has(ai3)) {
+-      const ai = VARIABLE_2.has(ai2) ? ai2 : ai3;
+-      const start = i + ai.length;
+-      const end = code.indexOf(GS, start);
+-      fields[ai] = code.slice(start, end === -1 ? undefined : end);
+-      i = end === -1 ? code.length : end + 1;
+-    } else {
+-      break; // Unknown data: stop rather than guess
++      const value = code.slice(i + 2, i + 2 + FIXED[ai2]);
++      if (!validFixed(ai2, value)) return null;
++      const rest = solve(i + 2 + FIXED[ai2]);
++      return rest && { ...rest, [ai2]: value };
+     }
+-  }
+-  return fields;
++    const ai =
++      VARIABLE[ai2] !== undefined
++        ? ai2
++        : VARIABLE[code.slice(i, i + 3)] !== undefined
++          ? code.slice(i, i + 3)
++          : null;
++    if (!ai) return null; // Unknown data
++    const start = i + ai.length;
++    const limit = Math.min(start + VARIABLE[ai], code.length);
++    const gs = code.indexOf(GS, start);
++    // A separator in range marks the end for sure
++    if (gs !== -1 && gs <= limit) {
++      if (gs === start) return null;
++      const rest = solve(gs + 1);
++      return rest && { ...rest, [ai]: code.slice(start, gs) };
++    }
++    for (const end of candidateEnds(start, limit)) {
++      const rest = solve(end);
++      if (rest) return { ...rest, [ai]: code.slice(start, end) };
++    }
++    return null;
++  };
++
++  return solve(0) ?? {};
+ }
+ 
+ export function parseGs1(raw: string): Gs1Data | null {

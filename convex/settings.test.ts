@@ -53,6 +53,31 @@ describe("Large quantity setting", () => {
   });
 });
 
+describe("Idle refresh setting", () => {
+  it("is off by default and only admins can set it", async () => {
+    const { owner, staff } = await setup();
+    expect((await staff.query(api.settings.get, {})).idleTimeoutMinutes).toBe(
+      0,
+    );
+    await expect(
+      staff.mutation(api.settings.setIdleTimeout, { idleTimeoutMinutes: 30 }),
+    ).rejects.toThrow(/admins/);
+    await owner.mutation(api.settings.setIdleTimeout, {
+      idleTimeoutMinutes: 30,
+    });
+    expect((await staff.query(api.settings.get, {})).idleTimeoutMinutes).toBe(
+      30,
+    );
+    for (const bad of [-1, 2.5, 24 * 60 + 1]) {
+      await expect(
+        owner.mutation(api.settings.setIdleTimeout, {
+          idleTimeoutMinutes: bad,
+        }),
+      ).rejects.toThrow(/minutes/);
+    }
+  });
+});
+
 describe("Expiry warning setting", () => {
   it("defaults to 1 month and only admins can change it", async () => {
     const { owner, staff } = await setup();

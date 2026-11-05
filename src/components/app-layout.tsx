@@ -5,6 +5,7 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   Boxes,
+  History,
   ScrollText,
   Settings,
   Users,
@@ -18,6 +19,7 @@ import { useUnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
 import { cn } from "@/lib/utils.ts";
 import { AwaitingApprovalScreen, SignedOutScreen } from "./access-screens.tsx";
 import BrandLogo from "./brand-logo.tsx";
+import RefreshReminder from "./refresh-reminder.tsx";
 import { RootErrorBoundary } from "./root-error-boundary.tsx";
 
 type NavItem = {
@@ -34,6 +36,7 @@ const NAV: NavItem[] = [
   { label: "Users", icon: Users, to: "/users", directorOnly: true },
   { label: "Log", icon: ScrollText, to: "/log", directorOnly: true },
   { label: "Settings", icon: Settings, to: "/settings", directorOnly: true },
+  { label: "Changes", icon: History, to: "/changes", directorOnly: true },
 ];
 
 function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
@@ -105,6 +108,7 @@ function Shell() {
 
   return (
     <div className="flex h-screen bg-background">
+      <RefreshReminder />
       <aside className="hidden w-64 shrink-0 flex-col bg-sidebar p-4 text-sidebar-foreground md:flex">
         <BrandLogo className="px-2 pb-8 pt-2" />
         <nav className="flex flex-1 flex-col gap-1">
