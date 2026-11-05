@@ -4,30 +4,16 @@ import { api } from "./_generated/api";
 import { needsLargeQuantityConfirm } from "./lib/settings";
 import schema from "./schema";
 import { modules } from "./test.setup";
-
-const OWNER = {
-  tokenIdentifier: "iss|owner",
-  email: "hubert@activecaregroup.com",
-  name: "Hubert",
-};
-const STAFF = {
-  tokenIdentifier: "iss|staff",
-  email: "staff@example.com",
-  name: "Sam",
-};
+import { createTestUsers } from "./testUsers";
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const owner = t.withIdentity(OWNER);
-  const staff = t.withIdentity(STAFF);
-  await owner.mutation(api.users.updateCurrentUser, {});
-  await staff.mutation(api.users.updateCurrentUser, {});
+  const { owner, staff } = await createTestUsers(t);
   const [pending] = await owner.query(api.users.listByStatus, {
     status: "pending",
   });
   await owner.mutation(api.users.updateAccess, {
     userId: pending._id,
-    role: "staff",
     status: "active",
   });
   return { owner, staff };
@@ -52,7 +38,7 @@ describe("Large quantity setting", () => {
     const { owner, staff } = await setup();
     await expect(
       staff.mutation(api.settings.update, { largeQuantityThreshold: 50 }),
-    ).rejects.toThrow(/admins/);
+    ).rejects.toThrow(/Director/);
     for (const bad of [0, -5, 2.5, 100_001]) {
       await expect(
         owner.mutation(api.settings.update, { largeQuantityThreshold: bad }),
@@ -75,7 +61,7 @@ describe("Expiry warning setting", () => {
     );
     await expect(
       staff.mutation(api.settings.setExpiryWarning, { expiryWarningMonths: 3 }),
-    ).rejects.toThrow(/admins/);
+    ).rejects.toThrow(/Director/);
     await owner.mutation(api.settings.setExpiryWarning, {
       expiryWarningMonths: 3,
     });

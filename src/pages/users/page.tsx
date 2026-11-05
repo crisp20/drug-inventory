@@ -14,13 +14,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty.tsx";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
@@ -30,7 +23,6 @@ import { useConfirm } from "@/hooks/use-confirm.ts";
 import { errorMessage } from "@/lib/errors.ts";
 
 type Status = "pending" | "active" | "disabled";
-type Role = "admin" | "staff";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -71,14 +63,12 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
 
 function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
   const updateAccess = useMutation(api.users.updateAccess);
-  const role: Role = user.role ?? "staff";
 
-  const save = async (next: { role?: Role; status?: Status }, done: string) => {
+  const save = async (status: Status, done: string) => {
     try {
       await updateAccess({
         userId: user._id,
-        role: next.role ?? role,
-        status: next.status ?? user.status ?? "pending",
+        status,
       });
       toast.success(done);
     } catch (e) {
@@ -99,10 +89,7 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
       destructive: true,
     });
     if (ok)
-      await save(
-        { status: "disabled" },
-        rejecting ? "User rejected" : "Access removed",
-      );
+      await save("disabled", rejecting ? "User rejected" : "Access removed");
   };
 
   return (
@@ -112,7 +99,12 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
           <span className="truncate font-semibold">
             {user.name ?? "Unnamed"}
           </span>
-          {isSelf && <Badge variant="secondary">You</Badge>}
+          {isSelf && <Badge variant="secondary">Director</Badge>}
+          {!isSelf && (
+            <Badge variant="outline">
+              {user.role === "director" ? "Director" : "Staff"}
+            </Badge>
+          )}
         </div>
         <div className="truncate text-sm text-muted-foreground">
           {user.email ?? "No email"}
@@ -121,27 +113,10 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
       {user.status === "active" && <CanisterAccessToggle user={user} />}
       {!isSelf && (
         <div className="flex flex-wrap items-center gap-2">
-          <Select
-            value={role}
-            onValueChange={(v) =>
-              void save(
-                { role: v === "admin" ? "admin" : "staff" },
-                "Role updated",
-              )
-            }
-          >
-            <SelectTrigger className="w-28" aria-label="Role">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="staff">Staff</SelectItem>
-              <SelectItem value="admin">Admin</SelectItem>
-            </SelectContent>
-          </Select>
           {user.status !== "active" && (
             <Button
               size="sm"
-              onClick={() => void save({ status: "active" }, "User approved")}
+              onClick={() => void save("active", "User approved")}
             >
               <UserCheck /> Approve
             </Button>
@@ -205,13 +180,13 @@ export default function UsersPage() {
   const me = useCurrentUser();
   const [tab, setTab] = useState<Status>("pending");
   if (me === undefined) return null;
-  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
+  if (!me || me.role !== "director") return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">
       <PageHeader
         title="Users"
-        description="Approve new staff and choose who can manage inventory."
+        description="Approve new staff and manage access to inventory."
       />
       <Tabs
         value={tab}

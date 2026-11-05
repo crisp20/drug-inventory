@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-
-const OWNER = { tokenIdentifier: "iss|owner", email: "Hubert@ActiveCareGroup.com", name: "Hubert" };
-const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
+import { createTestUsers } from "./testUsers";
 
 const drug = {
   drugId: "PCM500",
@@ -20,17 +18,14 @@ const drug = {
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const owner = t.withIdentity(OWNER);
-  const staff = t.withIdentity(STAFF);
-  await owner.mutation(api.users.updateCurrentUser, {});
-  await staff.mutation(api.users.updateCurrentUser, {});
+  const { owner, staff } = await createTestUsers(t);
   return { t, owner, staff };
 }
 
 describe("access", () => {
-  it("makes the owner an active admin and new users pending", async () => {
+  it("keeps the director active and new users pending", async () => {
     const { owner, staff } = await setup();
-    expect(await owner.query(api.users.getCurrentUser, {})).toMatchObject({ role: "admin", status: "active" });
+    expect(await owner.query(api.users.getCurrentUser, {})).toMatchObject({ role: "director", status: "active" });
     expect(await staff.query(api.users.getCurrentUser, {})).toMatchObject({ role: "staff", status: "pending" });
   });
 
@@ -43,11 +38,11 @@ describe("access", () => {
     const { owner, staff } = await setup();
     await owner.mutation(api.drugs.create, drug);
     const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
-    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
+    await owner.mutation(api.users.updateAccess, { userId: pending._id, status: "active" });
 
     const found = await staff.query(api.drugs.search, { term: "(01)09312345678907" });
     expect(found).toHaveLength(1);
-    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/admins/);
+    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/Director/);
   });
 });
 

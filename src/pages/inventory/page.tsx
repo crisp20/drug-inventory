@@ -101,7 +101,7 @@ function SearchResults({ term, onSelect }: { term: string; onSelect: (d: DrugWit
 
 export default function InventoryPage() {
   const user = useCurrentUser();
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.role === "director";
   const [search, setSearch] = useState("");
   const [term] = useDebounce(search.trim(), 250);
   const [selected, setSelected] = useState<DrugWithDetails | null>(null);

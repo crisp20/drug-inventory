@@ -87,7 +87,7 @@ async function recordMovement(
   return { stockAfter };
 }
 
-// Records stock received. Any approved user (admin or staff) can do this.
+// Records stock received. Any approved user can do this.
 export const recordIn = mutation({
   args: {
     ...movementArgs,

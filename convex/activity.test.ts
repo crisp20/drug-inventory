@@ -3,17 +3,7 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-
-const OWNER = {
-  tokenIdentifier: "iss|owner",
-  email: "hubert@activecaregroup.com",
-  name: "Hubert",
-};
-const STAFF = {
-  tokenIdentifier: "iss|staff",
-  email: "staff@example.com",
-  name: "Sam",
-};
+import { createTestUsers } from "./testUsers";
 
 const drug = {
   drugId: "PCM500",
@@ -37,16 +27,12 @@ const PAGE = { numItems: 100, cursor: null };
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const owner = t.withIdentity(OWNER);
-  const staff = t.withIdentity(STAFF);
-  await owner.mutation(api.users.updateCurrentUser, {});
-  await staff.mutation(api.users.updateCurrentUser, {});
+  const { owner, staff } = await createTestUsers(t);
   const [pending] = await owner.query(api.users.listByStatus, {
     status: "pending",
   });
   await owner.mutation(api.users.updateAccess, {
     userId: pending._id,
-    role: "staff",
     status: "active",
   });
   const drugRef = await owner.mutation(api.drugs.create, drug);

@@ -65,7 +65,7 @@ export default function MovementLog({
   );
   const currentUser = useCurrentUser();
   const isAdmin =
-    currentUser?.role === "admin" && currentUser.status === "active";
+    currentUser?.role === "director" && currentUser.status === "active";
   const [undoing, setUndoing] = useState<Doc<"stockMovements"> | null>(null);
   const mixed = kind === undefined;
   const label = kind ? KIND_LABEL[kind] : "Stock In or Stock Out";

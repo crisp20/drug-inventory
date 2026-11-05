@@ -9,9 +9,11 @@
  */
 
 import type * as activity from "../activity.js";
+import type * as auth from "../auth.js";
 import type * as drugImport from "../drugImport.js";
 import type * as drugPhotos from "../drugPhotos.js";
 import type * as drugs from "../drugs.js";
+import type * as http from "../http.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_activity from "../lib/activity.js";
 import type * as lib_barcode from "../lib/barcode.js";
@@ -31,6 +33,7 @@ import type * as schema_stock from "../schema/stock.js";
 import type * as schema_users from "../schema/users.js";
 import type * as settings from "../settings.js";
 import type * as stock from "../stock.js";
+import type * as testUsers from "../testUsers.js";
 import type * as users from "../users.js";
 
 import type {
@@ -41,9 +44,11 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   activity: typeof activity;
+  auth: typeof auth;
   drugImport: typeof drugImport;
   drugPhotos: typeof drugPhotos;
   drugs: typeof drugs;
+  http: typeof http;
   "lib/access": typeof lib_access;
   "lib/activity": typeof lib_activity;
   "lib/barcode": typeof lib_barcode;
@@ -63,6 +68,7 @@ declare const fullApi: ApiFromModules<{
   "schema/users": typeof schema_users;
   settings: typeof settings;
   stock: typeof stock;
+  testUsers: typeof testUsers;
   users: typeof users;
 }>;
 

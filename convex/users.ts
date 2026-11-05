@@ -1,73 +1,15 @@
 import { ConvexError, v } from "convex/values";
+import { getAuthUserId } from "@convex-dev/auth/server";
 import { mutation, query } from "./_generated/server";
-import {
-  getSignedInUser,
-  isOwnerEmail,
-  requireActiveUser,
-  requireAdmin,
-} from "./lib/access";
+import { requireActiveUser, requireAdmin } from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
-import { userRole, userStatus } from "./schema/users";
-
-export const updateCurrentUser = mutation({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new ConvexError({
-        code: "UNAUTHENTICATED",
-        message: "User not logged in",
-      });
-    }
-    const isOwner = isOwnerEmail(identity.email);
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_token", (q) =>
-        q.eq("tokenIdentifier", identity.tokenIdentifier),
-      )
-      .unique();
-    if (user !== null) {
-      if (isOwner && (user.role !== "admin" || user.status !== "active")) {
-        await ctx.db.patch("users", user._id, {
-          role: "admin",
-          status: "active",
-        });
-      } else if (!user.status || !user.role) {
-        await ctx.db.patch("users", user._id, {
-          role: user.role ?? "staff",
-          status: user.status ?? "pending",
-        });
-      }
-      return user._id;
-    }
-    // New people wait for admin approval, except the owner
-    const userId = await ctx.db.insert("users", {
-      name: identity.name,
-      email: identity.email,
-      tokenIdentifier: identity.tokenIdentifier,
-      role: isOwner ? "admin" : "staff",
-      status: isOwner ? "active" : "pending",
-    });
-    const name = identity.name ?? identity.email ?? "Unknown user";
-    await logActivity(
-      ctx,
-      { userRef: userId, userName: name },
-      {
-        category: "user",
-        action: "Signed up",
-        summary: `${name} signed up${isOwner ? "" : " (waiting for approval)"}`,
-        detail: identity.email,
-      },
-    );
-    return userId;
-  },
-});
+import { userStatus } from "./schema/users";
 
 export const getCurrentUser = query({
   args: {},
   handler: async (ctx) => {
-    return await getSignedInUser(ctx);
+    const userId = await getAuthUserId(ctx);
+    return userId ? await ctx.db.get("users", userId) : null;
   },
 });
 
@@ -102,31 +44,29 @@ export const listPeople = query({
 });
 
 export const updateAccess = mutation({
-  args: { userId: v.id("users"), role: userRole, status: userStatus },
+  args: { userId: v.id("users"), status: userStatus },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx);
+    const director = await requireAdmin(ctx);
     const target = await ctx.db.get("users", args.userId);
     if (!target) {
       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
     }
-    if (isOwnerEmail(target.email)) {
+    if (target.role === "director") {
       throw new ConvexError({
         code: "FORBIDDEN",
-        message: "The owner account cannot be changed",
+        message: "The director account cannot be changed",
       });
     }
-    if (target._id === admin._id) {
+    if (target._id === director._id) {
       throw new ConvexError({
         code: "BAD_REQUEST",
         message: "You cannot change your own access",
       });
     }
     await ctx.db.patch("users", args.userId, {
-      role: args.role,
       status: args.status,
     });
     const changes = [
-      { field: "Role", before: target.role ?? "staff", after: args.role },
       {
         field: "Status",
         before: target.status ?? "pending",
@@ -140,7 +80,7 @@ export const updateAccess = mutation({
         : args.status === "disabled" && target.status !== "disabled"
           ? "Disabled"
           : "Access changed";
-      await logActivity(ctx, actorOf(admin), {
+      await logActivity(ctx, actorOf(director), {
         category: "user",
         action,
         summary: `${action}: ${displayName(target)}`,
