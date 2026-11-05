@@ -9,6 +9,7 @@ import {
   buildImportDrugs,
   type ImportDrug,
   type ImportProblem,
+  type PackageFilter,
   type SheetRecord,
 } from "@/convex/lib/drugImport.ts";
 
@@ -20,10 +21,14 @@ export type ReviewItem = { drug: ImportDrug; check: CheckResult };
 export type ImportReview = {
   newDrugs: ReviewItem[];
   conflicts: ReviewItem[];
+  // Saved drugs whose blank Specifications/Remarks will be filled from the file without asking
+  filled: ReviewItem[];
   unchanged: number;
   missing: MissingDrug[];
   problems: ImportProblem[];
-  withoutPackages: number;
+  // Drugs dropped by the with/without package form choice
+  leftOut: number;
+  filter: PackageFilter;
 };
 
 export type ImportReport = {
@@ -47,10 +52,10 @@ export function useDrugImport() {
   const removeBatch = useMutation(api.drugImport.removeBatch);
   const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
 
-  const check = async (records: SheetRecord[], forms: string[]): Promise<ImportReview> => {
-    const { drugs, problems, withoutPackages } = buildImportDrugs(records, forms);
+  const check = async (records: SheetRecord[], forms: string[], filter: PackageFilter): Promise<ImportReview> => {
+    const { drugs, problems, leftOut } = buildImportDrugs(records, forms, filter);
     const batches = chunks(drugs);
-    const review: ImportReview = { newDrugs: [], conflicts: [], unchanged: 0, missing: [], problems, withoutPackages };
+    const review: ImportReview = { newDrugs: [], conflicts: [], filled: [], unchanged: 0, missing: [], problems, leftOut, filter };
     try {
       for (let i = 0; i < batches.length; i++) {
         setProgress({ label: "Comparing with your inventory", done: i, total: batches.length });
@@ -59,6 +64,7 @@ export function useDrugImport() {
           const item = { drug: batches[i][j], check };
           if (check.status === "new") review.newDrugs.push(item);
           else if (check.status === "conflict") review.conflicts.push(item);
+          else if (check.status === "fill") review.filled.push(item);
           else review.unchanged += 1;
         });
       }
@@ -82,7 +88,7 @@ export function useDrugImport() {
   };
 
   const run = async (
-    items: { drug: ImportDrug; action: "create" | "update" }[],
+    items: { drug: ImportDrug; action: "create" | "update" | "notes" }[],
     removeIds: Id<"drugs">[],
   ): Promise<ImportReport> => {
     const report: ImportReport = { created: 0, updated: 0, removed: 0, failures: [], skipped: [] };

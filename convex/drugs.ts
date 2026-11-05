@@ -15,6 +15,7 @@ import {
   filesOf,
   getPackages,
   matchesAllWords,
+  packagesFirst,
   searchWords,
   withDetails,
   type PackageInput,
@@ -42,6 +43,8 @@ const drugArgs = {
   manufacturer: v.string(),
   pieceName: v.string(),
   imageId: v.optional(v.id("_storage")),
+  specifications: v.optional(v.string()),
+  remarks: v.optional(v.string()),
   packages: v.array(packageArg),
 };
 
@@ -124,7 +127,8 @@ export const search = query({
       textCount++;
     }
 
-    return await Promise.all([...found.values()].map((d) => withDetails(ctx, d)));
+    const detailed = await Promise.all([...found.values()].map((d) => withDetails(ctx, d)));
+    return packagesFirst(detailed);
   },
 });
 
@@ -154,6 +158,8 @@ export const create = mutation({
       manufacturer: input.manufacturer,
       pieceName: input.pieceName,
       imageId: input.imageId,
+      specifications: input.specifications,
+      remarks: input.remarks,
       searchText: buildSearchText(input),
       updatedAt: new Date().toISOString(),
     });
@@ -193,6 +199,9 @@ export const update = mutation({
       manufacturer: input.manufacturer,
       pieceName: input.pieceName,
       imageId: input.imageId,
+      // undefined clears the field
+      specifications: input.specifications,
+      remarks: input.remarks,
       searchText: buildSearchText(input),
       updatedAt: new Date().toISOString(),
     });

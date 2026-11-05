@@ -19,6 +19,152 @@ The database schema lives in `convex/schema.ts` and `convex/schema/*.ts`. Runnin
 
 ---
 
+## v56 · 2026-11-05 · Drugs with package forms first in search
+
+**Summary**
+- In the Inventory, Stock In and Stock Out searches, drugs that have package forms (barcode/packaging) now appear above drugs without them.
+
+**Database**
+- No changes.
+
+**Logic**
+- `drugs.search` sorts its results with `packagesFirst`: drugs with at least one package form come first. The previous order is kept within each group, so an exact barcode or Drug ID match stays at the top of its group.
+
+**Where**
+- `convex/lib/drugs.ts`: new `packagesFirst` helper.
+- `convex/drugs.ts`: search uses it.
+- `convex/lib/drugs.test.ts`: test for the ordering.
+
+---
+
+## v55 · 2026-11-05 · Photos and multi-select on import conflicts
+
+**Summary**
+- Each conflict card in the import review shows the drug's saved photo. Hover to preview, click to enlarge.
+- Each conflict card has a tick box. Tick several (or use the select-all box), then press **Use file for selected** or **Keep selected current**. With nothing ticked, the buttons still read **Use file for all** / **Keep all current**.
+- The bulk bar stays at the top while scrolling through conflicts.
+
+**Database**
+- No changes.
+
+**Logic**
+- `drugImport.checkBatch` also returns `imageUrl` (the saved drug picture) for existing drugs.
+- A bulk choice sets every decision on the ticked drugs (details and each Specifications/Remarks conflict), then clears the ticks.
+
+**Where**
+- `convex/drugImport.ts`: picture URL in the check result.
+- `src/pages/inventory/_components/import-conflict-card.tsx`: photo and tick box.
+- `src/pages/inventory/_components/import-conflicts-bar.tsx`: new bulk bar.
+- `src/pages/inventory/_components/import-dialog.tsx`: selection state and bulk apply.
+
+---
+
+## v54 · 2026-11-05 · Import drugs with or without package forms
+
+**Summary**
+- The import's "Which drugs should be imported?" choice lets you bring in drugs **with** a barcode/package form, **without** one, or **both**. Each option shows how many drugs it covers for the forms you ticked.
+- Drugs imported without a package form are saved with none. They cannot be stocked in or out until a package form is added on the Inventory page.
+
+**Database**
+- No changes. A drug may now have zero rows in `drugPackages` when it came from an import.
+
+**Logic**
+- `buildImportDrugs` takes a filter (`with` | `without` | `both`, default `with`) and reports `leftOut` instead of `withoutPackages`.
+- `cleanDrugInput` accepts `{ allowNoPackages: true }`; only the import uses it. The add/edit drug form still needs at least one package form.
+
+**Where**
+- `convex/lib/drugImport.ts`: package filter and `countPackageKinds`.
+- `convex/lib/drugs.ts`, `convex/drugImport.ts`: allow saving drugs with no package form from the import.
+- `src/pages/inventory/_components/import-forms-step.tsx`: new step with the forms and with/without choice.
+- `src/pages/inventory/_components/import-dialog.tsx`, `_hooks/use-drug-import.ts`: pass the choice through.
+
+---
+
+## v53 · 2026-11-05 · Drag and drop drug photos
+
+**Summary**
+- The Upload drug photos window now accepts a zip file or many photos dragged onto the dashed area. Clicking to choose still works.
+- Both upload windows (inventory file and drug photos) now share the same drag-and-drop area, with the same highlight while dragging.
+
+**Database**
+- No changes.
+
+**Logic**
+- Dropped photos go through the same checks as chosen ones; files that are not usable photos appear in the Skipped list.
+
+**Where**
+- `src/components/file-drop-zone.tsx`: new shared drop/click file picker (replaces `import-drop-zone.tsx`).
+- `src/pages/inventory/_components/photo-import-dialog.tsx`, `import-dialog.tsx`: use the shared picker.
+
+---
+
+## v52 · 2026-11-05 · Drag and drop import files
+
+**Summary**
+- The Import inventory file window now accepts a file dragged onto the dashed area. Clicking to choose a file still works.
+- The area highlights while a file is dragged over it. Files that are not .xlsx or .csv are rejected with a message.
+
+**Database**
+- No changes.
+
+**Logic**
+- Only the first dropped file is used; dropping several shows a note.
+
+**Where**
+- `src/pages/inventory/_components/import-drop-zone.tsx`: new drop/click file picker.
+- `src/pages/inventory/_components/import-dialog.tsx`: uses the new picker.
+
+---
+
+## v51 · 2026-11-05 · Specifications and Remarks
+
+**Summary**
+- Drugs have two new free-text fields, **Specifications** and **Remarks**, on the add/edit drug form.
+- Both show in full on the drug cards in Inventory, Stock In and Stock Out search results, and in the drug detail panel. Search does not look inside them.
+- Inventory import reads them automatically (headers like Specifications/Specification/Specs/Spec and Remarks/Remark/Notes/Note/Comments).
+- When the app has no text saved, the file's text is filled in without asking. When saved text differs (including a blank cell in the file), it is listed as a conflict with its own **Keep current / Use file** choice, separate from the other drug details.
+
+**Database**
+- `drugs`: new optional fields `specifications` and `remarks` (`v.optional(v.string())`). No migration needed; blank text is stored as missing.
+
+**Logic**
+- Text is trimmed and limited to 2000 characters.
+- Import has a new `notes` action that only updates Specifications/Remarks. Values left out of an import item keep the saved text.
+- If the file has no such column, saved text is never touched.
+- Changes to both fields appear in the activity log.
+
+**Where**
+- `convex/schema/drugs.ts`: new fields.
+- `convex/lib/drugs.ts`, `convex/drugs.ts`: validation and saving from the form.
+- `convex/lib/drugImport.ts`, `convex/drugImport.ts`: reading columns, comparing notes, notes-only updates.
+- `src/pages/inventory/_lib/import-choices.ts`, `_components/import-conflict-card.tsx`, `_components/import-dialog.tsx`: per-field choices in the import review.
+- `src/components/drug-notes.tsx`: shared display used on drug cards and the detail panel.
+
+<!-- files:v51 -->
+<details><summary>All files changed (18) · code: docs/changes/v51.diff</summary>
+
+- `convex/drugImport.test.ts` +23 -0
+- `convex/drugImport.ts` +44 -8
+- `convex/drugs.ts` +7 -0
+- `convex/lib/activity.ts` +7 -4
+- `convex/lib/drugImport.test.ts` +30 -0
+- `convex/lib/drugImport.ts` +55 -1
+- `convex/lib/drugs.ts` +14 -0
+- `convex/schema/drugs.ts` +3 -0
+- `src/components/stock/drug-package-picker.tsx` +2 -0
+- `src/pages/inventory/_components/drug-detail-sheet.tsx` +11 -1
+- `src/pages/inventory/_components/drug-form-dialog.tsx` +33 -1
+- `src/pages/inventory/_components/drug-row.tsx` +2 -0
+- `src/pages/inventory/_components/import-conflict-card.tsx` +106 -47
+- `src/pages/inventory/_components/import-dialog.tsx` +30 -13
+- `src/pages/inventory/_hooks/use-drug-import.ts` +5 -2
+- `src/pages/inventory/_lib/drug-form-schema.ts` +2 -0
+- `src/components/drug-notes.tsx` (new) +22 -0
+- `src/pages/inventory/_lib/import-choices.ts` (new) +43 -0
+
+</details>
+<!-- /files -->
+
 ## v50 · 2026-11-05 · Refresh reminder, idle setting and change log
 
 **Summary**

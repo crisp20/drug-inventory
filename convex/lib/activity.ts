@@ -72,7 +72,7 @@ export async function logActivity(ctx: MutationCtx, actor: Actor, e: Entry) {
 
 type DrugFields = Pick<
   Doc<"drugs">,
-  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName"
+  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName" | "specifications" | "remarks"
 >;
 
 const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
@@ -81,6 +81,8 @@ const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
   ["brandName", "Brand"],
   ["manufacturer", "Manufacturer"],
   ["pieceName", "Piece name"],
+  ["specifications", "Specifications"],
+  ["remarks", "Remarks"],
 ];
 
 // Fields that differ; `before` null means a new medicine (every filled field)
@@ -90,9 +92,10 @@ export function diffDrugFields(
 ): Change[] {
   const changes: Change[] = [];
   for (const [key, label] of DRUG_FIELDS) {
-    const old = before ? before[key] : "";
-    if (old !== after[key]) {
-      changes.push({ field: label, before: old, after: after[key] });
+    const old = (before ? before[key] : "") ?? "";
+    const now = after[key] ?? "";
+    if (old !== now) {
+      changes.push({ field: label, before: old, after: now });
     }
   }
   return changes;

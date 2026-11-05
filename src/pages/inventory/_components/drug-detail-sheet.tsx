@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "convex/react";
-import { Barcode, ChevronRight, Factory, History, Pencil, Trash2 } from "lucide-react";
+import { Barcode, ChevronRight, Factory, History, NotebookText, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
@@ -23,6 +23,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet.tsx";
 import DrugImage from "@/components/drug-image.tsx";
+import DrugNotes from "@/components/drug-notes.tsx";
 import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
 import PackageHistoryDialog from "./package-history-dialog.tsx";
 import { errorMessage } from "@/lib/errors.ts";
@@ -119,6 +120,15 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
                     <Factory className="size-4" /> Manufacturer
                   </h3>
                   <p className="whitespace-pre-line text-sm text-muted-foreground">{drug.manufacturer}</p>
+                </section>
+              )}
+
+              {(drug.specifications || drug.remarks) && (
+                <section className="space-y-2">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold">
+                    <NotebookText className="size-4" /> Specifications and remarks
+                  </h3>
+                  <DrugNotes specifications={drug.specifications} remarks={drug.remarks} className="text-sm" />
                 </section>
               )}
 

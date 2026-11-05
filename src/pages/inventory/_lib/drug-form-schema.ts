@@ -23,6 +23,8 @@ export const drugFormSchema = z.object({
   brandName: z.string().trim(),
   manufacturer: z.string().trim(),
   pieceName: z.string().trim().min(1, "Choose what the pieces are called"),
+  specifications: z.string().trim().max(2000, "Keep it under 2000 characters"),
+  remarks: z.string().trim().max(2000, "Keep it under 2000 characters"),
   packages: z.array(packageSchema).min(1, "Add at least one package form"),
 });
 

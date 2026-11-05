@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildImportDrugs, diffDrug, listDosageForms, sheetToRecords, toBaseUnit } from "./drugImport";
+import { buildImportDrugs, countPackageKinds, diffDrug, listDosageForms, sheetToRecords, toBaseUnit } from "./drugImport";
 
 const HEADER = ["drugid", "printoutName", "brandName", "Manufacturer", "DosageForm", "drugPackageId", "drugId", "barcode", "form", "per", "amount"];
 
@@ -28,7 +28,7 @@ describe("buildImportDrugs", () => {
   ]);
 
   it("keeps chosen forms, drugs with package forms, and collapses GS1 duplicates", () => {
-    const { drugs, withoutPackages, problems } = buildImportDrugs(rows, ["TABLET", "CAPSULE"]);
+    const { drugs, leftOut, problems } = buildImportDrugs(rows, ["TABLET", "CAPSULE"]);
     expect(drugs.map((d) => d.drugId)).toEqual(["32"]);
     expect(drugs[0].packages).toEqual([
       { barcode: "", qtyPerUnit: 20, baseUnit: "Strip", unitCount: 2 },
@@ -36,8 +36,19 @@ describe("buildImportDrugs", () => {
     ]);
     expect(drugs[0].pieceName).toBe("TABLET");
     // "Vit K4" has no package form; "Odd Cap" has an unreadable one
-    expect(withoutPackages).toBe(2);
+    expect(leftOut).toBe(2);
     expect(problems.map((p) => p.drugId)).toEqual(["3"]);
+  });
+
+  it("can import only drugs without package forms, or both kinds", () => {
+    const without = buildImportDrugs(rows, ["TABLET", "CAPSULE"], "without");
+    expect(without.drugs.map((d) => d.drugId)).toEqual(["2", "3"]);
+    expect(without.drugs.every((d) => d.packages.length === 0)).toBe(true);
+    expect(without.leftOut).toBe(1);
+    const both = buildImportDrugs(rows, ["TABLET", "CAPSULE"], "both");
+    expect(both.drugs.map((d) => d.drugId)).toEqual(["32", "2", "3"]);
+    expect(both.leftOut).toBe(0);
+    expect(countPackageKinds(rows, ["TABLET", "CAPSULE"])).toEqual({ with: 1, without: 2 });
   });
 
   it("blanks the '--' manufacturer placeholder and maps Bot to Bottle", () => {
@@ -78,5 +89,35 @@ describe("diffDrug", () => {
     expect(d.fields).toEqual([{ label: "Brand name", current: "Old", file: "PK-Merz" }]);
     expect(d.changed).toHaveLength(1);
     expect(diffDrug(file, { ...current, packages: [] }).added).toHaveLength(1);
+  });
+
+  it("fills blank notes without asking, asks when saved text differs (including a blank file cell)", () => {
+    const withNotes = { ...file, specifications: "Round white", remarks: "" };
+    const blankApp = diffDrug(withNotes, current);
+    expect(blankApp.notes).toEqual([
+      { key: "specifications", label: "Specifications", current: "", file: "Round white", auto: true },
+    ]);
+    expect(blankApp).toMatchObject({ needsReview: false, hasChanges: true, detailChanges: false });
+
+    const saved = diffDrug(withNotes, { ...current, specifications: "Oval", remarks: "Fridge" });
+    expect(saved.notes.map((n) => [n.key, n.auto])).toEqual([["specifications", false], ["remarks", false]]);
+    expect(saved.needsReview).toBe(true);
+  });
+
+  it("ignores notes when the file has no such columns", () => {
+    expect(diffDrug(file, { ...current, remarks: "Fridge" }).hasChanges).toBe(false);
+  });
+});
+
+describe("note columns", () => {
+  it("accepts header variations and takes the first non-blank value per drug", () => {
+    const { records } = sheetToRecords([
+      [...HEADER, "Spec", "Notes"],
+      ["32", "A", "B", "M", "TABLET", "1", "32", "111", "Box", 1, 1, "", "Keep dry"],
+      ["32", "A", "B", "M", "TABLET", "2", "32", "222", "Box", 2, 1, "Scored", ""],
+    ]);
+    const [drug] = buildImportDrugs(records, ["TABLET"]).drugs;
+    expect(drug).toMatchObject({ specifications: "Scored", remarks: "Keep dry" });
+    expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].remarks).toBeUndefined();
   });
 });

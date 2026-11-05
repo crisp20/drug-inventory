@@ -13,6 +13,7 @@ import {
 import { Progress } from "@/components/ui/progress.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
+import FileDropZone from "@/components/file-drop-zone.tsx";
 import { errorMessage } from "@/lib/errors.ts";
 import { cn } from "@/lib/utils.ts";
 import { readPhotoFiles } from "../_lib/read-photo-files.ts";
@@ -64,9 +65,7 @@ function Steps({
 }) {
   const [reading, setReading] = useState(false);
 
-  const onFiles = async (list: FileList | null) => {
-    const files = list ? [...list] : [];
-    if (files.length === 0) return;
+  const onFiles = async (files: File[]) => {
     setReading(true);
     try {
       const picked = await readPhotoFiles(files);
@@ -99,26 +98,17 @@ function Steps({
 
   if (step.name === "pick") {
     return (
-      <label
-        className={cn(
-          "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
-          reading && "pointer-events-none opacity-60",
-        )}
-      >
-        {reading ? <Spinner /> : <ImageUp className="size-8 text-primary" />}
-        <div className="font-semibold">{reading ? "Reading photos…" : "Choose a zip file or select many photos"}</div>
-        <div className="text-sm text-muted-foreground">JPG, PNG or WebP. Nothing is saved until you confirm.</div>
-        <input
-          type="file"
-          multiple
-          accept=".zip,image/jpeg,image/png,image/webp,image/gif"
-          className="sr-only"
-          onChange={(e) => {
-            void onFiles(e.target.files);
-            e.target.value = "";
-          }}
-        />
-      </label>
+      // No type filter here: readPhotoFiles reports unusable files in the Skipped list
+      <FileDropZone
+        icon={<ImageUp className="size-8 text-primary" />}
+        label="Drag a zip file or photos here, or click to choose"
+        hint="JPG, PNG or WebP. Nothing is saved until you confirm."
+        readingLabel="Reading photos…"
+        reading={reading}
+        accept=".zip,image/jpeg,image/png,image/webp,image/gif"
+        multiple
+        onFiles={(files) => void onFiles(files)}
+      />
     );
   }
 

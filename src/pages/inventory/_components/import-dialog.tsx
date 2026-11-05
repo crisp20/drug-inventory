@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Upload } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Upload } from "lucide-react";
 import type { Id } from "@/convex/_generated/dataModel.d.ts";
-import { listDosageForms, sheetToRecords, type SheetRecord } from "@/convex/lib/drugImport.ts";
+import { listDosageForms, sheetToRecords, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
 import { Button } from "@/components/ui/button.tsx";
 import { Checkbox } from "@/components/ui/checkbox.tsx";
 import {
@@ -22,7 +22,19 @@ import { errorMessage } from "@/lib/errors.ts";
 import { cn } from "@/lib/utils.ts";
 import { readImportFile } from "../_lib/read-import-file.ts";
 import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
-import ImportConflictCard, { ClashNote, type Choice } from "./import-conflict-card.tsx";
+import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
+import ImportFormsStep from "./import-forms-step.tsx";
+import ImportConflictsBar from "./import-conflicts-bar.tsx";
+import FileDropZone from "@/components/file-drop-zone.tsx";
+import {
+  DEFAULT_CHOICES,
+  allChoices,
+  itemFor,
+  usesFile,
+  type Choice,
+  type DrugChoices,
+  type ImportItem,
+} from "../_lib/import-choices.ts";
 
 const DEFAULT_FORMS = ["TABLET", "CAPSULE"];
 const PAGE = 40;
@@ -50,7 +62,7 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
           <DialogTitle>Import inventory file</DialogTitle>
           <DialogDescription>
             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
-            form, per and amount.
+            form, per and amount. Optional: Specifications and Remarks.
           </DialogDescription>
         </DialogHeader>
         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
@@ -73,7 +85,6 @@ function ImportSteps({
   onClose: () => void;
 }) {
   const [reading, setReading] = useState(false);
-  const [forms, setForms] = useState<string[]>(DEFAULT_FORMS);
 
   const onFile = async (file: File | undefined) => {
     if (!file) return;
@@ -90,7 +101,6 @@ function ImportSteps({
         return;
       }
       const available = listDosageForms(records);
-      setForms(DEFAULT_FORMS.filter((f) => available.some((a) => a.form === f)));
       setStep({ name: "forms", loaded: { fileName: file.name, records, forms: available } });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "The file could not be read");
@@ -113,80 +123,39 @@ function ImportSteps({
 
   if (step.name === "pick") {
     return (
-      <label
-        className={cn(
-          "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
-          reading && "pointer-events-none opacity-60",
-        )}
-      >
-        {reading ? <Spinner /> : <Upload className="size-8 text-primary" />}
-        <div className="font-semibold">{reading ? "Reading file…" : "Choose an Excel (.xlsx) or CSV file"}</div>
-        <div className="text-sm text-muted-foreground">Nothing is saved until you review and confirm.</div>
-        <input
-          type="file"
-          accept=".xlsx,.csv"
-          className="sr-only"
-          onChange={(e) => {
-            void onFile(e.target.files?.[0]);
-            e.target.value = "";
-          }}
-        />
-      </label>
+      <FileDropZone
+        icon={<Upload className="size-8 text-primary" />}
+        label="Drag a file here, or click to choose"
+        hint="Excel (.xlsx) or CSV. Nothing is saved until you review and confirm."
+        readingLabel="Reading file…"
+        reading={reading}
+        accept=".xlsx,.csv"
+        isAccepted={(f) => /\.(xlsx|csv)$/i.test(f.name)}
+        rejectMessage="Please use an Excel (.xlsx) or CSV file"
+        onFiles={(files) => void onFile(files[0])}
+      />
     );
   }
 
   if (step.name === "forms") {
     const { loaded } = step;
-    const startCheck = async () => {
+    const startCheck = async (forms: string[], filter: PackageFilter) => {
       try {
-        const review = await importer.check(loaded.records, forms);
+        const review = await importer.check(loaded.records, forms, filter);
         setStep({ name: "review", loaded, review });
       } catch (error) {
         toast.error(errorMessage(error, "Could not compare the file with your inventory"));
       }
     };
     return (
-      <>
-        <div className="min-h-0 space-y-3 overflow-y-auto">
-          <div className="flex items-center gap-2 text-sm">
-            <FileSpreadsheet className="size-4 text-primary" />
-            <span className="font-medium">{loaded.fileName}</span>
-            <span className="text-muted-foreground">· {loaded.records.length.toLocaleString()} rows</span>
-          </div>
-          <div className="text-sm font-semibold">Which drug forms should be imported?</div>
-          <div className="flex flex-wrap gap-2">
-            {loaded.forms.map(({ form, drugs }) => {
-              const on = forms.includes(form);
-              return (
-                <button
-                  key={form}
-                  type="button"
-                  onClick={() => setForms(on ? forms.filter((f) => f !== form) : [...forms, form])}
-                  className={cn(
-                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
-                    on ? "border-primary bg-primary/10 font-semibold" : "hover:bg-muted",
-                  )}
-                >
-                  <Checkbox checked={on} tabIndex={-1} className="pointer-events-none" />
-                  {form}
-                  <span className="text-xs text-muted-foreground">{drugs.toLocaleString()}</span>
-                </button>
-              );
-            })}
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Only drugs with at least one barcode or package form are imported.
-          </p>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => setStep({ name: "pick" })}>
-            Choose another file
-          </Button>
-          <Button disabled={forms.length === 0} onClick={() => void startCheck()}>
-            Check file
-          </Button>
-        </DialogFooter>
-      </>
+      <ImportFormsStep
+        fileName={loaded.fileName}
+        records={loaded.records}
+        available={loaded.forms}
+        initialForms={DEFAULT_FORMS.filter((f) => loaded.forms.some((a) => a.form === f))}
+        onBack={() => setStep({ name: "pick" })}
+        onCheck={(forms, filter) => void startCheck(forms, filter)}
+      />
     );
   }
 
@@ -208,25 +177,41 @@ function ReviewStep({
 }) {
   const confirm = useConfirm();
   const [addNew, setAddNew] = useState(true);
-  const [choices, setChoices] = useState<Record<string, Choice>>({});
+  const [choices, setChoices] = useState<Record<string, DrugChoices>>({});
   const [remove, setRemove] = useState<Set<Id<"drugs">>>(new Set());
   const [shownConflicts, setShownConflicts] = useState(PAGE);
   const [shownMissing, setShownMissing] = useState(PAGE);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const choiceOf = (drugId: string): Choice => choices[drugId] ?? "keep";
+  const choicesOf = (drugId: string): DrugChoices => choices[drugId] ?? DEFAULT_CHOICES;
   const useFileCount = useMemo(
-    () => review.conflicts.filter((c) => (choices[c.drug.drugId] ?? "keep") === "file").length,
+    () => review.conflicts.filter((c) => usesFile(c, choices[c.drug.drugId] ?? DEFAULT_CHOICES)).length,
     [review.conflicts, choices],
   );
-  const setAll = (c: Choice) => setChoices(Object.fromEntries(review.conflicts.map((i) => [i.drug.drugId, c])));
+  // Ticked conflicts get the choice; with nothing ticked it applies to every conflict
+  const applyChoice = (c: Choice) => {
+    const targets = selected.size > 0 ? review.conflicts.filter((i) => selected.has(i.drug.drugId)) : review.conflicts;
+    setChoices({ ...choices, ...Object.fromEntries(targets.map((i) => [i.drug.drugId, allChoices(i, c)])) });
+    if (selected.size > 0) {
+      toast.success(`${c === "file" ? "Using the file" : "Keeping current"} for ${targets.length} drug${targets.length === 1 ? "" : "s"}`);
+      setSelected(new Set());
+    }
+  };
+  const toggleSelected = (drugId: string, on: boolean) => {
+    const next = new Set(selected);
+    if (on) next.add(drugId);
+    else next.delete(drugId);
+    setSelected(next);
+  };
   const newWithClashes = review.newDrugs.filter((n) => n.check.clashes.length > 0);
 
   const submit = async () => {
-    const items = [
+    const items: ImportItem[] = [
       ...(addNew ? review.newDrugs.map((i) => ({ drug: i.drug, action: "create" as const })) : []),
-      ...review.conflicts
-        .filter((i) => choiceOf(i.drug.drugId) === "file")
-        .map((i) => ({ drug: i.drug, action: "update" as const })),
+      ...[...review.conflicts, ...review.filled].flatMap((i) => {
+        const it = itemFor(i, choicesOf(i.drug.drugId));
+        return it ? [it] : [];
+      }),
     ];
     if (items.length === 0 && remove.size === 0) {
       toast.info("Nothing to change");
@@ -277,40 +262,44 @@ function ReviewStep({
               <ClashNote item={i} />
             </div>
           ))}
-          {review.withoutPackages > 0 && (
+          {review.leftOut > 0 && (
             <p className="text-xs text-muted-foreground">
-              {review.withoutPackages.toLocaleString()} drugs have no barcode or package form and were left out.
+              {review.leftOut.toLocaleString()} drugs{" "}
+              {review.filter === "with" ? "have no barcode or package form" : "have a barcode or package form"} and were
+              left out.
             </p>
           )}
         </TabsContent>
 
         <TabsContent value="conflicts" className="min-h-0 space-y-2 overflow-y-auto pr-1 [max-height:45vh]">
           {review.conflicts.length === 0 ? (
-            <Note>No conflicts. Saved drugs already match the file.</Note>
+            <Note>
+              {review.filled.length > 0
+                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications or Remarks filled in from the file.`
+                : "No conflicts. Saved drugs already match the file."}
+            </Note>
           ) : (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
-                <span>
-                  {useFileCount} of {review.conflicts.length} will use the file
-                </span>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => setAll("keep")}>
-                    Keep all current
-                  </Button>
-                  <Button size="sm" onClick={() => setAll("file")}>
-                    Use file for all
-                  </Button>
-                </div>
-              </div>
+              <ImportConflictsBar
+                total={review.conflicts.length}
+                selected={selected.size}
+                useFileCount={useFileCount}
+                onSelectAll={(on) => setSelected(on ? new Set(review.conflicts.map((i) => i.drug.drugId)) : new Set())}
+                onApply={applyChoice}
+              />
               <p className="text-xs text-muted-foreground">
                 Stock, pictures and package forms that are only in the app are always kept.
+                {review.filled.length > 0 &&
+                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks that will be filled from the file.`}
               </p>
               {review.conflicts.slice(0, shownConflicts).map((item) => (
                 <ImportConflictCard
                   key={item.drug.drugId}
                   item={item}
-                  choice={choiceOf(item.drug.drugId)}
-                  onChoose={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
+                  choices={choicesOf(item.drug.drugId)}
+                  onChange={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
+                  selected={selected.has(item.drug.drugId)}
+                  onSelectedChange={(on) => toggleSelected(item.drug.drugId, on)}
                 />
               ))}
               {shownConflicts < review.conflicts.length && (

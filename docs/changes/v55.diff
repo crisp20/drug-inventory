@@ -1,0 +1,224 @@
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index 9fba7f3..371e064 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -106,12 +106,16 @@ export const checkBatch = query({
+       args.drugs.map(async (d) => {
+         const existing = await findDrug(ctx, d.drugId);
+         const clashes = await findClashes(ctx, d.packages, existing?._id);
+-        if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null };
+-        const packages = await getPackages(ctx, existing._id);
++        if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null, imageUrl: null };
++        const [packages, imageUrl] = await Promise.all([
++          getPackages(ctx, existing._id),
++          existing.imageId ? ctx.storage.getUrl(existing.imageId) : Promise.resolve(null),
++        ]);
+         const diff = diffDrug(d, toExisting(existing, packages));
+         // conflict: needs a decision. fill: only blank Specifications/Remarks get the file's text.
+         const status: "conflict" | "fill" | "same" = diff.needsReview ? "conflict" : diff.hasChanges ? "fill" : "same";
+-        return { drugId: d.drugId, status, clashes, diff };
++        // Saved picture, shown on the conflict card for easy reference
++        return { drugId: d.drugId, status, clashes, diff, imageUrl };
+       }),
+     );
+   },
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index a9289f5..d894f50 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v54");
++    expect(CHANGE_ENTRIES[0].version).toBe("v55");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index 023050e..135add1 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -1,6 +1,8 @@
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import type { FieldChange, ImportPackage, NoteKey } from "@/convex/lib/drugImport.ts";
+ import { Badge } from "@/components/ui/badge.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
+ import { cn } from "@/lib/utils.ts";
+ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+ import { allChoices, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
+@@ -64,10 +66,14 @@ export default function ImportConflictCard({
+   item,
+   choices,
+   onChange,
++  selected,
++  onSelectedChange,
+ }: {
+   item: ReviewItem;
+   choices: DrugChoices;
+   onChange: (c: DrugChoices) => void;
++  selected: boolean;
++  onSelectedChange: (on: boolean) => void;
+ }) {
+   const diff = item.check.diff;
+   if (!diff) return null;
+@@ -77,12 +83,21 @@ export default function ImportConflictCard({
+   const setNote = (key: NoteKey, c: Choice) => onChange({ ...choices, notes: { ...choices.notes, [key]: c } });
+ 
+   return (
+-    <div className="space-y-3 rounded-xl border bg-card p-3">
++    <div className={cn("space-y-3 rounded-xl border bg-card p-3 transition-colors", selected && "border-primary bg-primary/5")}>
+       <div className="flex flex-wrap items-start justify-between gap-2">
+-        <div className="min-w-0">
+-          <div className="truncate font-semibold">{item.drug.name}</div>
+-          <div className="text-xs text-muted-foreground">
+-            Drug ID {item.drug.drugId} · row {item.drug.row}
++        <div className="flex min-w-0 items-start gap-3">
++          <Checkbox
++            checked={selected}
++            onCheckedChange={(on) => onSelectedChange(on === true)}
++            aria-label={`Select ${item.drug.name}`}
++            className="mt-1"
++          />
++          <ZoomableDrugImage url={item.check.imageUrl} alt={item.drug.name} className="size-16" hoverPreview />
++          <div className="min-w-0">
++            <div className="truncate font-semibold">{item.drug.name}</div>
++            <div className="text-xs text-muted-foreground">
++              Drug ID {item.drug.drugId} · row {item.drug.row}
++            </div>
+           </div>
+         </div>
+         {decisions > 1 && (
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index d0ee370..399e231 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -24,6 +24,7 @@ import { readImportFile } from "../_lib/read-import-file.ts";
+ import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
+ import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
+ import ImportFormsStep from "./import-forms-step.tsx";
++import ImportConflictsBar from "./import-conflicts-bar.tsx";
+ import FileDropZone from "@/components/file-drop-zone.tsx";
+ import {
+   DEFAULT_CHOICES,
+@@ -180,14 +181,28 @@ function ReviewStep({
+   const [remove, setRemove] = useState<Set<Id<"drugs">>>(new Set());
+   const [shownConflicts, setShownConflicts] = useState(PAGE);
+   const [shownMissing, setShownMissing] = useState(PAGE);
++  const [selected, setSelected] = useState<Set<string>>(new Set());
+ 
+   const choicesOf = (drugId: string): DrugChoices => choices[drugId] ?? DEFAULT_CHOICES;
+   const useFileCount = useMemo(
+     () => review.conflicts.filter((c) => usesFile(c, choices[c.drug.drugId] ?? DEFAULT_CHOICES)).length,
+     [review.conflicts, choices],
+   );
+-  const setAll = (c: Choice) =>
+-    setChoices(Object.fromEntries(review.conflicts.map((i) => [i.drug.drugId, allChoices(i, c)])));
++  // Ticked conflicts get the choice; with nothing ticked it applies to every conflict
++  const applyChoice = (c: Choice) => {
++    const targets = selected.size > 0 ? review.conflicts.filter((i) => selected.has(i.drug.drugId)) : review.conflicts;
++    setChoices({ ...choices, ...Object.fromEntries(targets.map((i) => [i.drug.drugId, allChoices(i, c)])) });
++    if (selected.size > 0) {
++      toast.success(`${c === "file" ? "Using the file" : "Keeping current"} for ${targets.length} drug${targets.length === 1 ? "" : "s"}`);
++      setSelected(new Set());
++    }
++  };
++  const toggleSelected = (drugId: string, on: boolean) => {
++    const next = new Set(selected);
++    if (on) next.add(drugId);
++    else next.delete(drugId);
++    setSelected(next);
++  };
+   const newWithClashes = review.newDrugs.filter((n) => n.check.clashes.length > 0);
+ 
+   const submit = async () => {
+@@ -265,19 +280,13 @@ function ReviewStep({
+             </Note>
+           ) : (
+             <>
+-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
+-                <span>
+-                  {useFileCount} of {review.conflicts.length} will use the file
+-                </span>
+-                <div className="flex gap-2">
+-                  <Button size="sm" variant="secondary" onClick={() => setAll("keep")}>
+-                    Keep all current
+-                  </Button>
+-                  <Button size="sm" onClick={() => setAll("file")}>
+-                    Use file for all
+-                  </Button>
+-                </div>
+-              </div>
++              <ImportConflictsBar
++                total={review.conflicts.length}
++                selected={selected.size}
++                useFileCount={useFileCount}
++                onSelectAll={(on) => setSelected(on ? new Set(review.conflicts.map((i) => i.drug.drugId)) : new Set())}
++                onApply={applyChoice}
++              />
+               <p className="text-xs text-muted-foreground">
+                 Stock, pictures and package forms that are only in the app are always kept.
+                 {review.filled.length > 0 &&
+@@ -289,6 +298,8 @@ function ReviewStep({
+                   item={item}
+                   choices={choicesOf(item.drug.drugId)}
+                   onChange={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
++                  selected={selected.has(item.drug.drugId)}
++                  onSelectedChange={(on) => toggleSelected(item.drug.drugId, on)}
+                 />
+               ))}
+               {shownConflicts < review.conflicts.length && (
+
+diff --git a/src/pages/inventory/_components/import-conflicts-bar.tsx b/src/pages/inventory/_components/import-conflicts-bar.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/import-conflicts-bar.tsx
+@@ -0,0 +1,47 @@
++import { Button } from "@/components/ui/button.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import type { Choice } from "../_lib/import-choices.ts";
++
++type Props = {
++  total: number;
++  selected: number;
++  useFileCount: number;
++  onSelectAll: (on: boolean) => void;
++  // Applies to the selected conflicts, or to all of them when none are selected
++  onApply: (c: Choice) => void;
++};
++
++// Bulk actions above the conflict cards: tick cards, then decide for all ticked ones at once
++export default function ImportConflictsBar({ total, selected, useFileCount, onSelectAll, onApply }: Props) {
++  const some = selected > 0;
++  const allTicked = selected === total;
++  return (
++    <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
++      <label className="flex cursor-pointer items-center gap-2">
++        <Checkbox
++          checked={allTicked ? true : some ? "indeterminate" : false}
++          onCheckedChange={() => onSelectAll(!allTicked)}
++          aria-label="Select all conflicts"
++        />
++        <span>
++          {some
++            ? `${selected} selected`
++            : `${useFileCount} of ${total} will use the file`}
++        </span>
++      </label>
++      <div className="flex flex-wrap gap-2">
++        {some && (
++          <Button size="sm" variant="ghost" onClick={() => onSelectAll(false)}>
++            Clear
++          </Button>
++        )}
++        <Button size="sm" variant="secondary" onClick={() => onApply("keep")}>
++          {some ? "Keep selected current" : "Keep all current"}
++        </Button>
++        <Button size="sm" onClick={() => onApply("file")}>
++          {some ? "Use file for selected" : "Use file for all"}
++        </Button>
++      </div>
++    </div>
++  );
++}

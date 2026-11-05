@@ -1,0 +1,74 @@
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index bc1c05f..07bc747 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -15,6 +15,7 @@ import {
+   filesOf,
+   getPackages,
+   matchesAllWords,
++  packagesFirst,
+   searchWords,
+   withDetails,
+   type PackageInput,
+@@ -126,7 +127,8 @@ export const search = query({
+       textCount++;
+     }
+ 
+-    return await Promise.all([...found.values()].map((d) => withDetails(ctx, d)));
++    const detailed = await Promise.all([...found.values()].map((d) => withDetails(ctx, d)));
++    return packagesFirst(detailed);
+   },
+ });
+ 
+diff --git a/convex/lib/drugs.test.ts b/convex/lib/drugs.test.ts
+index 2311e79..69c2b16 100644
+--- a/convex/lib/drugs.test.ts
++++ b/convex/lib/drugs.test.ts
+@@ -1,5 +1,17 @@
+ import { describe, expect, it } from "vitest";
+-import { matchesAllWords, searchWords } from "./drugs";
++import { matchesAllWords, packagesFirst, searchWords } from "./drugs";
++
++describe("packagesFirst", () => {
++  it("moves drugs with package forms up, keeping order within each group", () => {
++    const drugs = [
++      { id: "a", packages: [] },
++      { id: "b", packages: [1] },
++      { id: "c", packages: [] },
++      { id: "d", packages: [1, 2] },
++    ];
++    expect(packagesFirst(drugs).map((d) => d.id)).toEqual(["b", "d", "a", "c"]);
++  });
++});
+ 
+ describe("searchWords", () => {
+   it("splits on spaces and punctuation, lowercased", () => {
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index 0959f71..c149706 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -163,6 +163,11 @@ export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
+   return { ...drug, imageUrl, packages };
+ }
+ 
++// Puts drugs that have package forms first; the original order is kept within each group
++export function packagesFirst<T extends { packages: unknown[] }>(drugs: T[]): T[] {
++  return [...drugs.filter((d) => d.packages.length > 0), ...drugs.filter((d) => d.packages.length === 0)];
++}
++
+ // Removes a drug with its package forms and pictures. The stock log keeps its copied details.
+ export async function deleteDrug(ctx: MutationCtx, drug: Doc<"drugs">) {
+   const packages = await getPackages(ctx, drug._id);
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index d894f50..276aec4 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v55");
++    expect(CHANGE_ENTRIES[0].version).toBe("v56");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,

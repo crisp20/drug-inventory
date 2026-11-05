@@ -16,6 +16,7 @@ import {
   MAX_PACKAGES_PER_DRUG,
   buildSearchText,
   cleanDrugInput,
+  cleanNote,
   deleteDrug,
   getPackages,
   type PackageInput,
@@ -36,9 +37,16 @@ const importDrugArg = v.object({
   manufacturer: v.string(),
   pieceName: v.string(),
   dosageForm: v.string(),
+  // Undefined = leave the saved text alone
+  specifications: v.optional(v.string()),
+  remarks: v.optional(v.string()),
   row: v.number(),
   packages: v.array(importPackageArg),
 });
+
+// create: new drug. update: bring details in line with the file. notes: only Specifications/Remarks.
+const importAction = v.union(v.literal("create"), v.literal("update"), v.literal("notes"));
+type ImportAction = "create" | "update" | "notes";
 
 function assertBatch(size: number) {
   if (size > MAX_IMPORT_BATCH) {
@@ -77,6 +85,8 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
     brandName: drug.brandName,
     manufacturer: drug.manufacturer,
     pieceName: drug.pieceName,
+    specifications: drug.specifications,
+    remarks: drug.remarks,
     packages: packages.map((p) => ({
       barcode: p.barcode,
       qtyPerUnit: p.qtyPerUnit,
@@ -96,15 +106,16 @@ export const checkBatch = query({
       args.drugs.map(async (d) => {
         const existing = await findDrug(ctx, d.drugId);
         const clashes = await findClashes(ctx, d.packages, existing?._id);
-        if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null };
-        const packages = await getPackages(ctx, existing._id);
+        if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null, imageUrl: null };
+        const [packages, imageUrl] = await Promise.all([
+          getPackages(ctx, existing._id),
+          existing.imageId ? ctx.storage.getUrl(existing.imageId) : Promise.resolve(null),
+        ]);
         const diff = diffDrug(d, toExisting(existing, packages));
-        return {
-          drugId: d.drugId,
-          status: diff.hasChanges ? ("conflict" as const) : ("same" as const),
-          clashes,
-          diff,
-        };
+        // conflict: needs a decision. fill: only blank Specifications/Remarks get the file's text.
+        const status: "conflict" | "fill" | "same" = diff.needsReview ? "conflict" : diff.hasChanges ? "fill" : "same";
+        // Saved picture, shown on the conflict card for easy reference
+        return { drugId: d.drugId, status, clashes, diff, imageUrl };
       }),
     );
   },
@@ -141,14 +152,39 @@ function failureMessage(error: unknown): string {
   return "Could not be saved";
 }
 
+// Only Specifications/Remarks from the file (undefined ones are kept). Everything else is untouched.
+async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promise<ApplyResult> {
+  const existing = await findDrug(ctx, d.drugId);
+  if (!existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
+  try {
+    const notes = {
+      specifications: cleanNote(d.specifications ?? existing.specifications, "Specifications"),
+      remarks: cleanNote(d.remarks ?? existing.remarks, "Remarks"),
+    };
+    await ctx.db.patch("drugs", existing._id, { ...notes, updatedAt: new Date().toISOString() });
+    const packages = await getPackages(ctx, existing._id);
+    await logDrugImport(ctx, actor, {
+      drug: existing,
+      before: existing,
+      beforePackages: packages,
+      after: { ...existing, ...notes },
+      afterPackages: packages.map((p) => ({ ...p, packageId: p._id })),
+    });
+    return { failure: null, skippedBarcodes: [] };
+  } catch (error) {
+    return { failure: failureMessage(error), skippedBarcodes: [] };
+  }
+}
+
 // Creates a new drug, or ("update") brings an existing drug in line with the file.
 // Stock, pictures and package forms that only exist in the app are never touched.
 async function applyDrug(
   ctx: MutationCtx,
   d: ImportDrug,
-  action: "create" | "update",
+  action: ImportAction,
   actor: Actor,
 ): Promise<ApplyResult> {
+  if (action === "notes") return await applyNotes(ctx, d, actor);
   const existing = await findDrug(ctx, d.drugId);
   if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
   if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
@@ -185,14 +221,18 @@ async function applyDrug(
       manufacturer: d.manufacturer,
       pieceName: d.pieceName,
       imageId: existing?.imageId,
+      specifications: d.specifications ?? existing?.specifications,
+      remarks: d.remarks ?? existing?.remarks,
       packages: merged,
-    });
+    }, { allowNoPackages: true });
     const fields = {
       drugId: input.drugId,
       name: input.name,
       brandName: input.brandName,
       manufacturer: input.manufacturer,
       pieceName: input.pieceName,
+      specifications: input.specifications,
+      remarks: input.remarks,
       searchText: buildSearchText(input),
       updatedAt: new Date().toISOString(),
     };
@@ -232,7 +272,7 @@ async function applyDrug(
 export const applyBatch = mutation({
   args: {
     items: v.array(
-      v.object({ drug: importDrugArg, action: v.union(v.literal("create"), v.literal("update")) }),
+      v.object({ drug: importDrugArg, action: importAction }),
     ),
   },
   handler: async (ctx, args) => {

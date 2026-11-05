@@ -1,6 +1,7 @@
 import { Barcode, Check } from "lucide-react";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
 import ManufacturerLine from "@/components/manufacturer-line.tsx";
+import DrugNotes from "@/components/drug-notes.tsx";
 import ZoomableDrugImage, {
   type GallerySlide,
 } from "@/components/zoomable-drug-image.tsx";
@@ -46,6 +47,7 @@ export default function DrugPackagePicker({
             <span className="font-mono">{drug.drugId}</span>
           </div>
           <ManufacturerLine manufacturer={drug.manufacturer} className="pt-1" />
+          <DrugNotes specifications={drug.specifications} remarks={drug.remarks} className="pt-1" />
         </div>
       </div>
       <div className="grid gap-2 sm:grid-cols-2">

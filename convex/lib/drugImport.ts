@@ -20,10 +20,21 @@ export type ImportDrug = {
   manufacturer: string;
   pieceName: string;
   dosageForm: string;
+  // Free text from the file. Undefined means "leave the saved text alone"
+  // (column not in the file, or the admin chose to keep the saved text).
+  specifications?: string;
+  remarks?: string;
   // First spreadsheet row of this drug (1 = header row)
   row: number;
   packages: ImportPackage[];
 };
+
+export type NoteKey = "specifications" | "remarks";
+
+export const NOTE_FIELDS: ReadonlyArray<{ key: NoteKey; label: string; aliases: string[] }> = [
+  { key: "specifications", label: "Specifications", aliases: ["specifications", "specification", "specs", "spec"] },
+  { key: "remarks", label: "Remarks", aliases: ["remarks", "remark", "notes", "note", "comments", "comment"] },
+];
 
 export type ImportProblem = { row: number; drugId: string; name: string; message: string };
 
@@ -62,6 +73,11 @@ export function sheetToRecords(rows: unknown[][]): { records: SheetRecord[]; mis
     const key = normalizeHeader(cellText(h));
     if (key && !columnIndex.has(key)) columnIndex.set(key, i);
   });
+  // Optional note columns: accept common header variations, stored under the canonical key
+  for (const note of NOTE_FIELDS) {
+    const found = note.aliases.find((a) => columnIndex.has(a));
+    if (found !== undefined && !columnIndex.has(note.key)) columnIndex.set(note.key, columnIndex.get(found) ?? 0);
+  }
   const missingColumns = REQUIRED.filter((c) => !columnIndex.has(c));
   const records: SheetRecord[] = [];
   body.forEach((cells, i) => {
@@ -117,8 +133,28 @@ function cleanManufacturer(raw: string) {
   return /^-+$/.test(raw) ? "" : raw;
 }
 
-// Groups rows by Drug ID, keeps only the chosen dosage forms and drugs with at least one package form
-export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+// First non-blank value across a drug's rows; "" when the column exists but is empty, undefined when absent
+function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
+  if (!(key in rows[0].values)) return undefined;
+  return rows.map((r) => r.values[key] ?? "").find((v) => v !== "") ?? "";
+}
+
+// Which drugs to import: with at least one barcode/package form, without any, or both
+export type PackageFilter = "with" | "without" | "both";
+
+export const PACKAGE_FILTERS: ReadonlyArray<{ value: PackageFilter; label: string }> = [
+  { value: "with", label: "With barcode or package form" },
+  { value: "without", label: "Without barcode or package form" },
+  { value: "both", label: "Both" },
+];
+
+function keepDrug(filter: PackageFilter, hasPackages: boolean) {
+  return filter === "both" || (filter === "with") === hasPackages;
+}
+
+// Groups rows by Drug ID, keeps only the chosen dosage forms and the chosen package filter.
+// `leftOut` counts drugs dropped by the package filter.
+export function buildImportDrugs(records: SheetRecord[], forms: string[], filter: PackageFilter = "with") {
   const wanted = new Set(forms.map((f) => f.toUpperCase()));
   const problems: ImportProblem[] = [];
   const grouped = new Map<string, SheetRecord[]>();
@@ -135,7 +171,7 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
   }
 
   const drugs: ImportDrug[] = [];
-  let withoutPackages = 0;
+  let leftOut = 0;
   for (const [drugId, rows] of grouped) {
     const first = rows[0];
     const name = first.values[COLUMNS.name];
@@ -170,8 +206,8 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
       }
       packages.set(key, pkg);
     }
-    if (packages.size === 0) {
-      withoutPackages += 1;
+    if (!keepDrug(filter, packages.size > 0)) {
+      leftOut += 1;
       continue;
     }
     drugs.push({
@@ -181,11 +217,20 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
       manufacturer: cleanManufacturer(first.values[COLUMNS.manufacturer]),
       pieceName: dosageFormOf(first) || "PIECE",
       dosageForm: dosageFormOf(first),
+      specifications: noteOf(rows, "specifications"),
+      remarks: noteOf(rows, "remarks"),
       row: first.row,
       packages: [...packages.values()],
     });
   }
-  return { drugs, problems, withoutPackages };
+  return { drugs, problems, leftOut };
+}
+
+// How many drugs in the chosen forms have / lack a package form, for the choice on the import screen
+export function countPackageKinds(records: SheetRecord[], forms: string[]) {
+  const { drugs } = buildImportDrugs(records, forms, "both");
+  const withPackages = drugs.filter((d) => d.packages.length > 0).length;
+  return { with: withPackages, without: drugs.length - withPackages };
 }
 
 export type ExistingDrug = {
@@ -193,6 +238,8 @@ export type ExistingDrug = {
   brandName: string;
   manufacturer: string;
   pieceName: string;
+  specifications?: string;
+  remarks?: string;
   packages: ImportPackage[];
 };
 
@@ -205,11 +252,28 @@ export const DIFF_FIELDS = [
 
 export type FieldChange = { label: string; current: string; file: string };
 
+// A Specifications/Remarks difference. `auto` = nothing saved yet, so the file's text is filled in without asking.
+export type NoteChange = FieldChange & { key: NoteKey; auto: boolean };
+
+function diffNotes(file: ImportDrug, current: ExistingDrug): NoteChange[] {
+  const changes: NoteChange[] = [];
+  for (const { key, label } of NOTE_FIELDS) {
+    const fromFile = file[key];
+    if (fromFile === undefined) continue; // Column not in the file
+    const saved = (current[key] ?? "").trim();
+    const incoming = fromFile.trim();
+    if (saved === incoming) continue;
+    changes.push({ key, label, current: saved, file: incoming, auto: saved === "" });
+  }
+  return changes;
+}
+
 // What "Use file" would change. Package forms only in the app are always kept.
 export function diffDrug(file: ImportDrug, current: ExistingDrug) {
   const fields: FieldChange[] = DIFF_FIELDS.filter(
     (f) => file[f.key].trim() !== current[f.key].trim(),
   ).map((f) => ({ label: f.label, current: current[f.key], file: file[f.key] }));
+  const notes = diffNotes(file, current);
   const byKey = new Map(current.packages.map((p) => [packageMatchKey(p), p]));
   const added: ImportPackage[] = [];
   const changed: { current: ImportPackage; file: ImportPackage }[] = [];
@@ -218,5 +282,16 @@ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
     if (!match) added.push(p);
     else if (!sameForm(match, p)) changed.push({ current: match, file: p });
   }
-  return { fields, added, changed, hasChanges: fields.length + added.length + changed.length > 0 };
+  const detailChanges = fields.length + added.length + changed.length > 0;
+  return {
+    fields,
+    added,
+    changed,
+    notes,
+    // Name/brand/manufacturer/pieces or package forms differ (decided with "Keep current"/"Use file")
+    detailChanges,
+    // Anything the admin must decide on; auto-filled notes need no decision
+    needsReview: detailChanges || notes.some((n) => !n.auto),
+    hasChanges: detailChanges || notes.length > 0,
+  };
 }

@@ -1,4 +1,5 @@
 import ManufacturerLine from "@/components/manufacturer-line.tsx";
+import DrugNotes from "@/components/drug-notes.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
 import DrugImage from "@/components/drug-image.tsx";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
@@ -26,6 +27,7 @@ export default function DrugRow({
           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
         </div>
         <ManufacturerLine manufacturer={drug.manufacturer} />
+        <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
         <div className="flex flex-wrap gap-2">
           {drug.packages.map((p) => (
             <Badge

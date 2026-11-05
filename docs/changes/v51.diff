@@ -1,0 +1,997 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+index 9baf1b9..9ba096e 100644
+--- a/convex/drugImport.test.ts
++++ b/convex/drugImport.test.ts
+@@ -70,6 +70,29 @@ describe("drug import", () => {
+     expect(updated.packages[0].stock).toBe(7);
+   });
+ 
++  it("notes-only update changes Specifications/Remarks and nothing else", async () => {
++    const { owner } = await setup();
++    await owner.mutation(api.drugImport.applyBatch, {
++      items: [{ drug: { ...fileDrug, remarks: "Old remark" }, action: "create" }],
++    });
++    const fromFile = { ...fileDrug, brandName: "Changed", specifications: "Scored", remarks: "" };
++    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [fromFile] });
++    expect(check.status).toBe("conflict");
++    expect(check.diff?.notes.map((n) => [n.key, n.auto])).toEqual([["specifications", true], ["remarks", false]]);
++
++    // Keep the saved remark and brand; fill Specifications
++    await owner.mutation(api.drugImport.applyBatch, {
++      items: [{ drug: { ...fromFile, remarks: undefined }, action: "notes" }],
++    });
++    const [saved] = await owner.query(api.drugs.search, { term: "32" });
++    expect(saved).toMatchObject({ brandName: "PK-Merz", specifications: "Scored", remarks: "Old remark" });
++
++    // Use the file's blank remark: clears it
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fromFile, action: "notes" }] });
++    const [cleared] = await owner.query(api.drugs.search, { term: "32" });
++    expect(cleared.remarks).toBeUndefined();
++  });
++
+   it("skips barcodes already used by another drug", async () => {
+     const { owner } = await setup();
+     await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index a2a3352..d4527fa 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -16,6 +16,7 @@ import {
+   MAX_PACKAGES_PER_DRUG,
+   buildSearchText,
+   cleanDrugInput,
++  cleanNote,
+   deleteDrug,
+   getPackages,
+   type PackageInput,
+@@ -36,10 +37,17 @@ const importDrugArg = v.object({
+   manufacturer: v.string(),
+   pieceName: v.string(),
+   dosageForm: v.string(),
++  // Undefined = leave the saved text alone
++  specifications: v.optional(v.string()),
++  remarks: v.optional(v.string()),
+   row: v.number(),
+   packages: v.array(importPackageArg),
+ });
+ 
++// create: new drug. update: bring details in line with the file. notes: only Specifications/Remarks.
++const importAction = v.union(v.literal("create"), v.literal("update"), v.literal("notes"));
++type ImportAction = "create" | "update" | "notes";
++
+ function assertBatch(size: number) {
+   if (size > MAX_IMPORT_BATCH) {
+     throw new ConvexError({ code: "BAD_REQUEST", message: `Send at most ${MAX_IMPORT_BATCH} drugs at a time` });
+@@ -77,6 +85,8 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
+     brandName: drug.brandName,
+     manufacturer: drug.manufacturer,
+     pieceName: drug.pieceName,
++    specifications: drug.specifications,
++    remarks: drug.remarks,
+     packages: packages.map((p) => ({
+       barcode: p.barcode,
+       qtyPerUnit: p.qtyPerUnit,
+@@ -99,12 +109,9 @@ export const checkBatch = query({
+         if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null };
+         const packages = await getPackages(ctx, existing._id);
+         const diff = diffDrug(d, toExisting(existing, packages));
+-        return {
+-          drugId: d.drugId,
+-          status: diff.hasChanges ? ("conflict" as const) : ("same" as const),
+-          clashes,
+-          diff,
+-        };
++        // conflict: needs a decision. fill: only blank Specifications/Remarks get the file's text.
++        const status: "conflict" | "fill" | "same" = diff.needsReview ? "conflict" : diff.hasChanges ? "fill" : "same";
++        return { drugId: d.drugId, status, clashes, diff };
+       }),
+     );
+   },
+@@ -141,14 +148,39 @@ function failureMessage(error: unknown): string {
+   return "Could not be saved";
+ }
+ 
++// Only Specifications/Remarks from the file (undefined ones are kept). Everything else is untouched.
++async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promise<ApplyResult> {
++  const existing = await findDrug(ctx, d.drugId);
++  if (!existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
++  try {
++    const notes = {
++      specifications: cleanNote(d.specifications ?? existing.specifications, "Specifications"),
++      remarks: cleanNote(d.remarks ?? existing.remarks, "Remarks"),
++    };
++    await ctx.db.patch("drugs", existing._id, { ...notes, updatedAt: new Date().toISOString() });
++    const packages = await getPackages(ctx, existing._id);
++    await logDrugImport(ctx, actor, {
++      drug: existing,
++      before: existing,
++      beforePackages: packages,
++      after: { ...existing, ...notes },
++      afterPackages: packages.map((p) => ({ ...p, packageId: p._id })),
++    });
++    return { failure: null, skippedBarcodes: [] };
++  } catch (error) {
++    return { failure: failureMessage(error), skippedBarcodes: [] };
++  }
++}
++
+ // Creates a new drug, or ("update") brings an existing drug in line with the file.
+ // Stock, pictures and package forms that only exist in the app are never touched.
+ async function applyDrug(
+   ctx: MutationCtx,
+   d: ImportDrug,
+-  action: "create" | "update",
++  action: ImportAction,
+   actor: Actor,
+ ): Promise<ApplyResult> {
++  if (action === "notes") return await applyNotes(ctx, d, actor);
+   const existing = await findDrug(ctx, d.drugId);
+   if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
+   if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
+@@ -185,6 +217,8 @@ async function applyDrug(
+       manufacturer: d.manufacturer,
+       pieceName: d.pieceName,
+       imageId: existing?.imageId,
++      specifications: d.specifications ?? existing?.specifications,
++      remarks: d.remarks ?? existing?.remarks,
+       packages: merged,
+     });
+     const fields = {
+@@ -193,6 +227,8 @@ async function applyDrug(
+       brandName: input.brandName,
+       manufacturer: input.manufacturer,
+       pieceName: input.pieceName,
++      specifications: input.specifications,
++      remarks: input.remarks,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     };
+@@ -232,7 +268,7 @@ async function applyDrug(
+ export const applyBatch = mutation({
+   args: {
+     items: v.array(
+-      v.object({ drug: importDrugArg, action: v.union(v.literal("create"), v.literal("update")) }),
++      v.object({ drug: importDrugArg, action: importAction }),
+     ),
+   },
+   handler: async (ctx, args) => {
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 0f21289..bc1c05f 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -42,6 +42,8 @@ const drugArgs = {
+   manufacturer: v.string(),
+   pieceName: v.string(),
+   imageId: v.optional(v.id("_storage")),
++  specifications: v.optional(v.string()),
++  remarks: v.optional(v.string()),
+   packages: v.array(packageArg),
+ };
+ 
+@@ -154,6 +156,8 @@ export const create = mutation({
+       manufacturer: input.manufacturer,
+       pieceName: input.pieceName,
+       imageId: input.imageId,
++      specifications: input.specifications,
++      remarks: input.remarks,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
+@@ -193,6 +197,9 @@ export const update = mutation({
+       manufacturer: input.manufacturer,
+       pieceName: input.pieceName,
+       imageId: input.imageId,
++      // undefined clears the field
++      specifications: input.specifications,
++      remarks: input.remarks,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index 971091e..4c98837 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -72,7 +72,7 @@ export async function logActivity(ctx: MutationCtx, actor: Actor, e: Entry) {
+ 
+ type DrugFields = Pick<
+   Doc<"drugs">,
+-  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName"
++  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName" | "specifications" | "remarks"
+ >;
+ 
+ const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
+@@ -81,6 +81,8 @@ const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
+   ["brandName", "Brand"],
+   ["manufacturer", "Manufacturer"],
+   ["pieceName", "Piece name"],
++  ["specifications", "Specifications"],
++  ["remarks", "Remarks"],
+ ];
+ 
+ // Fields that differ; `before` null means a new medicine (every filled field)
+@@ -90,9 +92,10 @@ export function diffDrugFields(
+ ): Change[] {
+   const changes: Change[] = [];
+   for (const [key, label] of DRUG_FIELDS) {
+-    const old = before ? before[key] : "";
+-    if (old !== after[key]) {
+-      changes.push({ field: label, before: old, after: after[key] });
++    const old = (before ? before[key] : "") ?? "";
++    const now = after[key] ?? "";
++    if (old !== now) {
++      changes.push({ field: label, before: old, after: now });
+     }
+   }
+   return changes;
+diff --git a/convex/lib/drugImport.test.ts b/convex/lib/drugImport.test.ts
+index 74dc49f..8811c64 100644
+--- a/convex/lib/drugImport.test.ts
++++ b/convex/lib/drugImport.test.ts
+@@ -79,4 +79,34 @@ describe("diffDrug", () => {
+     expect(d.changed).toHaveLength(1);
+     expect(diffDrug(file, { ...current, packages: [] }).added).toHaveLength(1);
+   });
++
++  it("fills blank notes without asking, asks when saved text differs (including a blank file cell)", () => {
++    const withNotes = { ...file, specifications: "Round white", remarks: "" };
++    const blankApp = diffDrug(withNotes, current);
++    expect(blankApp.notes).toEqual([
++      { key: "specifications", label: "Specifications", current: "", file: "Round white", auto: true },
++    ]);
++    expect(blankApp).toMatchObject({ needsReview: false, hasChanges: true, detailChanges: false });
++
++    const saved = diffDrug(withNotes, { ...current, specifications: "Oval", remarks: "Fridge" });
++    expect(saved.notes.map((n) => [n.key, n.auto])).toEqual([["specifications", false], ["remarks", false]]);
++    expect(saved.needsReview).toBe(true);
++  });
++
++  it("ignores notes when the file has no such columns", () => {
++    expect(diffDrug(file, { ...current, remarks: "Fridge" }).hasChanges).toBe(false);
++  });
++});
++
++describe("note columns", () => {
++  it("accepts header variations and takes the first non-blank value per drug", () => {
++    const { records } = sheetToRecords([
++      [...HEADER, "Spec", "Notes"],
++      ["32", "A", "B", "M", "TABLET", "1", "32", "111", "Box", 1, 1, "", "Keep dry"],
++      ["32", "A", "B", "M", "TABLET", "2", "32", "222", "Box", 2, 1, "Scored", ""],
++    ]);
++    const [drug] = buildImportDrugs(records, ["TABLET"]).drugs;
++    expect(drug).toMatchObject({ specifications: "Scored", remarks: "Keep dry" });
++    expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].remarks).toBeUndefined();
++  });
+ });
+diff --git a/convex/lib/drugImport.ts b/convex/lib/drugImport.ts
+index db765af..25f7c71 100644
+--- a/convex/lib/drugImport.ts
++++ b/convex/lib/drugImport.ts
+@@ -20,11 +20,22 @@ export type ImportDrug = {
+   manufacturer: string;
+   pieceName: string;
+   dosageForm: string;
++  // Free text from the file. Undefined means "leave the saved text alone"
++  // (column not in the file, or the admin chose to keep the saved text).
++  specifications?: string;
++  remarks?: string;
+   // First spreadsheet row of this drug (1 = header row)
+   row: number;
+   packages: ImportPackage[];
+ };
+ 
++export type NoteKey = "specifications" | "remarks";
++
++export const NOTE_FIELDS: ReadonlyArray<{ key: NoteKey; label: string; aliases: string[] }> = [
++  { key: "specifications", label: "Specifications", aliases: ["specifications", "specification", "specs", "spec"] },
++  { key: "remarks", label: "Remarks", aliases: ["remarks", "remark", "notes", "note", "comments", "comment"] },
++];
++
+ export type ImportProblem = { row: number; drugId: string; name: string; message: string };
+ 
+ export type SheetRecord = { row: number; values: Record<string, string> };
+@@ -62,6 +73,11 @@ export function sheetToRecords(rows: unknown[][]): { records: SheetRecord[]; mis
+     const key = normalizeHeader(cellText(h));
+     if (key && !columnIndex.has(key)) columnIndex.set(key, i);
+   });
++  // Optional note columns: accept common header variations, stored under the canonical key
++  for (const note of NOTE_FIELDS) {
++    const found = note.aliases.find((a) => columnIndex.has(a));
++    if (found !== undefined && !columnIndex.has(note.key)) columnIndex.set(note.key, columnIndex.get(found) ?? 0);
++  }
+   const missingColumns = REQUIRED.filter((c) => !columnIndex.has(c));
+   const records: SheetRecord[] = [];
+   body.forEach((cells, i) => {
+@@ -117,6 +133,12 @@ function cleanManufacturer(raw: string) {
+   return /^-+$/.test(raw) ? "" : raw;
+ }
+ 
++// First non-blank value across a drug's rows; "" when the column exists but is empty, undefined when absent
++function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
++  if (!(key in rows[0].values)) return undefined;
++  return rows.map((r) => r.values[key] ?? "").find((v) => v !== "") ?? "";
++}
++
+ // Groups rows by Drug ID, keeps only the chosen dosage forms and drugs with at least one package form
+ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+   const wanted = new Set(forms.map((f) => f.toUpperCase()));
+@@ -181,6 +203,8 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+       manufacturer: cleanManufacturer(first.values[COLUMNS.manufacturer]),
+       pieceName: dosageFormOf(first) || "PIECE",
+       dosageForm: dosageFormOf(first),
++      specifications: noteOf(rows, "specifications"),
++      remarks: noteOf(rows, "remarks"),
+       row: first.row,
+       packages: [...packages.values()],
+     });
+@@ -193,6 +217,8 @@ export type ExistingDrug = {
+   brandName: string;
+   manufacturer: string;
+   pieceName: string;
++  specifications?: string;
++  remarks?: string;
+   packages: ImportPackage[];
+ };
+ 
+@@ -205,11 +231,28 @@ export const DIFF_FIELDS = [
+ 
+ export type FieldChange = { label: string; current: string; file: string };
+ 
++// A Specifications/Remarks difference. `auto` = nothing saved yet, so the file's text is filled in without asking.
++export type NoteChange = FieldChange & { key: NoteKey; auto: boolean };
++
++function diffNotes(file: ImportDrug, current: ExistingDrug): NoteChange[] {
++  const changes: NoteChange[] = [];
++  for (const { key, label } of NOTE_FIELDS) {
++    const fromFile = file[key];
++    if (fromFile === undefined) continue; // Column not in the file
++    const saved = (current[key] ?? "").trim();
++    const incoming = fromFile.trim();
++    if (saved === incoming) continue;
++    changes.push({ key, label, current: saved, file: incoming, auto: saved === "" });
++  }
++  return changes;
++}
++
+ // What "Use file" would change. Package forms only in the app are always kept.
+ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+   const fields: FieldChange[] = DIFF_FIELDS.filter(
+     (f) => file[f.key].trim() !== current[f.key].trim(),
+   ).map((f) => ({ label: f.label, current: current[f.key], file: file[f.key] }));
++  const notes = diffNotes(file, current);
+   const byKey = new Map(current.packages.map((p) => [packageMatchKey(p), p]));
+   const added: ImportPackage[] = [];
+   const changed: { current: ImportPackage; file: ImportPackage }[] = [];
+@@ -218,5 +261,16 @@ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+     if (!match) added.push(p);
+     else if (!sameForm(match, p)) changed.push({ current: match, file: p });
+   }
+-  return { fields, added, changed, hasChanges: fields.length + added.length + changed.length > 0 };
++  const detailChanges = fields.length + added.length + changed.length > 0;
++  return {
++    fields,
++    added,
++    changed,
++    notes,
++    // Name/brand/manufacturer/pieces or package forms differ (decided with "Keep current"/"Use file")
++    detailChanges,
++    // Anything the admin must decide on; auto-filled notes need no decision
++    needsReview: detailChanges || notes.some((n) => !n.auto),
++    hasChanges: detailChanges || notes.length > 0,
++  };
+ }
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index b74bc93..cc7dfbc 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -23,9 +23,21 @@ export type DrugInput = {
+   manufacturer: string;
+   pieceName: string;
+   imageId?: Id<"_storage">;
++  // Free text; undefined or blank means none
++  specifications?: string;
++  remarks?: string;
+   packages: PackageInput[];
+ };
+ 
++export const MAX_NOTE_LENGTH = 2000;
++
++// Trims free text; blank becomes undefined so nothing empty is stored
++export function cleanNote(raw: string | undefined, label: string): string | undefined {
++  const text = raw?.trim() ?? "";
++  if (text.length > MAX_NOTE_LENGTH) bad(`${label} must be ${MAX_NOTE_LENGTH} characters or fewer`);
++  return text || undefined;
++}
++
+ function bad(message: string): never {
+   throw new ConvexError({ code: "BAD_REQUEST", message });
+ }
+@@ -71,6 +83,8 @@ export function cleanDrugInput(input: DrugInput): DrugInput {
+     brandName: input.brandName.trim(),
+     manufacturer: input.manufacturer.trim(),
+     pieceName: input.pieceName.trim() || "units",
++    specifications: cleanNote(input.specifications, "Specifications"),
++    remarks: cleanNote(input.remarks, "Remarks"),
+     packages,
+   };
+ }
+diff --git a/convex/schema/drugs.ts b/convex/schema/drugs.ts
+index 4c75b94..d4963ee 100644
+--- a/convex/schema/drugs.ts
++++ b/convex/schema/drugs.ts
+@@ -18,6 +18,9 @@ export const drugsTable = defineTable({
+   pieceName: v.string(),
+   // Drug picture, shared by every package form
+   imageId: v.optional(v.id("_storage")),
++  // Free text shown on drug cards; missing means blank
++  specifications: v.optional(v.string()),
++  remarks: v.optional(v.string()),
+   // Denormalized text for the search index (Drug ID, names)
+   searchText: v.string(),
+   updatedAt: v.string(),
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 4231e44..10119c8 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -1,6 +1,7 @@
+ import { Barcode, Check } from "lucide-react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
++import DrugNotes from "@/components/drug-notes.tsx";
+ import ZoomableDrugImage, {
+   type GallerySlide,
+ } from "@/components/zoomable-drug-image.tsx";
+@@ -46,6 +47,7 @@ export default function DrugPackagePicker({
+             <span className="font-mono">{drug.drugId}</span>
+           </div>
+           <ManufacturerLine manufacturer={drug.manufacturer} className="pt-1" />
++          <DrugNotes specifications={drug.specifications} remarks={drug.remarks} className="pt-1" />
+         </div>
+       </div>
+       <div className="grid gap-2 sm:grid-cols-2">
+diff --git a/src/pages/inventory/_components/drug-detail-sheet.tsx b/src/pages/inventory/_components/drug-detail-sheet.tsx
+index dc93dc4..b6f896c 100644
+--- a/src/pages/inventory/_components/drug-detail-sheet.tsx
++++ b/src/pages/inventory/_components/drug-detail-sheet.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from "react";
+ import { useMutation } from "convex/react";
+-import { Barcode, ChevronRight, Factory, History, Pencil, Trash2 } from "lucide-react";
++import { Barcode, ChevronRight, Factory, History, NotebookText, Pencil, Trash2 } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+@@ -23,6 +23,7 @@ import {
+   SheetTitle,
+ } from "@/components/ui/sheet.tsx";
+ import DrugImage from "@/components/drug-image.tsx";
++import DrugNotes from "@/components/drug-notes.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import PackageHistoryDialog from "./package-history-dialog.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -122,6 +123,15 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+                 </section>
+               )}
+ 
++              {(drug.specifications || drug.remarks) && (
++                <section className="space-y-2">
++                  <h3 className="flex items-center gap-2 text-sm font-semibold">
++                    <NotebookText className="size-4" /> Specifications and remarks
++                  </h3>
++                  <DrugNotes specifications={drug.specifications} remarks={drug.remarks} className="text-sm" />
++                </section>
++              )}
++
+               {isAdmin && (
+                 <div className="flex gap-2 pt-2">
+                   <Button className="flex-1" onClick={() => onEdit(drug)}>
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 8810d9c..7141803 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -21,6 +21,7 @@ import {
+   FormMessage,
+ } from "@/components/ui/form.tsx";
+ import { Input } from "@/components/ui/input.tsx";
++import { Textarea } from "@/components/ui/textarea.tsx";
+ import SearchSelect from "@/components/search-select.tsx";
+ import { MANUFACTURERS } from "@/lib/manufacturers.ts";
+ import { DEFAULT_PIECE_NAME, PIECE_NAMES } from "@/lib/piece-names.ts";
+@@ -44,7 +45,16 @@ type Props = {
+ 
+ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+   if (!drug) {
+-    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: DEFAULT_PIECE_NAME, packages: [] };
++    return {
++      drugId: "",
++      name: "",
++      brandName: "",
++      manufacturer: "",
++      pieceName: DEFAULT_PIECE_NAME,
++      specifications: "",
++      remarks: "",
++      packages: [],
++    };
+   }
+   return {
+     drugId: drug.drugId,
+@@ -52,6 +62,8 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+     brandName: drug.brandName,
+     manufacturer: drug.manufacturer,
+     pieceName: drug.pieceName,
++    specifications: drug.specifications ?? "",
++    remarks: drug.remarks ?? "",
+     packages: drug.packages.map((p) => ({
+       packageId: p._id,
+       barcode: p.barcode,
+@@ -139,6 +151,22 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+     />
+   );
+ 
++  const noteField = (name: "specifications" | "remarks", label: string, placeholder: string) => (
++    <FormField
++      control={form.control}
++      name={name}
++      render={({ field }) => (
++        <FormItem>
++          <FormLabel>{label}</FormLabel>
++          <FormControl>
++            <Textarea {...field} rows={2} placeholder={placeholder} />
++          </FormControl>
++          <FormMessage />
++        </FormItem>
++      )}
++    />
++  );
++
+   return (
+     <Form {...form}>
+       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+@@ -149,6 +177,10 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+           {selectField("pieceName", "Pieces are called", PIECE_NAMES, "Search and select", false)}
+         </div>
+         {selectField("manufacturer", "Manufacturer", MANUFACTURERS, "Search and select a manufacturer", true)}
++        <div className="grid gap-4 sm:grid-cols-2">
++          {noteField("specifications", "Specifications", "e.g. White round tablet, scored")}
++          {noteField("remarks", "Remarks", "e.g. Store below 25°C")}
++        </div>
+         <div className="space-y-2">
+           <div className="text-sm font-medium">Drug picture</div>
+           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>
+diff --git a/src/pages/inventory/_components/drug-row.tsx b/src/pages/inventory/_components/drug-row.tsx
+index 6b6aafc..2551a2a 100644
+--- a/src/pages/inventory/_components/drug-row.tsx
++++ b/src/pages/inventory/_components/drug-row.tsx
+@@ -1,4 +1,5 @@
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
++import DrugNotes from "@/components/drug-notes.tsx";
+ import { Badge } from "@/components/ui/badge.tsx";
+ import DrugImage from "@/components/drug-image.tsx";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+@@ -26,6 +27,7 @@ export default function DrugRow({
+           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
+         </div>
+         <ManufacturerLine manufacturer={drug.manufacturer} />
++        <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
+         <div className="flex flex-wrap gap-2">
+           {drug.packages.map((p) => (
+             <Badge
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index 4ffd518..023050e 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -1,10 +1,9 @@
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+-import type { ImportPackage } from "@/convex/lib/drugImport.ts";
++import type { FieldChange, ImportPackage, NoteKey } from "@/convex/lib/drugImport.ts";
+ import { Badge } from "@/components/ui/badge.tsx";
+ import { cn } from "@/lib/utils.ts";
+ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+-
+-export type Choice = "keep" | "file";
++import { allChoices, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
+ 
+ function pkgLabel(p: ImportPackage) {
+   return `${formatPackageForm(p)}${p.barcode ? ` · ${p.barcode}` : " · no barcode"}`;
+@@ -25,17 +24,58 @@ function ChoiceButton({ active, onClick, children }: { active: boolean; onClick:
+   );
+ }
+ 
++function ChoicePair({ choice, onChoose }: { choice: Choice; onChoose: (c: Choice) => void }) {
++  return (
++    <div className="flex shrink-0 gap-1">
++      <ChoiceButton active={choice === "keep"} onClick={() => onChoose("keep")}>
++        Keep current
++      </ChoiceButton>
++      <ChoiceButton active={choice === "file"} onClick={() => onChoose("file")}>
++        Use file
++      </ChoiceButton>
++    </div>
++  );
++}
++
++function FieldRows({ fields, choice }: { fields: FieldChange[]; choice: Choice }) {
++  return (
++    <div className="overflow-hidden rounded-lg border text-sm">
++      <div className="grid grid-cols-[7rem_1fr_1fr] bg-muted px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
++        <span />
++        <span>Current</span>
++        <span>In file</span>
++      </div>
++      {fields.map((f) => (
++        <div key={f.label} className="grid grid-cols-[7rem_1fr_1fr] gap-2 border-t px-2 py-1.5">
++          <span className="text-muted-foreground">{f.label}</span>
++          <span className={cn("min-w-0 whitespace-pre-line break-words", choice === "file" && "line-through opacity-60")}>
++            {f.current || "(blank)"}
++          </span>
++          <span className={cn("min-w-0 whitespace-pre-line break-words font-medium", choice === "keep" && "opacity-60")}>
++            {f.file || "(blank)"}
++          </span>
++        </div>
++      ))}
++    </div>
++  );
++}
++
+ export default function ImportConflictCard({
+   item,
+-  choice,
+-  onChoose,
++  choices,
++  onChange,
+ }: {
+   item: ReviewItem;
+-  choice: Choice;
+-  onChoose: (c: Choice) => void;
++  choices: DrugChoices;
++  onChange: (c: DrugChoices) => void;
+ }) {
+   const diff = item.check.diff;
+   if (!diff) return null;
++  const askNotes = diff.notes.filter((n) => !n.auto);
++  const autoNotes = diff.notes.filter((n) => n.auto);
++  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length;
++  const setNote = (key: NoteKey, c: Choice) => onChange({ ...choices, notes: { ...choices.notes, [key]: c } });
++
+   return (
+     <div className="space-y-3 rounded-xl border bg-card p-3">
+       <div className="flex flex-wrap items-start justify-between gap-2">
+@@ -45,54 +85,73 @@ export default function ImportConflictCard({
+             Drug ID {item.drug.drugId} · row {item.drug.row}
+           </div>
+         </div>
+-        <div className="flex gap-1">
+-          <ChoiceButton active={choice === "keep"} onClick={() => onChoose("keep")}>
+-            Keep current
+-          </ChoiceButton>
+-          <ChoiceButton active={choice === "file"} onClick={() => onChoose("file")}>
+-            Use file
+-          </ChoiceButton>
+-        </div>
++        {decisions > 1 && (
++          <div className="flex gap-1">
++            <button
++              type="button"
++              onClick={() => onChange(allChoices(item, "keep"))}
++              className="cursor-pointer text-xs font-medium text-primary hover:underline"
++            >
++              Keep all
++            </button>
++            <span className="text-xs text-muted-foreground">·</span>
++            <button
++              type="button"
++              onClick={() => onChange(allChoices(item, "file"))}
++              className="cursor-pointer text-xs font-medium text-primary hover:underline"
++            >
++              Use file for all
++            </button>
++          </div>
++        )}
+       </div>
+ 
+-      {diff.fields.length > 0 && (
+-        <div className="overflow-hidden rounded-lg border text-sm">
+-          <div className="grid grid-cols-[7rem_1fr_1fr] bg-muted px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+-            <span />
+-            <span>Current</span>
+-            <span>In file</span>
++      {diff.detailChanges && (
++        <div className="space-y-2">
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Drug details</span>
++            <ChoicePair choice={choices.details} onChoose={(c) => onChange({ ...choices, details: c })} />
+           </div>
+-          {diff.fields.map((f) => (
+-            <div key={f.label} className="grid grid-cols-[7rem_1fr_1fr] gap-2 border-t px-2 py-1.5">
+-              <span className="text-muted-foreground">{f.label}</span>
+-              <span className={cn("min-w-0 break-words", choice === "file" && "line-through opacity-60")}>
+-                {f.current || "(blank)"}
+-              </span>
+-              <span className={cn("min-w-0 break-words font-medium", choice === "keep" && "opacity-60")}>
+-                {f.file || "(blank)"}
+-              </span>
++          {diff.fields.length > 0 && <FieldRows fields={diff.fields} choice={choices.details} />}
++          {(diff.added.length > 0 || diff.changed.length > 0) && (
++            <div className="space-y-1 text-sm">
++              {diff.added.map((p) => (
++                <div key={pkgLabel(p)} className="flex flex-wrap items-center gap-2">
++                  <Badge variant="secondary">New package form</Badge>
++                  <span>{pkgLabel(p)}</span>
++                </div>
++              ))}
++              {diff.changed.map((c) => (
++                <div key={pkgLabel(c.file)} className="flex flex-wrap items-center gap-2">
++                  <Badge variant="secondary">Form differs</Badge>
++                  <span>
++                    {c.file.barcode || "no barcode"}: {formatPackageForm(c.current)} → {formatPackageForm(c.file)}
++                  </span>
++                </div>
++              ))}
+             </div>
+-          ))}
++          )}
+         </div>
+       )}
+ 
+-      {(diff.added.length > 0 || diff.changed.length > 0) && (
+-        <div className="space-y-1 text-sm">
+-          {diff.added.map((p) => (
+-            <div key={pkgLabel(p)} className="flex flex-wrap items-center gap-2">
+-              <Badge variant="secondary">New package form</Badge>
+-              <span>{pkgLabel(p)}</span>
+-            </div>
+-          ))}
+-          {diff.changed.map((c) => (
+-            <div key={pkgLabel(c.file)} className="flex flex-wrap items-center gap-2">
+-              <Badge variant="secondary">Form differs</Badge>
+-              <span>
+-                {c.file.barcode || "no barcode"}: {formatPackageForm(c.current)} → {formatPackageForm(c.file)}
+-              </span>
++      {askNotes.map((n) => {
++        const choice = choices.notes[n.key] ?? "keep";
++        return (
++          <div key={n.key} className="space-y-2">
++            <div className="flex flex-wrap items-center justify-between gap-2">
++              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{n.label}</span>
++              <ChoicePair choice={choice} onChoose={(c) => setNote(n.key, c)} />
+             </div>
+-          ))}
+-        </div>
++            <FieldRows fields={[n]} choice={choice} />
++          </div>
++        );
++      })}
++
++      {autoNotes.length > 0 && (
++        <p className="text-xs text-muted-foreground">
++          {autoNotes.map((n) => n.label).join(" and ")} {autoNotes.length === 1 ? "is" : "are"} blank in the app and
++          will be filled from the file.
++        </p>
+       )}
+       {item.check.clashes.length > 0 && <ClashNote item={item} />}
+     </div>
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index cae2b21..05b9815 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -22,7 +22,16 @@ import { errorMessage } from "@/lib/errors.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { readImportFile } from "../_lib/read-import-file.ts";
+ import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
+-import ImportConflictCard, { ClashNote, type Choice } from "./import-conflict-card.tsx";
++import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
++import {
++  DEFAULT_CHOICES,
++  allChoices,
++  itemFor,
++  usesFile,
++  type Choice,
++  type DrugChoices,
++  type ImportItem,
++} from "../_lib/import-choices.ts";
+ 
+ const DEFAULT_FORMS = ["TABLET", "CAPSULE"];
+ const PAGE = 40;
+@@ -50,7 +59,7 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
+           <DialogTitle>Import inventory file</DialogTitle>
+           <DialogDescription>
+             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
+-            form, per and amount.
++            form, per and amount. Optional: Specifications and Remarks.
+           </DialogDescription>
+         </DialogHeader>
+         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
+@@ -208,25 +217,27 @@ function ReviewStep({
+ }) {
+   const confirm = useConfirm();
+   const [addNew, setAddNew] = useState(true);
+-  const [choices, setChoices] = useState<Record<string, Choice>>({});
++  const [choices, setChoices] = useState<Record<string, DrugChoices>>({});
+   const [remove, setRemove] = useState<Set<Id<"drugs">>>(new Set());
+   const [shownConflicts, setShownConflicts] = useState(PAGE);
+   const [shownMissing, setShownMissing] = useState(PAGE);
+ 
+-  const choiceOf = (drugId: string): Choice => choices[drugId] ?? "keep";
++  const choicesOf = (drugId: string): DrugChoices => choices[drugId] ?? DEFAULT_CHOICES;
+   const useFileCount = useMemo(
+-    () => review.conflicts.filter((c) => (choices[c.drug.drugId] ?? "keep") === "file").length,
++    () => review.conflicts.filter((c) => usesFile(c, choices[c.drug.drugId] ?? DEFAULT_CHOICES)).length,
+     [review.conflicts, choices],
+   );
+-  const setAll = (c: Choice) => setChoices(Object.fromEntries(review.conflicts.map((i) => [i.drug.drugId, c])));
++  const setAll = (c: Choice) =>
++    setChoices(Object.fromEntries(review.conflicts.map((i) => [i.drug.drugId, allChoices(i, c)])));
+   const newWithClashes = review.newDrugs.filter((n) => n.check.clashes.length > 0);
+ 
+   const submit = async () => {
+-    const items = [
++    const items: ImportItem[] = [
+       ...(addNew ? review.newDrugs.map((i) => ({ drug: i.drug, action: "create" as const })) : []),
+-      ...review.conflicts
+-        .filter((i) => choiceOf(i.drug.drugId) === "file")
+-        .map((i) => ({ drug: i.drug, action: "update" as const })),
++      ...[...review.conflicts, ...review.filled].flatMap((i) => {
++        const it = itemFor(i, choicesOf(i.drug.drugId));
++        return it ? [it] : [];
++      }),
+     ];
+     if (items.length === 0 && remove.size === 0) {
+       toast.info("Nothing to change");
+@@ -286,7 +297,11 @@ function ReviewStep({
+ 
+         <TabsContent value="conflicts" className="min-h-0 space-y-2 overflow-y-auto pr-1 [max-height:45vh]">
+           {review.conflicts.length === 0 ? (
+-            <Note>No conflicts. Saved drugs already match the file.</Note>
++            <Note>
++              {review.filled.length > 0
++                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications or Remarks filled in from the file.`
++                : "No conflicts. Saved drugs already match the file."}
++            </Note>
+           ) : (
+             <>
+               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted p-2 text-sm">
+@@ -304,13 +319,15 @@ function ReviewStep({
+               </div>
+               <p className="text-xs text-muted-foreground">
+                 Stock, pictures and package forms that are only in the app are always kept.
++                {review.filled.length > 0 &&
++                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks that will be filled from the file.`}
+               </p>
+               {review.conflicts.slice(0, shownConflicts).map((item) => (
+                 <ImportConflictCard
+                   key={item.drug.drugId}
+                   item={item}
+-                  choice={choiceOf(item.drug.drugId)}
+-                  onChoose={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
++                  choices={choicesOf(item.drug.drugId)}
++                  onChange={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
+                 />
+               ))}
+               {shownConflicts < review.conflicts.length && (
+diff --git a/src/pages/inventory/_hooks/use-drug-import.ts b/src/pages/inventory/_hooks/use-drug-import.ts
+index 76a558e..ad43212 100644
+--- a/src/pages/inventory/_hooks/use-drug-import.ts
++++ b/src/pages/inventory/_hooks/use-drug-import.ts
+@@ -20,6 +20,8 @@ export type ReviewItem = { drug: ImportDrug; check: CheckResult };
+ export type ImportReview = {
+   newDrugs: ReviewItem[];
+   conflicts: ReviewItem[];
++  // Saved drugs whose blank Specifications/Remarks will be filled from the file without asking
++  filled: ReviewItem[];
+   unchanged: number;
+   missing: MissingDrug[];
+   problems: ImportProblem[];
+@@ -50,7 +52,7 @@ export function useDrugImport() {
+   const check = async (records: SheetRecord[], forms: string[]): Promise<ImportReview> => {
+     const { drugs, problems, withoutPackages } = buildImportDrugs(records, forms);
+     const batches = chunks(drugs);
+-    const review: ImportReview = { newDrugs: [], conflicts: [], unchanged: 0, missing: [], problems, withoutPackages };
++    const review: ImportReview = { newDrugs: [], conflicts: [], filled: [], unchanged: 0, missing: [], problems, withoutPackages };
+     try {
+       for (let i = 0; i < batches.length; i++) {
+         setProgress({ label: "Comparing with your inventory", done: i, total: batches.length });
+@@ -59,6 +61,7 @@ export function useDrugImport() {
+           const item = { drug: batches[i][j], check };
+           if (check.status === "new") review.newDrugs.push(item);
+           else if (check.status === "conflict") review.conflicts.push(item);
++          else if (check.status === "fill") review.filled.push(item);
+           else review.unchanged += 1;
+         });
+       }
+@@ -82,7 +85,7 @@ export function useDrugImport() {
+   };
+ 
+   const run = async (
+-    items: { drug: ImportDrug; action: "create" | "update" }[],
++    items: { drug: ImportDrug; action: "create" | "update" | "notes" }[],
+     removeIds: Id<"drugs">[],
+   ): Promise<ImportReport> => {
+     const report: ImportReport = { created: 0, updated: 0, removed: 0, failures: [], skipped: [] };
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index e55b992..5edaa40 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -23,6 +23,8 @@ export const drugFormSchema = z.object({
+   brandName: z.string().trim(),
+   manufacturer: z.string().trim(),
+   pieceName: z.string().trim().min(1, "Choose what the pieces are called"),
++  specifications: z.string().trim().max(2000, "Keep it under 2000 characters"),
++  remarks: z.string().trim().max(2000, "Keep it under 2000 characters"),
+   packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });
+ 
+
+diff --git a/src/components/drug-notes.tsx b/src/components/drug-notes.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/drug-notes.tsx
+@@ -0,0 +1,22 @@
++import { cn } from "@/lib/utils.ts";
++
++type Props = { specifications?: string; remarks?: string; className?: string };
++
++// Specifications and Remarks in full, shown on drug cards; renders nothing when both are blank
++export default function DrugNotes({ specifications, remarks, className }: Props) {
++  const notes = [
++    { label: "Specifications", text: specifications },
++    { label: "Remarks", text: remarks },
++  ].filter((n) => n.text);
++  if (notes.length === 0) return null;
++  return (
++    <div className={cn("space-y-1 text-xs", className)}>
++      {notes.map((n) => (
++        <p key={n.label} className="whitespace-pre-line break-words">
++          <span className="font-semibold text-foreground">{n.label}: </span>
++          <span className="text-muted-foreground">{n.text}</span>
++        </p>
++      ))}
++    </div>
++  );
++}
+diff --git a/src/pages/inventory/_lib/import-choices.ts b/src/pages/inventory/_lib/import-choices.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_lib/import-choices.ts
+@@ -0,0 +1,43 @@
++import type { ImportDrug, NoteKey } from "@/convex/lib/drugImport.ts";
++import type { ReviewItem } from "../_hooks/use-drug-import.ts";
++
++export type Choice = "keep" | "file";
++
++// Per drug: one choice for the main details, and one per Specifications/Remarks conflict
++export type DrugChoices = { details: Choice; notes: Partial<Record<NoteKey, Choice>> };
++
++export const DEFAULT_CHOICES: DrugChoices = { details: "keep", notes: {} };
++
++export type ImportItem = { drug: ImportDrug; action: "create" | "update" | "notes" };
++
++// Turns a reviewed existing drug into what is sent to the import, or null when nothing changes.
++// Blank notes in the app are always filled from the file; other note conflicts follow the choice.
++export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | null {
++  const diff = item.check.diff;
++  if (!diff) return null;
++  const drug: ImportDrug = { ...item.drug, specifications: undefined, remarks: undefined };
++  let notesChanged = false;
++  for (const n of diff.notes) {
++    if (n.auto || (choices.notes[n.key] ?? "keep") === "file") {
++      drug[n.key] = n.file;
++      notesChanged = true;
++    }
++  }
++  if (diff.detailChanges && choices.details === "file") return { drug, action: "update" };
++  return notesChanged ? { drug, action: "notes" } : null;
++}
++
++export function allChoices(item: ReviewItem, c: Choice): DrugChoices {
++  const notes = Object.fromEntries((item.check.diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]));
++  return { details: c, notes };
++}
++
++// True when at least one thing in this drug will take the file's value
++export function usesFile(item: ReviewItem, choices: DrugChoices): boolean {
++  const diff = item.check.diff;
++  if (!diff) return false;
++  return (
++    (diff.detailChanges && choices.details === "file") ||
++    diff.notes.some((n) => !n.auto && choices.notes[n.key] === "file")
++  );
++}

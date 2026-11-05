@@ -18,6 +18,9 @@ export const drugsTable = defineTable({
   pieceName: v.string(),
   // Drug picture, shared by every package form
   imageId: v.optional(v.id("_storage")),
+  // Free text shown on drug cards; missing means blank
+  specifications: v.optional(v.string()),
+  remarks: v.optional(v.string()),
   // Denormalized text for the search index (Drug ID, names)
   searchText: v.string(),
   updatedAt: v.string(),

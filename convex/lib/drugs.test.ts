@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { matchesAllWords, searchWords } from "./drugs";
+import { matchesAllWords, packagesFirst, searchWords } from "./drugs";
+
+describe("packagesFirst", () => {
+  it("moves drugs with package forms up, keeping order within each group", () => {
+    const drugs = [
+      { id: "a", packages: [] },
+      { id: "b", packages: [1] },
+      { id: "c", packages: [] },
+      { id: "d", packages: [1, 2] },
+    ];
+    expect(packagesFirst(drugs).map((d) => d.id)).toEqual(["b", "d", "a", "c"]);
+  });
+});
 
 describe("searchWords", () => {
   it("splits on spaces and punctuation, lowercased", () => {

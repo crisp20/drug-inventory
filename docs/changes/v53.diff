@@ -1,0 +1,298 @@
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 524822f..8fed24d 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v52");
++    expect(CHANGE_ENTRIES[0].version).toBe("v53");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index afdee58..895e0a6 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -1,6 +1,6 @@
+ import { useMemo, useState } from "react";
+ import { toast } from "sonner";
+-import { AlertTriangle, CheckCircle2, FileSpreadsheet } from "lucide-react";
++import { AlertTriangle, CheckCircle2, FileSpreadsheet, Upload } from "lucide-react";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
+ import { listDosageForms, sheetToRecords, type SheetRecord } from "@/convex/lib/drugImport.ts";
+ import { Button } from "@/components/ui/button.tsx";
+@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils.ts";
+ import { readImportFile } from "../_lib/read-import-file.ts";
+ import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
+ import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
+-import ImportDropZone from "./import-drop-zone.tsx";
++import FileDropZone from "@/components/file-drop-zone.tsx";
+ import {
+   DEFAULT_CHOICES,
+   allChoices,
+@@ -122,7 +122,19 @@ function ImportSteps({
+   }
+ 
+   if (step.name === "pick") {
+-    return <ImportDropZone reading={reading} onFile={(f) => void onFile(f)} />;
++    return (
++      <FileDropZone
++        icon={<Upload className="size-8 text-primary" />}
++        label="Drag a file here, or click to choose"
++        hint="Excel (.xlsx) or CSV. Nothing is saved until you review and confirm."
++        readingLabel="Reading file…"
++        reading={reading}
++        accept=".xlsx,.csv"
++        isAccepted={(f) => /\.(xlsx|csv)$/i.test(f.name)}
++        rejectMessage="Please use an Excel (.xlsx) or CSV file"
++        onFiles={(files) => void onFile(files[0])}
++      />
++    );
+   }
+ 
+   if (step.name === "forms") {
+diff --git a/src/pages/inventory/_components/import-drop-zone.tsx b/src/pages/inventory/_components/import-drop-zone.tsx
+deleted file mode 100644
+index 9014b4f..0000000
+--- a/src/pages/inventory/_components/import-drop-zone.tsx
++++ /dev/null
+@@ -1,73 +0,0 @@
+-import { useState, type DragEvent } from "react";
+-import { toast } from "sonner";
+-import { Upload } from "lucide-react";
+-import { Spinner } from "@/components/ui/spinner.tsx";
+-import { cn } from "@/lib/utils.ts";
+-
+-const ACCEPTED = [".xlsx", ".csv"];
+-
+-const isAccepted = (file: File) => ACCEPTED.some((ext) => file.name.toLowerCase().endsWith(ext));
+-
+-export default function ImportDropZone({ reading, onFile }: { reading: boolean; onFile: (file: File) => void }) {
+-  const [dragging, setDragging] = useState(false);
+-
+-  const pick = (file: File | undefined) => {
+-    if (!file) return;
+-    if (!isAccepted(file)) {
+-      toast.error("Please use an Excel (.xlsx) or CSV file");
+-      return;
+-    }
+-    onFile(file);
+-  };
+-
+-  const onDragOver = (e: DragEvent<HTMLLabelElement>) => {
+-    // preventDefault is required for the browser to allow a drop here
+-    e.preventDefault();
+-    e.dataTransfer.dropEffect = "copy";
+-    if (!dragging) setDragging(true);
+-  };
+-
+-  const onDragLeave = (e: DragEvent<HTMLLabelElement>) => {
+-    // Ignore leave events fired when moving over child elements
+-    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+-    setDragging(false);
+-  };
+-
+-  const onDrop = (e: DragEvent<HTMLLabelElement>) => {
+-    e.preventDefault();
+-    setDragging(false);
+-    if (e.dataTransfer.files.length > 1) toast.info("Only the first file is used");
+-    pick(e.dataTransfer.files[0]);
+-  };
+-
+-  return (
+-    <label
+-      onDragOver={onDragOver}
+-      onDragEnter={onDragOver}
+-      onDragLeave={onDragLeave}
+-      onDrop={onDrop}
+-      className={cn(
+-        "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
+-        dragging && "border-primary bg-primary/10",
+-        reading && "pointer-events-none opacity-60",
+-      )}
+-    >
+-      {reading ? <Spinner /> : <Upload className="size-8 text-primary" />}
+-      <div className="font-semibold">
+-        {reading ? "Reading file…" : dragging ? "Drop the file here" : "Drag a file here, or click to choose"}
+-      </div>
+-      <div className="text-sm text-muted-foreground">
+-        Excel (.xlsx) or CSV. Nothing is saved until you review and confirm.
+-      </div>
+-      <input
+-        type="file"
+-        accept={ACCEPTED.join(",")}
+-        className="sr-only"
+-        onChange={(e) => {
+-          pick(e.target.files?.[0]);
+-          e.target.value = "";
+-        }}
+-      />
+-    </label>
+-  );
+-}
+diff --git a/src/pages/inventory/_components/photo-import-dialog.tsx b/src/pages/inventory/_components/photo-import-dialog.tsx
+index 95e0a9c..a6b985d 100644
+--- a/src/pages/inventory/_components/photo-import-dialog.tsx
++++ b/src/pages/inventory/_components/photo-import-dialog.tsx
+@@ -13,6 +13,7 @@ import {
+ import { Progress } from "@/components/ui/progress.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
++import FileDropZone from "@/components/file-drop-zone.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { readPhotoFiles } from "../_lib/read-photo-files.ts";
+@@ -64,9 +65,7 @@ function Steps({
+ }) {
+   const [reading, setReading] = useState(false);
+ 
+-  const onFiles = async (list: FileList | null) => {
+-    const files = list ? [...list] : [];
+-    if (files.length === 0) return;
++  const onFiles = async (files: File[]) => {
+     setReading(true);
+     try {
+       const picked = await readPhotoFiles(files);
+@@ -99,26 +98,17 @@ function Steps({
+ 
+   if (step.name === "pick") {
+     return (
+-      <label
+-        className={cn(
+-          "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
+-          reading && "pointer-events-none opacity-60",
+-        )}
+-      >
+-        {reading ? <Spinner /> : <ImageUp className="size-8 text-primary" />}
+-        <div className="font-semibold">{reading ? "Reading photos…" : "Choose a zip file or select many photos"}</div>
+-        <div className="text-sm text-muted-foreground">JPG, PNG or WebP. Nothing is saved until you confirm.</div>
+-        <input
+-          type="file"
+-          multiple
+-          accept=".zip,image/jpeg,image/png,image/webp,image/gif"
+-          className="sr-only"
+-          onChange={(e) => {
+-            void onFiles(e.target.files);
+-            e.target.value = "";
+-          }}
+-        />
+-      </label>
++      // No type filter here: readPhotoFiles reports unusable files in the Skipped list
++      <FileDropZone
++        icon={<ImageUp className="size-8 text-primary" />}
++        label="Drag a zip file or photos here, or click to choose"
++        hint="JPG, PNG or WebP. Nothing is saved until you confirm."
++        readingLabel="Reading photos…"
++        reading={reading}
++        accept=".zip,image/jpeg,image/png,image/webp,image/gif"
++        multiple
++        onFiles={(files) => void onFiles(files)}
++      />
+     );
+   }
+ 
+
+diff --git a/src/components/file-drop-zone.tsx b/src/components/file-drop-zone.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/file-drop-zone.tsx
+@@ -0,0 +1,97 @@
++import { useState, type DragEvent, type ReactNode } from "react";
++import { toast } from "sonner";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { cn } from "@/lib/utils.ts";
++
++type FileDropZoneProps = {
++  icon: ReactNode;
++  label: string;
++  hint: string;
++  readingLabel: string;
++  reading: boolean;
++  /** Value for the file input's accept attribute */
++  accept: string;
++  multiple?: boolean;
++  /** Optional check on each file; rejected files show `rejectMessage` */
++  isAccepted?: (file: File) => boolean;
++  rejectMessage?: string;
++  onFiles: (files: File[]) => void;
++};
++
++/** Dashed area that accepts files by click or drag and drop */
++export default function FileDropZone({
++  icon,
++  label,
++  hint,
++  readingLabel,
++  reading,
++  accept,
++  multiple = false,
++  isAccepted,
++  rejectMessage = "This file type is not supported",
++  onFiles,
++}: FileDropZoneProps) {
++  const [dragging, setDragging] = useState(false);
++
++  const pick = (list: FileList | null) => {
++    const all = list ? [...list] : [];
++    if (all.length === 0) return;
++    if (!multiple && all.length > 1) toast.info("Only the first file is used");
++    const chosen = multiple ? all : all.slice(0, 1);
++    const files = isAccepted ? chosen.filter(isAccepted) : chosen;
++    if (files.length === 0) {
++      toast.error(rejectMessage);
++      return;
++    }
++    onFiles(files);
++  };
++
++  const onDragOver = (e: DragEvent<HTMLLabelElement>) => {
++    // preventDefault is required for the browser to allow a drop here
++    e.preventDefault();
++    e.dataTransfer.dropEffect = "copy";
++    if (!dragging) setDragging(true);
++  };
++
++  const onDragLeave = (e: DragEvent<HTMLLabelElement>) => {
++    // Ignore leave events fired when moving over child elements
++    if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
++    setDragging(false);
++  };
++
++  const onDrop = (e: DragEvent<HTMLLabelElement>) => {
++    e.preventDefault();
++    setDragging(false);
++    pick(e.dataTransfer.files);
++  };
++
++  return (
++    <label
++      onDragOver={onDragOver}
++      onDragEnter={onDragOver}
++      onDragLeave={onDragLeave}
++      onDrop={onDrop}
++      className={cn(
++        "flex cursor-pointer flex-col items-center gap-3 rounded-xl border-2 border-dashed p-10 text-center transition-colors hover:border-primary/50 hover:bg-muted/40",
++        dragging && "border-primary bg-primary/10",
++        reading && "pointer-events-none opacity-60",
++      )}
++    >
++      {reading ? <Spinner /> : icon}
++      <div className="font-semibold">
++        {reading ? readingLabel : dragging ? `Drop the ${multiple ? "files" : "file"} here` : label}
++      </div>
++      <div className="text-sm text-muted-foreground">{hint}</div>
++      <input
++        type="file"
++        multiple={multiple}
++        accept={accept}
++        className="sr-only"
++        onChange={(e) => {
++          pick(e.target.files);
++          e.target.value = "";
++        }}
++      />
++    </label>
++  );
++}

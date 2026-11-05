@@ -29,6 +29,15 @@ describe("drug import", () => {
     await expect(staff.mutation(api.drugImport.applyBatch, { items: [] })).rejects.toThrow();
   });
 
+  it("can import a drug that has no package form", async () => {
+    const { owner } = await setup();
+    const bare = { ...fileDrug, drugId: "2", name: "Vit K4 Tab", packages: [] };
+    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: bare, action: "create" }] });
+    expect(res.failures).toEqual([]);
+    const [saved] = await owner.query(api.drugs.search, { term: "Vit K4" });
+    expect(saved.packages).toEqual([]);
+  });
+
   it("creates new drugs, then reports a conflict and keeps stock when using the file", async () => {
     const { owner } = await setup();
     const [first] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
@@ -63,6 +72,29 @@ describe("drug import", () => {
     const [updated] = await owner.query(api.drugs.search, { term: "32" });
     expect(updated.brandName).toBe("PK-Merz");
     expect(updated.packages[0].stock).toBe(7);
+  });
+
+  it("notes-only update changes Specifications/Remarks and nothing else", async () => {
+    const { owner } = await setup();
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: { ...fileDrug, remarks: "Old remark" }, action: "create" }],
+    });
+    const fromFile = { ...fileDrug, brandName: "Changed", specifications: "Scored", remarks: "" };
+    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [fromFile] });
+    expect(check.status).toBe("conflict");
+    expect(check.diff?.notes.map((n) => [n.key, n.auto])).toEqual([["specifications", true], ["remarks", false]]);
+
+    // Keep the saved remark and brand; fill Specifications
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: { ...fromFile, remarks: undefined }, action: "notes" }],
+    });
+    const [saved] = await owner.query(api.drugs.search, { term: "32" });
+    expect(saved).toMatchObject({ brandName: "PK-Merz", specifications: "Scored", remarks: "Old remark" });
+
+    // Use the file's blank remark: clears it
+    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fromFile, action: "notes" }] });
+    const [cleared] = await owner.query(api.drugs.search, { term: "32" });
+    expect(cleared.remarks).toBeUndefined();
   });
 
   it("skips barcodes already used by another drug", async () => {

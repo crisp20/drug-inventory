@@ -23,8 +23,20 @@ export type DrugInput = {
   manufacturer: string;
   pieceName: string;
   imageId?: Id<"_storage">;
+  // Free text; undefined or blank means none
+  specifications?: string;
+  remarks?: string;
   packages: PackageInput[];
 };
+
+export const MAX_NOTE_LENGTH = 2000;
+
+// Trims free text; blank becomes undefined so nothing empty is stored
+export function cleanNote(raw: string | undefined, label: string): string | undefined {
+  const text = raw?.trim() ?? "";
+  if (text.length > MAX_NOTE_LENGTH) bad(`${label} must be ${MAX_NOTE_LENGTH} characters or fewer`);
+  return text || undefined;
+}
 
 function bad(message: string): never {
   throw new ConvexError({ code: "BAD_REQUEST", message });
@@ -35,13 +47,14 @@ function isPositiveInt(n: number) {
 }
 
 // Validates and trims user input. Returns cleaned values.
-export function cleanDrugInput(input: DrugInput): DrugInput {
+// The import may save drugs with no package form when the admin chose to (allowNoPackages).
+export function cleanDrugInput(input: DrugInput, opts: { allowNoPackages?: boolean } = {}): DrugInput {
   const drugId = input.drugId.trim();
   const name = input.name.trim();
   if (!drugId) bad("Drug ID is required");
   if (drugId.length > 64) bad("Drug ID must be 64 characters or fewer");
   if (!name) bad("Drug name is required");
-  if (input.packages.length === 0) bad("Add at least one barcode and package form");
+  if (input.packages.length === 0 && !opts.allowNoPackages) bad("Add at least one barcode and package form");
   if (input.packages.length > MAX_PACKAGES_PER_DRUG) {
     bad(`A drug can have up to ${MAX_PACKAGES_PER_DRUG} barcodes`);
   }
@@ -71,6 +84,8 @@ export function cleanDrugInput(input: DrugInput): DrugInput {
     brandName: input.brandName.trim(),
     manufacturer: input.manufacturer.trim(),
     pieceName: input.pieceName.trim() || "units",
+    specifications: cleanNote(input.specifications, "Specifications"),
+    remarks: cleanNote(input.remarks, "Remarks"),
     packages,
   };
 }
@@ -146,6 +161,11 @@ export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
     rawPackages.map(async (p) => ({ ...p, images: await resolveImages(ctx, p.imageIds) })),
   );
   return { ...drug, imageUrl, packages };
+}
+
+// Puts drugs that have package forms first; the original order is kept within each group
+export function packagesFirst<T extends { packages: unknown[] }>(drugs: T[]): T[] {
+  return [...drugs.filter((d) => d.packages.length > 0), ...drugs.filter((d) => d.packages.length === 0)];
 }
 
 // Removes a drug with its package forms and pictures. The stock log keeps its copied details.

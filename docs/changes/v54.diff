@@ -1,0 +1,451 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+index 9ba096e..d8d3964 100644
+--- a/convex/drugImport.test.ts
++++ b/convex/drugImport.test.ts
+@@ -34,6 +34,15 @@ describe("drug import", () => {
+     await expect(staff.mutation(api.drugImport.applyBatch, { items: [] })).rejects.toThrow();
+   });
+ 
++  it("can import a drug that has no package form", async () => {
++    const { owner } = await setup();
++    const bare = { ...fileDrug, drugId: "2", name: "Vit K4 Tab", packages: [] };
++    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: bare, action: "create" }] });
++    expect(res.failures).toEqual([]);
++    const [saved] = await owner.query(api.drugs.search, { term: "Vit K4" });
++    expect(saved.packages).toEqual([]);
++  });
++
+   it("creates new drugs, then reports a conflict and keeps stock when using the file", async () => {
+     const { owner } = await setup();
+     const [first] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index d4527fa..9fba7f3 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -220,7 +220,7 @@ async function applyDrug(
+       specifications: d.specifications ?? existing?.specifications,
+       remarks: d.remarks ?? existing?.remarks,
+       packages: merged,
+-    });
++    }, { allowNoPackages: true });
+     const fields = {
+       drugId: input.drugId,
+       name: input.name,
+diff --git a/convex/lib/drugImport.test.ts b/convex/lib/drugImport.test.ts
+index 8811c64..0ce9c66 100644
+--- a/convex/lib/drugImport.test.ts
++++ b/convex/lib/drugImport.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import { buildImportDrugs, diffDrug, listDosageForms, sheetToRecords, toBaseUnit } from "./drugImport";
++import { buildImportDrugs, countPackageKinds, diffDrug, listDosageForms, sheetToRecords, toBaseUnit } from "./drugImport";
+ 
+ const HEADER = ["drugid", "printoutName", "brandName", "Manufacturer", "DosageForm", "drugPackageId", "drugId", "barcode", "form", "per", "amount"];
+ 
+@@ -28,7 +28,7 @@ describe("buildImportDrugs", () => {
+   ]);
+ 
+   it("keeps chosen forms, drugs with package forms, and collapses GS1 duplicates", () => {
+-    const { drugs, withoutPackages, problems } = buildImportDrugs(rows, ["TABLET", "CAPSULE"]);
++    const { drugs, leftOut, problems } = buildImportDrugs(rows, ["TABLET", "CAPSULE"]);
+     expect(drugs.map((d) => d.drugId)).toEqual(["32"]);
+     expect(drugs[0].packages).toEqual([
+       { barcode: "", qtyPerUnit: 20, baseUnit: "Strip", unitCount: 2 },
+@@ -36,10 +36,21 @@ describe("buildImportDrugs", () => {
+     ]);
+     expect(drugs[0].pieceName).toBe("TABLET");
+     // "Vit K4" has no package form; "Odd Cap" has an unreadable one
+-    expect(withoutPackages).toBe(2);
++    expect(leftOut).toBe(2);
+     expect(problems.map((p) => p.drugId)).toEqual(["3"]);
+   });
+ 
++  it("can import only drugs without package forms, or both kinds", () => {
++    const without = buildImportDrugs(rows, ["TABLET", "CAPSULE"], "without");
++    expect(without.drugs.map((d) => d.drugId)).toEqual(["2", "3"]);
++    expect(without.drugs.every((d) => d.packages.length === 0)).toBe(true);
++    expect(without.leftOut).toBe(1);
++    const both = buildImportDrugs(rows, ["TABLET", "CAPSULE"], "both");
++    expect(both.drugs.map((d) => d.drugId)).toEqual(["32", "2", "3"]);
++    expect(both.leftOut).toBe(0);
++    expect(countPackageKinds(rows, ["TABLET", "CAPSULE"])).toEqual({ with: 1, without: 2 });
++  });
++
+   it("blanks the '--' manufacturer placeholder and maps Bot to Bottle", () => {
+     const { drugs } = buildImportDrugs(rows, ["ML"]);
+     expect(drugs[0]).toMatchObject({ manufacturer: "", packages: [{ baseUnit: "Bottle" }] });
+diff --git a/convex/lib/drugImport.ts b/convex/lib/drugImport.ts
+index 25f7c71..629218e 100644
+--- a/convex/lib/drugImport.ts
++++ b/convex/lib/drugImport.ts
+@@ -139,8 +139,22 @@ function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
+   return rows.map((r) => r.values[key] ?? "").find((v) => v !== "") ?? "";
+ }
+ 
+-// Groups rows by Drug ID, keeps only the chosen dosage forms and drugs with at least one package form
+-export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
++// Which drugs to import: with at least one barcode/package form, without any, or both
++export type PackageFilter = "with" | "without" | "both";
++
++export const PACKAGE_FILTERS: ReadonlyArray<{ value: PackageFilter; label: string }> = [
++  { value: "with", label: "With barcode or package form" },
++  { value: "without", label: "Without barcode or package form" },
++  { value: "both", label: "Both" },
++];
++
++function keepDrug(filter: PackageFilter, hasPackages: boolean) {
++  return filter === "both" || (filter === "with") === hasPackages;
++}
++
++// Groups rows by Drug ID, keeps only the chosen dosage forms and the chosen package filter.
++// `leftOut` counts drugs dropped by the package filter.
++export function buildImportDrugs(records: SheetRecord[], forms: string[], filter: PackageFilter = "with") {
+   const wanted = new Set(forms.map((f) => f.toUpperCase()));
+   const problems: ImportProblem[] = [];
+   const grouped = new Map<string, SheetRecord[]>();
+@@ -157,7 +171,7 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+   }
+ 
+   const drugs: ImportDrug[] = [];
+-  let withoutPackages = 0;
++  let leftOut = 0;
+   for (const [drugId, rows] of grouped) {
+     const first = rows[0];
+     const name = first.values[COLUMNS.name];
+@@ -192,8 +206,8 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+       }
+       packages.set(key, pkg);
+     }
+-    if (packages.size === 0) {
+-      withoutPackages += 1;
++    if (!keepDrug(filter, packages.size > 0)) {
++      leftOut += 1;
+       continue;
+     }
+     drugs.push({
+@@ -209,7 +223,14 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[]) {
+       packages: [...packages.values()],
+     });
+   }
+-  return { drugs, problems, withoutPackages };
++  return { drugs, problems, leftOut };
++}
++
++// How many drugs in the chosen forms have / lack a package form, for the choice on the import screen
++export function countPackageKinds(records: SheetRecord[], forms: string[]) {
++  const { drugs } = buildImportDrugs(records, forms, "both");
++  const withPackages = drugs.filter((d) => d.packages.length > 0).length;
++  return { with: withPackages, without: drugs.length - withPackages };
+ }
+ 
+ export type ExistingDrug = {
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index cc7dfbc..0959f71 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -47,13 +47,14 @@ function isPositiveInt(n: number) {
+ }
+ 
+ // Validates and trims user input. Returns cleaned values.
+-export function cleanDrugInput(input: DrugInput): DrugInput {
++// The import may save drugs with no package form when the admin chose to (allowNoPackages).
++export function cleanDrugInput(input: DrugInput, opts: { allowNoPackages?: boolean } = {}): DrugInput {
+   const drugId = input.drugId.trim();
+   const name = input.name.trim();
+   if (!drugId) bad("Drug ID is required");
+   if (drugId.length > 64) bad("Drug ID must be 64 characters or fewer");
+   if (!name) bad("Drug name is required");
+-  if (input.packages.length === 0) bad("Add at least one barcode and package form");
++  if (input.packages.length === 0 && !opts.allowNoPackages) bad("Add at least one barcode and package form");
+   if (input.packages.length > MAX_PACKAGES_PER_DRUG) {
+     bad(`A drug can have up to ${MAX_PACKAGES_PER_DRUG} barcodes`);
+   }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 8fed24d..a9289f5 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v53");
++    expect(CHANGE_ENTRIES[0].version).toBe("v54");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index 895e0a6..d0ee370 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -1,8 +1,8 @@
+ import { useMemo, useState } from "react";
+ import { toast } from "sonner";
+-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Upload } from "lucide-react";
++import { AlertTriangle, CheckCircle2, Upload } from "lucide-react";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
+-import { listDosageForms, sheetToRecords, type SheetRecord } from "@/convex/lib/drugImport.ts";
++import { listDosageForms, sheetToRecords, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Checkbox } from "@/components/ui/checkbox.tsx";
+ import {
+@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils.ts";
+ import { readImportFile } from "../_lib/read-import-file.ts";
+ import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
+ import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
++import ImportFormsStep from "./import-forms-step.tsx";
+ import FileDropZone from "@/components/file-drop-zone.tsx";
+ import {
+   DEFAULT_CHOICES,
+@@ -83,7 +84,6 @@ function ImportSteps({
+   onClose: () => void;
+ }) {
+   const [reading, setReading] = useState(false);
+-  const [forms, setForms] = useState<string[]>(DEFAULT_FORMS);
+ 
+   const onFile = async (file: File | undefined) => {
+     if (!file) return;
+@@ -100,7 +100,6 @@ function ImportSteps({
+         return;
+       }
+       const available = listDosageForms(records);
+-      setForms(DEFAULT_FORMS.filter((f) => available.some((a) => a.form === f)));
+       setStep({ name: "forms", loaded: { fileName: file.name, records, forms: available } });
+     } catch (error) {
+       toast.error(error instanceof Error ? error.message : "The file could not be read");
+@@ -139,56 +138,23 @@ function ImportSteps({
+ 
+   if (step.name === "forms") {
+     const { loaded } = step;
+-    const startCheck = async () => {
++    const startCheck = async (forms: string[], filter: PackageFilter) => {
+       try {
+-        const review = await importer.check(loaded.records, forms);
++        const review = await importer.check(loaded.records, forms, filter);
+         setStep({ name: "review", loaded, review });
+       } catch (error) {
+         toast.error(errorMessage(error, "Could not compare the file with your inventory"));
+       }
+     };
+     return (
+-      <>
+-        <div className="min-h-0 space-y-3 overflow-y-auto">
+-          <div className="flex items-center gap-2 text-sm">
+-            <FileSpreadsheet className="size-4 text-primary" />
+-            <span className="font-medium">{loaded.fileName}</span>
+-            <span className="text-muted-foreground">· {loaded.records.length.toLocaleString()} rows</span>
+-          </div>
+-          <div className="text-sm font-semibold">Which drug forms should be imported?</div>
+-          <div className="flex flex-wrap gap-2">
+-            {loaded.forms.map(({ form, drugs }) => {
+-              const on = forms.includes(form);
+-              return (
+-                <button
+-                  key={form}
+-                  type="button"
+-                  onClick={() => setForms(on ? forms.filter((f) => f !== form) : [...forms, form])}
+-                  className={cn(
+-                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
+-                    on ? "border-primary bg-primary/10 font-semibold" : "hover:bg-muted",
+-                  )}
+-                >
+-                  <Checkbox checked={on} tabIndex={-1} className="pointer-events-none" />
+-                  {form}
+-                  <span className="text-xs text-muted-foreground">{drugs.toLocaleString()}</span>
+-                </button>
+-              );
+-            })}
+-          </div>
+-          <p className="text-xs text-muted-foreground">
+-            Only drugs with at least one barcode or package form are imported.
+-          </p>
+-        </div>
+-        <DialogFooter>
+-          <Button variant="ghost" onClick={() => setStep({ name: "pick" })}>
+-            Choose another file
+-          </Button>
+-          <Button disabled={forms.length === 0} onClick={() => void startCheck()}>
+-            Check file
+-          </Button>
+-        </DialogFooter>
+-      </>
++      <ImportFormsStep
++        fileName={loaded.fileName}
++        records={loaded.records}
++        available={loaded.forms}
++        initialForms={DEFAULT_FORMS.filter((f) => loaded.forms.some((a) => a.form === f))}
++        onBack={() => setStep({ name: "pick" })}
++        onCheck={(forms, filter) => void startCheck(forms, filter)}
++      />
+     );
+   }
+ 
+@@ -281,9 +247,11 @@ function ReviewStep({
+               <ClashNote item={i} />
+             </div>
+           ))}
+-          {review.withoutPackages > 0 && (
++          {review.leftOut > 0 && (
+             <p className="text-xs text-muted-foreground">
+-              {review.withoutPackages.toLocaleString()} drugs have no barcode or package form and were left out.
++              {review.leftOut.toLocaleString()} drugs{" "}
++              {review.filter === "with" ? "have no barcode or package form" : "have a barcode or package form"} and were
++              left out.
+             </p>
+           )}
+         </TabsContent>
+diff --git a/src/pages/inventory/_hooks/use-drug-import.ts b/src/pages/inventory/_hooks/use-drug-import.ts
+index ad43212..353147b 100644
+--- a/src/pages/inventory/_hooks/use-drug-import.ts
++++ b/src/pages/inventory/_hooks/use-drug-import.ts
+@@ -9,6 +9,7 @@ import {
+   buildImportDrugs,
+   type ImportDrug,
+   type ImportProblem,
++  type PackageFilter,
+   type SheetRecord,
+ } from "@/convex/lib/drugImport.ts";
+ 
+@@ -25,7 +26,9 @@ export type ImportReview = {
+   unchanged: number;
+   missing: MissingDrug[];
+   problems: ImportProblem[];
+-  withoutPackages: number;
++  // Drugs dropped by the with/without package form choice
++  leftOut: number;
++  filter: PackageFilter;
+ };
+ 
+ export type ImportReport = {
+@@ -49,10 +52,10 @@ export function useDrugImport() {
+   const removeBatch = useMutation(api.drugImport.removeBatch);
+   const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
+ 
+-  const check = async (records: SheetRecord[], forms: string[]): Promise<ImportReview> => {
+-    const { drugs, problems, withoutPackages } = buildImportDrugs(records, forms);
++  const check = async (records: SheetRecord[], forms: string[], filter: PackageFilter): Promise<ImportReview> => {
++    const { drugs, problems, leftOut } = buildImportDrugs(records, forms, filter);
+     const batches = chunks(drugs);
+-    const review: ImportReview = { newDrugs: [], conflicts: [], filled: [], unchanged: 0, missing: [], problems, withoutPackages };
++    const review: ImportReview = { newDrugs: [], conflicts: [], filled: [], unchanged: 0, missing: [], problems, leftOut, filter };
+     try {
+       for (let i = 0; i < batches.length; i++) {
+         setProgress({ label: "Comparing with your inventory", done: i, total: batches.length });
+
+diff --git a/src/pages/inventory/_components/import-forms-step.tsx b/src/pages/inventory/_components/import-forms-step.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/import-forms-step.tsx
+@@ -0,0 +1,113 @@
++import { useMemo, useState } from "react";
++import { FileSpreadsheet } from "lucide-react";
++import {
++  PACKAGE_FILTERS,
++  countPackageKinds,
++  type PackageFilter,
++  type SheetRecord,
++} from "@/convex/lib/drugImport.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import { DialogFooter } from "@/components/ui/dialog.tsx";
++import { cn } from "@/lib/utils.ts";
++
++type Props = {
++  fileName: string;
++  records: SheetRecord[];
++  available: { form: string; drugs: number }[];
++  initialForms: string[];
++  onBack: () => void;
++  onCheck: (forms: string[], filter: PackageFilter) => void;
++};
++
++const chip = (on: boolean) =>
++  cn(
++    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
++    on ? "border-primary bg-primary/10 font-semibold" : "hover:bg-muted",
++  );
++
++// Step 2 of the import: pick dosage forms and whether drugs with/without package forms come in
++export default function ImportFormsStep({ fileName, records, available, initialForms, onBack, onCheck }: Props) {
++  const [forms, setForms] = useState<string[]>(initialForms);
++  const [filter, setFilter] = useState<PackageFilter>("with");
++  const counts = useMemo(() => countPackageKinds(records, forms), [records, forms]);
++  const countOf = (f: PackageFilter) => (f === "both" ? counts.with + counts.without : counts[f]);
++  const selected = countOf(filter);
++
++  return (
++    <>
++      <div className="min-h-0 space-y-4 overflow-y-auto">
++        <div className="flex items-center gap-2 text-sm">
++          <FileSpreadsheet className="size-4 text-primary" />
++          <span className="font-medium">{fileName}</span>
++          <span className="text-muted-foreground">· {records.length.toLocaleString()} rows</span>
++        </div>
++
++        <div className="space-y-2">
++          <div className="text-sm font-semibold">Which drug forms should be imported?</div>
++          <div className="flex flex-wrap gap-2">
++            {available.map(({ form, drugs }) => {
++              const on = forms.includes(form);
++              return (
++                <button
++                  key={form}
++                  type="button"
++                  onClick={() => setForms(on ? forms.filter((f) => f !== form) : [...forms, form])}
++                  className={chip(on)}
++                >
++                  <Checkbox checked={on} tabIndex={-1} className="pointer-events-none" />
++                  {form}
++                  <span className="text-xs text-muted-foreground">{drugs.toLocaleString()}</span>
++                </button>
++              );
++            })}
++          </div>
++        </div>
++
++        <div className="space-y-2">
++          <div className="text-sm font-semibold">Which drugs should be imported?</div>
++          <div role="radiogroup" className="flex flex-wrap gap-2">
++            {PACKAGE_FILTERS.map(({ value, label }) => {
++              const on = filter === value;
++              return (
++                <button
++                  key={value}
++                  type="button"
++                  role="radio"
++                  aria-checked={on}
++                  onClick={() => setFilter(value)}
++                  className={chip(on)}
++                >
++                  <span
++                    className={cn(
++                      "flex size-4 items-center justify-center rounded-full border",
++                      on ? "border-primary" : "border-input",
++                    )}
++                  >
++                    {on && <span className="size-2 rounded-full bg-primary" />}
++                  </span>
++                  {label}
++                  <span className="text-xs text-muted-foreground">{countOf(value).toLocaleString()}</span>
++                </button>
++              );
++            })}
++          </div>
++          {filter !== "with" && (
++            <p className="text-xs text-muted-foreground">
++              Drugs without a barcode or package form are saved with no package form, so they cannot be stocked in or
++              out until you add one on the Inventory page.
++            </p>
++          )}
++        </div>
++      </div>
++      <DialogFooter>
++        <Button variant="ghost" onClick={onBack}>
++          Choose another file
++        </Button>
++        <Button disabled={forms.length === 0 || selected === 0} onClick={() => onCheck(forms, filter)}>
++          Check {selected.toLocaleString()} drugs
++        </Button>
++      </DialogFooter>
++    </>
++  );
++}

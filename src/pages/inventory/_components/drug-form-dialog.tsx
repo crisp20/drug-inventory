@@ -21,6 +21,7 @@ import {
   FormMessage,
 } from "@/components/ui/form.tsx";
 import { Input } from "@/components/ui/input.tsx";
+import { Textarea } from "@/components/ui/textarea.tsx";
 import SearchSelect from "@/components/search-select.tsx";
 import { MANUFACTURERS } from "@/lib/manufacturers.ts";
 import { DEFAULT_PIECE_NAME, PIECE_NAMES } from "@/lib/piece-names.ts";
@@ -44,7 +45,16 @@ type Props = {
 
 function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
   if (!drug) {
-    return { drugId: "", name: "", brandName: "", manufacturer: "", pieceName: DEFAULT_PIECE_NAME, packages: [] };
+    return {
+      drugId: "",
+      name: "",
+      brandName: "",
+      manufacturer: "",
+      pieceName: DEFAULT_PIECE_NAME,
+      specifications: "",
+      remarks: "",
+      packages: [],
+    };
   }
   return {
     drugId: drug.drugId,
@@ -52,6 +62,8 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
     brandName: drug.brandName,
     manufacturer: drug.manufacturer,
     pieceName: drug.pieceName,
+    specifications: drug.specifications ?? "",
+    remarks: drug.remarks ?? "",
     packages: drug.packages.map((p) => ({
       packageId: p._id,
       barcode: p.barcode,
@@ -139,6 +151,22 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
     />
   );
 
+  const noteField = (name: "specifications" | "remarks", label: string, placeholder: string) => (
+    <FormField
+      control={form.control}
+      name={name}
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>{label}</FormLabel>
+          <FormControl>
+            <Textarea {...field} rows={2} placeholder={placeholder} />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  );
+
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
@@ -149,6 +177,10 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
           {selectField("pieceName", "Pieces are called", PIECE_NAMES, "Search and select", false)}
         </div>
         {selectField("manufacturer", "Manufacturer", MANUFACTURERS, "Search and select a manufacturer", true)}
+        <div className="grid gap-4 sm:grid-cols-2">
+          {noteField("specifications", "Specifications", "e.g. White round tablet, scored")}
+          {noteField("remarks", "Remarks", "e.g. Store below 25°C")}
+        </div>
         <div className="space-y-2">
           <div className="text-sm font-medium">Drug picture</div>
           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>
