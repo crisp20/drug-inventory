@@ -5,8 +5,9 @@ import type { Value } from "convex/values";
 import type { DataModel, Id } from "./_generated/dataModel";
 import { env, type MutationCtx } from "./_generated/server";
 import { logActivity } from "./lib/activity";
+import { validatePasswordRequirements } from "./lib/password";
+import { isValidUsername } from "./lib/username";
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USER_LIMIT = 500;
 
 function normalizeUsername(username: string) {
@@ -20,21 +21,24 @@ function isString(value: Value | undefined): value is string {
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
     Password<DataModel>({
-      validatePasswordRequirements(password) {
-        if (typeof password !== "string" || password.length < 12) {
-          throw new Error("Passwords must be at least 12 characters long");
-        }
-      },
+      validatePasswordRequirements,
       profile(params) {
         if (!isString(params.email)) {
           throw new Error("Enter a username in email format");
         }
         const email = normalizeUsername(params.email);
-        if (!EMAIL_PATTERN.test(email) || email.length > 254) {
+        if (!isValidUsername(email)) {
           throw new Error("Enter a valid username in email format");
         }
 
         const isSignUp = params.flow === "signUp";
+        if (
+          isSignUp &&
+          (typeof params.confirmPassword !== "string" ||
+            params.confirmPassword !== params.password)
+        ) {
+          throw new Error("Passwords do not match");
+        }
         const directorUsername = env.DIRECTOR_USERNAME
           ? normalizeUsername(env.DIRECTOR_USERNAME)
           : undefined;
@@ -44,7 +48,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         if (
           isSignUp &&
           (!directorUsername ||
-            !EMAIL_PATTERN.test(directorUsername) ||
+            !isValidUsername(directorUsername) ||
             !directorPassword)
         ) {
           throw new Error("Director account setup is not configured");
@@ -79,7 +83,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         typeof profile.email === "string"
           ? normalizeUsername(profile.email)
           : undefined;
-      if (!email || !EMAIL_PATTERN.test(email)) {
+      if (!email || !isValidUsername(email)) {
         throw new ConvexError("Enter a valid username in email format");
       }
 

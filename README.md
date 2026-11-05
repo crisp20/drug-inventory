@@ -57,16 +57,20 @@ to that same backend.
 
 In the Convex dashboard, configure these server-side environment variables:
 
-| Variable            | Value                                     |
-| ------------------- | ----------------------------------------- |
-| `DIRECTOR_USERNAME` | Director username in email format         |
-| `DIRECTOR_PASSWORD` | Strong password of at least 12 characters |
+| Variable            | Value                                                                     |
+| ------------------- | ------------------------------------------------------------------------- |
+| `DIRECTOR_USERNAME` | Director username in email format                                         |
+| `DIRECTOR_PASSWORD` | 12-20 characters with uppercase, lowercase, special, and digit characters |
 
 Create the Director account in the app using the configured username and exact
 password. That account is activated automatically; all other sign-ups remain
 pending until the Director approves them on the Users page. Passwords are
 stored as hashes after registration. Changing `DIRECTOR_PASSWORD` later does
 not reset the account password.
+
+All new and reset passwords must be 12-20 characters long and include at least
+one uppercase letter, one lowercase letter, one special character, and one
+digit.
 
 Existing profiles are matched by username when an account is first created.
 Former admin access is not carried over; only the configured Director is

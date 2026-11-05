@@ -1,6 +1,6 @@
 import { forwardRef, useState } from "react";
 import { type VariantProps } from "class-variance-authority";
-import { Loader2, LogIn, LogOut } from "lucide-react";
+import { Eye, EyeOff, Loader2, LogIn, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useConvexAuth } from "convex/react";
@@ -13,6 +13,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog.tsx";
 import { Input } from "@/components/ui/input.tsx";
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  PASSWORD_REQUIREMENTS_MESSAGE,
+  validatePasswordRequirements,
+} from "@/convex/lib/password.ts";
+import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
 
 export interface SignInButtonProps
   extends
@@ -75,6 +82,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
     const [dialogOpen, setDialogOpen] = useState(false);
     const [signingIn, setSigningIn] = useState(false);
     const [isSignUp, setIsSignUp] = useState(false);
+    const [showPassword, setShowPassword] = useState(false);
 
     const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
       onClick?.(event);
@@ -95,9 +103,44 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
 
     const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      const formData = new FormData(event.currentTarget);
+      const username = formData.get("email");
+      if (typeof username !== "string" || !username.trim()) {
+        toast.error("Enter a username in email format");
+        return;
+      }
+      if (!isValidUsername(username)) {
+        toast.error("Enter a valid username in email format");
+        return;
+      }
+      const password = formData.get("password");
+      if (typeof password !== "string" || !password) {
+        toast.error("Enter a password");
+        return;
+      }
+      if (isSignUp) {
+        try {
+          validatePasswordRequirements(password);
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : PASSWORD_REQUIREMENTS_MESSAGE,
+          );
+          return;
+        }
+        if (formData.get("confirmPassword") !== password) {
+          toast.error("Passwords do not match");
+          return;
+        }
+        const name = formData.get("name");
+        if (typeof name === "string" && name.length > 80) {
+          toast.error("Name is too long");
+          return;
+        }
+      }
       setSigningIn(true);
       try {
-        const formData = new FormData(event.currentTarget);
         formData.set("flow", isSignUp ? "signUp" : "signIn");
         await signIn("password", formData);
         setDialogOpen(false);
@@ -161,6 +204,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
             <form
               onSubmit={(event) => void handleSubmit(event)}
               className="space-y-4"
+              noValidate
             >
               {isSignUp && (
                 <div className="space-y-2">
@@ -184,6 +228,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                   name="email"
                   type="email"
                   autoComplete="username"
+                  maxLength={MAX_USERNAME_LENGTH}
                   required
                 />
               </div>
@@ -191,15 +236,71 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                 <label htmlFor="auth-password" className="text-sm font-medium">
                   Password
                 </label>
-                <Input
-                  id="auth-password"
-                  name="password"
-                  type="password"
-                  autoComplete={isSignUp ? "new-password" : "current-password"}
-                  minLength={isSignUp ? 12 : undefined}
-                  required
-                />
+                <div className="relative">
+                  <Input
+                    id="auth-password"
+                    name="password"
+                    type={showPassword ? "text" : "password"}
+                    autoComplete={
+                      isSignUp ? "new-password" : "current-password"
+                    }
+                    minLength={isSignUp ? MIN_PASSWORD_LENGTH : undefined}
+                    maxLength={isSignUp ? MAX_PASSWORD_LENGTH : undefined}
+                    className="pr-10"
+                    required
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={
+                      showPassword ? "Hide password" : "Show password"
+                    }
+                    className="absolute top-0 right-0 h-full aspect-square"
+                    onClick={() => setShowPassword((shown) => !shown)}
+                  >
+                    {showPassword ? <EyeOff /> : <Eye />}
+                  </Button>
+                </div>
+                {isSignUp && (
+                  <p className="text-sm text-muted-foreground">
+                    {PASSWORD_REQUIREMENTS_MESSAGE}
+                  </p>
+                )}
               </div>
+              {isSignUp && (
+                <div className="space-y-2">
+                  <label
+                    htmlFor="auth-confirm-password"
+                    className="text-sm font-medium"
+                  >
+                    Confirm password
+                  </label>
+                  <div className="relative">
+                    <Input
+                      id="auth-confirm-password"
+                      name="confirmPassword"
+                      type={showPassword ? "text" : "password"}
+                      autoComplete="new-password"
+                      minLength={MIN_PASSWORD_LENGTH}
+                      maxLength={MAX_PASSWORD_LENGTH}
+                      required
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={
+                        showPassword ? "Hide password" : "Show password"
+                      }
+                      className="absolute top-0 right-0 h-full aspect-square"
+                      onClick={() => setShowPassword((shown) => !shown)}
+                    >
+                      {showPassword ? <EyeOff /> : <Eye />}
+                    </Button>
+                  </div>
+                </div>
+              )}
               <Button type="submit" className="w-full" disabled={signingIn}>
                 {signingIn && <Loader2 className="size-4 animate-spin" />}
                 {signingIn
@@ -214,7 +315,9 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
               <button
                 type="button"
                 className="font-medium text-primary underline-offset-4 hover:underline"
-                onClick={() => setIsSignUp((current) => !current)}
+                onClick={() => {
+                  setIsSignUp((current) => !current);
+                }}
               >
                 {isSignUp ? "Sign in" : "Create account"}
               </button>

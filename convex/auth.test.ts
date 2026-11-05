@@ -22,7 +22,7 @@ const authEnvironment = {
     keys: [{ ...jwk, kid: "auth-test", alg: "RS256", use: "sig" }],
   }),
   DIRECTOR_USERNAME: "director@example.com",
-  DIRECTOR_PASSWORD: "director-test-password-2026",
+  DIRECTOR_PASSWORD: "Director-123A!",
 };
 
 beforeEach(() => {
@@ -48,7 +48,13 @@ async function signUp(
 ) {
   return await t.action(signIn, {
     provider: "password",
-    params: { flow: "signUp", email: username, password, ...extraParams },
+    params: {
+      flow: "signUp",
+      email: username,
+      password,
+      confirmPassword: password,
+      ...extraParams,
+    },
   });
 }
 
@@ -57,7 +63,7 @@ describe("username and password authentication", () => {
     const t = convexTest(schema, modules);
 
     await signUp(t, "director@example.com", authEnvironment.DIRECTOR_PASSWORD);
-    await signUp(t, "staff@example.com", "staff-test-password-2026", {
+    await signUp(t, "staff@example.com", "Staff-1234A!", {
       role: "director",
     });
     await t.action(signIn, {
@@ -65,7 +71,7 @@ describe("username and password authentication", () => {
       params: {
         flow: "signIn",
         email: "staff@example.com",
-        password: "staff-test-password-2026",
+        password: "Staff-1234A!",
       },
     });
 
@@ -119,11 +125,96 @@ describe("username and password authentication", () => {
     const t = convexTest(schema, modules);
 
     await expect(
-      signUp(t, "director@example.com", "wrong-director-password"),
+      signUp(t, "director@example.com", "Wrong-1234A!Pass"),
     ).rejects.toThrow(/Invalid director credentials/);
 
     const users = await t.run((ctx) => ctx.db.query("users").collect());
     expect(users).toHaveLength(0);
+  });
+
+  it("requires matching signup passwords", async () => {
+    const t = convexTest(schema, modules);
+
+    await expect(
+      t.action(signIn, {
+        provider: "password",
+        params: {
+          flow: "signUp",
+          email: "staff@example.com",
+          password: "Staff-1234A!",
+          confirmPassword: "Other-1234A!",
+        },
+      }),
+    ).rejects.toThrow(/Passwords do not match/);
+    await expect(
+      t.run((ctx) => ctx.db.query("users").collect()),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("lets a director reset another user's password and lets the user reset their own", async () => {
+    const t = convexTest(schema, modules);
+    await signUp(t, "director@example.com", authEnvironment.DIRECTOR_PASSWORD);
+    await signUp(t, "staff@example.com", "Staff-1234A!");
+
+    const users = await t.run((ctx) => ctx.db.query("users").collect());
+    const director = users.find((user) => user.role === "director");
+    const staff = users.find((user) => user.email === "staff@example.com");
+    if (!director || !staff) {
+      throw new Error("The expected accounts were not created");
+    }
+
+    const directorClient = t.withIdentity({
+      subject: director._id,
+      tokenIdentifier: director._id,
+    });
+    await directorClient.mutation(api.users.updateAccess, {
+      userId: staff._id,
+      status: "active",
+    });
+    await directorClient.action(api.users.resetPassword, {
+      userId: staff._id,
+      newPassword: "Reset-1234A!",
+    });
+    await t.action(signIn, {
+      provider: "password",
+      params: {
+        flow: "signIn",
+        email: "staff@example.com",
+        password: "Reset-1234A!",
+      },
+    });
+
+    const staffClient = t.withIdentity({
+      subject: staff._id,
+      tokenIdentifier: staff._id,
+    });
+    await expect(
+      staffClient.action(api.users.resetPassword, {
+        userId: director._id,
+        newPassword: "BadReset-123A!",
+      }),
+    ).rejects.toThrow(/Only the Director can reset another user's password/);
+    await staffClient.action(api.users.resetPassword, {
+      newPassword: "SelfReset-123A!",
+    });
+    await expect(
+      t.action(signIn, {
+        provider: "password",
+        params: {
+          flow: "signIn",
+          email: "staff@example.com",
+          password: "Reset-1234A!",
+        },
+      }),
+    ).rejects.toThrow(/InvalidSecret/);
+    await t.action(signIn, {
+      provider: "password",
+      params: {
+        flow: "signIn",
+        email: "staff@example.com",
+        password: "SelfReset-123A!",
+      },
+    });
   });
 
   it("reuses legacy accounts but requires approval and does not preserve old admin access", async () => {
@@ -138,7 +229,7 @@ describe("username and password authentication", () => {
       }),
     );
 
-    await signUp(t, "staff@example.com", "staff-test-password-2026");
+    await signUp(t, "staff@example.com", "Staff-1234A!");
 
     const users = await t.run((ctx) => ctx.db.query("users").collect());
     expect(users).toHaveLength(1);

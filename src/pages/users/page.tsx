@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Navigate } from "react-router-dom";
-import { Pill, UserCheck, UserX, Users } from "lucide-react";
+import { MoreHorizontal, Pill, UserCheck, UserX, Users } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import type { Doc } from "@/convex/_generated/dataModel.d.ts";
@@ -21,6 +21,14 @@ import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { useConfirm } from "@/hooks/use-confirm.ts";
 import { errorMessage } from "@/lib/errors.ts";
+import { ResetPasswordMenuItem } from "@/components/reset-password-menu-item.tsx";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu.tsx";
 
 type Status = "pending" | "active" | "disabled";
 
@@ -110,25 +118,55 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
           {user.email ?? "No email"}
         </div>
       </div>
-      {user.status === "active" && <CanisterAccessToggle user={user} />}
-      {!isSelf && (
-        <div className="flex flex-wrap items-center gap-2">
-          {user.status !== "active" && (
+      {user.status === "active" && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
             <Button
-              size="sm"
-              onClick={() => void save("active", "User approved")}
+              variant="outline"
+              size="icon"
+              aria-label={`Actions for ${user.name ?? user.email ?? "user"}`}
             >
-              <UserCheck /> Approve
+              <MoreHorizontal />
             </Button>
-          )}
-          {user.status !== "disabled" && (
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <CanisterAccessToggle user={user} />
+            <DropdownMenuSeparator />
+            <ResetPasswordMenuItem
+              userId={user._id}
+              userLabel={user.name ?? user.email ?? "this user"}
+            />
+            {!isSelf && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => void removeAccess()}
+                >
+                  <UserX />
+                  Remove access
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {!isSelf && user.status !== "active" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => void save("active", "User approved")}
+          >
+            <UserCheck /> Approve
+          </Button>
+          {user.status === "pending" && (
             <Button
               size="sm"
               variant="ghost"
               className="text-destructive"
               onClick={() => void removeAccess()}
             >
-              <UserX /> {user.status === "pending" ? "Reject" : "Remove access"}
+              <UserX /> Reject
             </Button>
           )}
         </div>

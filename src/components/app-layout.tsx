@@ -12,7 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
-import { SignInButton } from "@/components/ui/signin.tsx";
+import { AccountMenu } from "@/components/account-menu.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { useUnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
@@ -116,29 +116,14 @@ function Shell() {
             <NavEntry key={item.label} item={item} />
           ))}
         </nav>
-        <div className="space-y-3 border-t border-sidebar-border pt-4">
-          <div className="px-2">
-            <div className="truncate text-sm font-semibold">
-              {user.name ?? user.email}
-            </div>
-            <div className="text-xs capitalize opacity-70">{user.role}</div>
-          </div>
-          <SignInButton
-            variant="ghost"
-            size="sm"
-            className="w-full justify-start hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          />
+        <div className="border-t border-sidebar-border pt-4">
+          <AccountMenu user={user} className="w-full" />
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b bg-sidebar px-4 py-3 text-sidebar-foreground md:hidden">
           <BrandLogo />
-          <SignInButton
-            variant="ghost"
-            size="sm"
-            showIcon={false}
-            className="hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          />
+          <AccountMenu user={user} className="w-auto" />
         </header>
         <main className="flex-1 overflow-auto pb-20 md:pb-0">
           <RootErrorBoundary>

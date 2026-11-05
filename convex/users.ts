@@ -1,8 +1,15 @@
 import { ConvexError, v } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
-import { mutation, query } from "./_generated/server";
+import {
+  getAuthSessionId,
+  getAuthUserId,
+  invalidateSessions,
+  modifyAccountCredentials,
+} from "@convex-dev/auth/server";
+import { api } from "./_generated/api";
+import { action, mutation, query } from "./_generated/server";
 import { requireActiveUser, requireAdmin } from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
+import { validatePasswordRequirements } from "./lib/password";
 import { userStatus } from "./schema/users";
 
 export const getCurrentUser = query({
@@ -21,6 +28,58 @@ export const listByStatus = query({
       .query("users")
       .withIndex("by_status", (q) => q.eq("status", args.status))
       .take(200);
+  },
+});
+
+export const getPasswordResetTarget = query({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const actor = await requireActiveUser(ctx);
+    if (actor._id !== userId && actor.role !== "director") {
+      throw new ConvexError({
+        code: "FORBIDDEN",
+        message: "Only the Director can reset another user's password",
+      });
+    }
+    const target = await ctx.db.get("users", userId);
+    if (!target || !target.email) {
+      throw new ConvexError({
+        code: "NOT_FOUND",
+        message: "User or username not found",
+      });
+    }
+    return { userId: target._id, email: target.email };
+  },
+});
+
+export const resetPassword = action({
+  args: {
+    userId: v.optional(v.id("users")),
+    newPassword: v.string(),
+  },
+  handler: async (ctx, { userId, newPassword }) => {
+    validatePasswordRequirements(newPassword);
+    const actorId = await getAuthUserId(ctx);
+    if (!actorId) {
+      throw new ConvexError({
+        code: "UNAUTHENTICATED",
+        message: "Please sign in",
+      });
+    }
+    const target = await ctx.runQuery(api.users.getPasswordResetTarget, {
+      userId: userId ?? actorId,
+    });
+    await modifyAccountCredentials(ctx, {
+      provider: "password",
+      account: { id: target.email, secret: newPassword },
+    });
+    const currentSessionId = await getAuthSessionId(ctx);
+    await invalidateSessions(ctx, {
+      userId: target.userId,
+      except:
+        target.userId === actorId && currentSessionId ? [currentSessionId] : [],
+    });
+    return null;
   },
 });
 
