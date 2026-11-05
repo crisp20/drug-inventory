@@ -1,0 +1,7 @@
+.ds_store
+node_modules
+dist
+!dist/.git-keep
+.env*
+!.env*.example
+*.tsbuildinfo
