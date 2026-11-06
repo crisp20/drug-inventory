@@ -3,9 +3,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import type { QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 
-export async function getSignedInUser(
-  ctx: QueryCtx,
-): Promise<Doc<"users"> | null> {
+export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
   const userId = await getAuthUserId(ctx);
   return userId ? await ctx.db.get("users", userId) : null;
 }
