@@ -105,8 +105,8 @@ export function AwaitingApprovalScreen({
           </h1>
           <p className="text-muted-foreground">
             {disabled
-              ? "Your account no longer has access. Contact the Director if this is a mistake."
-              : `The Director needs to approve ${email ?? "your account"} before you can use the system.`}
+              ? "Your account no longer has access. Contact an admin if this is a mistake."
+              : `An admin needs to approve ${email ?? "your account"} before you can use the system.`}
           </p>
         </div>
         <SignInButton variant="secondary" className="w-full" />

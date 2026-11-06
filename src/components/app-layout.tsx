@@ -26,17 +26,17 @@ type NavItem = {
   label: string;
   icon: LucideIcon;
   to?: string;
-  directorOnly?: boolean;
+  adminOnly?: boolean;
 };
 
 const NAV: NavItem[] = [
   { label: "Inventory", icon: Boxes, to: "/" },
   { label: "Stock In", icon: ArrowDownToLine, to: "/stock-in" },
   { label: "Stock Out", icon: ArrowUpFromLine, to: "/stock-out" },
-  { label: "Users", icon: Users, to: "/users", directorOnly: true },
-  { label: "Log", icon: ScrollText, to: "/log", directorOnly: true },
-  { label: "Settings", icon: Settings, to: "/settings", directorOnly: true },
-  { label: "Changes", icon: History, to: "/changes", directorOnly: true },
+  { label: "Users", icon: Users, to: "/users", adminOnly: true },
+  { label: "Log", icon: ScrollText, to: "/log", adminOnly: true },
+  { label: "Settings", icon: Settings, to: "/settings", adminOnly: true },
+  { label: "Changes", icon: History, to: "/changes", adminOnly: true },
 ];
 
 function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
@@ -97,14 +97,9 @@ function Shell() {
   const user = useCurrentUser();
   if (user === undefined) return <FullPageSkeleton />;
   if (!user || user.status !== "active") {
-    return (
-      <AwaitingApprovalScreen
-        disabled={user?.status === "disabled"}
-        email={user?.email}
-      />
-    );
+    return (<AwaitingApprovalScreen disabled={user?.status === "disabled"} email={user?.email} />);
   }
-  const items = NAV.filter((n) => !n.directorOnly || user.role === "director");
+  const items = NAV.filter((n) => !n.adminOnly || user.role === "admin");
 
   return (
     <div className="flex h-screen bg-background">

@@ -23,9 +23,9 @@ async function setup() {
 }
 
 describe("access", () => {
-  it("keeps the director active and new users pending", async () => {
+  it("keeps the admin active and new users pending", async () => {
     const { owner, staff } = await setup();
-    expect(await owner.query(api.users.getCurrentUser, {})).toMatchObject({ role: "director", status: "active" });
+    expect(await owner.query(api.users.getCurrentUser, {})).toMatchObject({ role: "admin", status: "active" });
     expect(await staff.query(api.users.getCurrentUser, {})).toMatchObject({ role: "staff", status: "pending" });
   });
 
@@ -42,7 +42,7 @@ describe("access", () => {
 
     const found = await staff.query(api.drugs.search, { term: "(01)09312345678907" });
     expect(found).toHaveLength(1);
-    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/Director/);
+    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/Admin/);
   });
 });
 

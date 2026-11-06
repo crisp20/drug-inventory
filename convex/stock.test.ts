@@ -279,7 +279,7 @@ describe("Undo", () => {
         movementId: m._id,
         reason: "x",
       }),
-    ).rejects.toThrow(/Director/);
+    ).rejects.toThrow(/Admin/);
     await expect(
       owner.mutation(api.stock.undoMovement, {
         movementId: m._id,

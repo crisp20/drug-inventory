@@ -31,7 +31,7 @@ const PAGE = 50;
 export default function LogPage() {
   const me = useCurrentUser();
   if (me === undefined) return null;
-  if (!me || me.role !== "director") return <Navigate to="/" replace />;
+  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
   return <LogView />;
 }
 

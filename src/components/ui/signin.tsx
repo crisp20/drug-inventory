@@ -200,7 +200,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
               {
                 isSignUp &&
                 <DialogDescription>
-                  New accounts need Director approval.
+                  New accounts need admin approval.
                 </DialogDescription>
               }
             </DialogHeader>

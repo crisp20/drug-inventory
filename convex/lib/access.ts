@@ -17,7 +17,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
   if (!user || user.status !== "active") {
     throw new ConvexError({
       code: "FORBIDDEN",
-      message: "Your account is waiting for Director approval",
+      message: "Your account is waiting for admin approval",
     });
   }
   return user;
@@ -25,8 +25,8 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
 
 export async function requireAdmin(ctx: QueryCtx): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
-  if (user.role !== "director") {
-    throw new ConvexError({ code: "FORBIDDEN", message: "Only the Director can do this" });
+  if (user.role !== "admin") {
+    throw new ConvexError({ code: "FORBIDDEN", message: "Only the admin can do this" });
   }
   return user;
 }

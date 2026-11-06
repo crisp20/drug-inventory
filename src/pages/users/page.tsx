@@ -111,10 +111,10 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
           <span className="truncate font-semibold">
             {user.name ?? "Unnamed"}
           </span>
-          {isSelf && <Badge variant="secondary">Director</Badge>}
+          {isSelf && <Badge variant="secondary">Admin</Badge>}
           {!isSelf && (
             <Badge variant="outline">
-              {user.role === "director" ? "Director" : "Staff"}
+              {user.role === "admin" ? "Admin" : "Staff"}
             </Badge>
           )}
         </div>
@@ -229,7 +229,7 @@ export default function UsersPage() {
   const me = useCurrentUser();
   const [tab, setTab] = useState<Status>("pending");
   if (me === undefined) return null;
-  if (!me || me.role !== "director") return <Navigate to="/" replace />;
+  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">

@@ -21,7 +21,7 @@ import IdleRefreshSetting from "./_components/idle-refresh-setting.tsx";
 export default function SettingsPage() {
   const me = useCurrentUser();
   if (me === undefined) return null;
-  if (!me || me.role !== "director") return <Navigate to="/" replace />;
+  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
   return (
     <div className="mx-auto max-w-2xl p-4 md:p-8">
       <PageHeader

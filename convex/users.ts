@@ -35,10 +35,10 @@ export const getPasswordResetTarget = query({
   args: { userId: v.id("users") },
   handler: async (ctx, { userId }) => {
     const actor = await requireActiveUser(ctx);
-    if (actor._id !== userId && actor.role !== "director") {
+    if (actor._id !== userId && actor.role !== "admin") {
       throw new ConvexError({
         code: "FORBIDDEN",
-        message: "Only the Director can reset another user's password",
+        message: "Only the Admin can reset another user's password",
       });
     }
     const target = await ctx.db.get("users", userId);
@@ -105,18 +105,18 @@ export const listPeople = query({
 export const updateAccess = mutation({
   args: { userId: v.id("users"), status: userStatus },
   handler: async (ctx, args) => {
-    const director = await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
     const target = await ctx.db.get("users", args.userId);
     if (!target) {
       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
     }
-    if (target.role === "director") {
+    if (target.role === "admin") {
       throw new ConvexError({
         code: "FORBIDDEN",
-        message: "The director account cannot be changed",
+        message: "The admin account cannot be changed",
       });
     }
-    if (target._id === director._id) {
+    if (target._id === admin._id) {
       throw new ConvexError({
         code: "BAD_REQUEST",
         message: "You cannot change your own access",
@@ -139,7 +139,7 @@ export const updateAccess = mutation({
         : args.status === "disabled" && target.status !== "disabled"
           ? "Disabled"
           : "Access changed";
-      await logActivity(ctx, actorOf(director), {
+      await logActivity(ctx, actorOf(admin), {
         category: "user",
         action,
         summary: `${action}: ${displayName(target)}`,

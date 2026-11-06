@@ -2,12 +2,7 @@ import { defineTable } from "convex/server";
 import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
 
-export const userRole = v.union(
-  v.literal("director"),
-  v.literal("staff"),
-  // Keep old rows schema-valid while existing accounts switch to password auth.
-  v.literal("admin"),
-);
+export const userRole = v.union(v.literal("admin"), v.literal("staff"));
 export const userStatus = v.union(
   v.literal("pending"),
   v.literal("active"),

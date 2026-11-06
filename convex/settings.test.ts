@@ -38,7 +38,7 @@ describe("Large quantity setting", () => {
     const { owner, staff } = await setup();
     await expect(
       staff.mutation(api.settings.update, { largeQuantityThreshold: 50 }),
-    ).rejects.toThrow(/Director/);
+    ).rejects.toThrow(/Admin/);
     for (const bad of [0, -5, 2.5, 100_001]) {
       await expect(
         owner.mutation(api.settings.update, { largeQuantityThreshold: bad }),
@@ -86,7 +86,7 @@ describe("Expiry warning setting", () => {
     );
     await expect(
       staff.mutation(api.settings.setExpiryWarning, { expiryWarningMonths: 3 }),
-    ).rejects.toThrow(/Director/);
+    ).rejects.toThrow(/Admin/);
     await owner.mutation(api.settings.setExpiryWarning, {
       expiryWarningMonths: 3,
     });

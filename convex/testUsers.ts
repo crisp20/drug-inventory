@@ -3,11 +3,11 @@ import type { convexTest } from "convex-test";
 type TestHarness = ReturnType<typeof convexTest>;
 
 export async function createTestUsers(t: TestHarness) {
-  const [directorId, staffId] = await t.run(async (ctx) => {
-    const directorId = await ctx.db.insert("users", {
+  const [adminId, staffId] = await t.run(async (ctx) => {
+    const adminId = await ctx.db.insert("users", {
       name: "Hubert",
-      email: "director@example.com",
-      role: "director",
+      email: "admin@example.com",
+      role: "admin",
       status: "active",
     });
     const staffId = await ctx.db.insert("users", {
@@ -16,13 +16,13 @@ export async function createTestUsers(t: TestHarness) {
       role: "staff",
       status: "pending",
     });
-    return [directorId, staffId] as const;
+    return [adminId, staffId] as const;
   });
 
   const owner = t.withIdentity({
-    subject: directorId,
-    tokenIdentifier: "issuer|director",
-    email: "director@example.com",
+    subject: adminId,
+    tokenIdentifier: "issuer|admin",
+    email: "admin@example.com",
     name: "Hubert",
   });
   const staff = t.withIdentity({
@@ -31,5 +31,5 @@ export async function createTestUsers(t: TestHarness) {
     email: "staff@example.com",
     name: "Sam",
   });
-  return { owner, staff, directorId, staffId };
+  return { owner, staff, adminId, staffId };
 }

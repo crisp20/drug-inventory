@@ -21,8 +21,8 @@ const authEnvironment = {
   JWKS: JSON.stringify({
     keys: [{ ...jwk, kid: "auth-test", alg: "RS256", use: "sig" }],
   }),
-  DIRECTOR_USERNAME: "director@example.com",
-  DIRECTOR_PASSWORD: "Director-123A!",
+  DIRECTOR_USERNAME: "admin@example.com",
+  DIRECTOR_PASSWORD: "Admin-123A!",
 };
 
 beforeEach(() => {
@@ -59,12 +59,12 @@ async function signUp(
 }
 
 describe("username and password authentication", () => {
-  it("activates only the configured Director and leaves other registrations pending", async () => {
+  it("activates only the configured admin and leaves other registrations pending", async () => {
     const t = convexTest(schema, modules);
 
-    await signUp(t, "director@example.com", authEnvironment.DIRECTOR_PASSWORD);
+    await signUp(t, "admin@example.com", authEnvironment.DIRECTOR_PASSWORD);
     await signUp(t, "staff@example.com", "Staff-1234A!", {
-      role: "director",
+      role: "admin",
     });
     await t.action(signIn, {
       provider: "password",
@@ -79,8 +79,8 @@ describe("username and password authentication", () => {
     expect(users).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          email: "director@example.com",
-          role: "director",
+          email: "admin@example.com",
+          role: "admin",
           status: "active",
         }),
         expect.objectContaining({
@@ -91,26 +91,26 @@ describe("username and password authentication", () => {
       ]),
     );
 
-    const director = users.find((user) => user.role === "director");
+    const admin = users.find((user) => user.role === "admin");
     const staff = users.find((user) => user.email === "staff@example.com");
-    if (!director || !staff) {
+    if (!admin || !staff) {
       throw new Error("The expected accounts were not created");
     }
 
-    const directorClient = t.withIdentity({
-      subject: director._id,
-      tokenIdentifier: director._id,
+    const adminClient = t.withIdentity({
+      subject: admin._id,
+      tokenIdentifier: admin._id,
     });
-    await directorClient.mutation(api.users.updateAccess, {
+    await adminClient.mutation(api.users.updateAccess, {
       userId: staff._id,
       status: "active",
     });
     await expect(
-      directorClient.mutation(api.users.updateAccess, {
-        userId: director._id,
+      adminClient.mutation(api.users.updateAccess, {
+        userId: admin._id,
         status: "disabled",
       }),
-    ).rejects.toThrow(/director account cannot be changed/i);
+    ).rejects.toThrow(/admin account cannot be changed/i);
     await expect(
       t
         .withIdentity({
@@ -121,12 +121,12 @@ describe("username and password authentication", () => {
     ).resolves.toEqual([]);
   });
 
-  it("does not allow another account to claim the configured Director username", async () => {
+  it("does not allow another account to claim the configured admin username", async () => {
     const t = convexTest(schema, modules);
 
     await expect(
-      signUp(t, "director@example.com", "Wrong-1234A!Pass"),
-    ).rejects.toThrow(/Invalid director credentials/);
+      signUp(t, "admin@example.com", "Wrong-1234A!Pass"),
+    ).rejects.toThrow(/Invalid admin credentials/);
 
     const users = await t.run((ctx) => ctx.db.query("users").collect());
     expect(users).toHaveLength(0);
@@ -151,27 +151,27 @@ describe("username and password authentication", () => {
     ).resolves.toHaveLength(0);
   });
 
-  it("lets a director reset another user's password and lets the user reset their own", async () => {
+  it("lets a admin reset another user's password and lets the user reset their own", async () => {
     const t = convexTest(schema, modules);
-    await signUp(t, "director@example.com", authEnvironment.DIRECTOR_PASSWORD);
+    await signUp(t, "admin@example.com", authEnvironment.DIRECTOR_PASSWORD);
     await signUp(t, "staff@example.com", "Staff-1234A!");
 
     const users = await t.run((ctx) => ctx.db.query("users").collect());
-    const director = users.find((user) => user.role === "director");
+    const admin = users.find((user) => user.role === "admin");
     const staff = users.find((user) => user.email === "staff@example.com");
-    if (!director || !staff) {
+    if (!admin || !staff) {
       throw new Error("The expected accounts were not created");
     }
 
-    const directorClient = t.withIdentity({
-      subject: director._id,
-      tokenIdentifier: director._id,
+    const adminClient = t.withIdentity({
+      subject: admin._id,
+      tokenIdentifier: admin._id,
     });
-    await directorClient.mutation(api.users.updateAccess, {
+    await adminClient.mutation(api.users.updateAccess, {
       userId: staff._id,
       status: "active",
     });
-    await directorClient.action(api.users.resetPassword, {
+    await adminClient.action(api.users.resetPassword, {
       userId: staff._id,
       newPassword: "Reset-1234A!",
     });
@@ -190,10 +190,10 @@ describe("username and password authentication", () => {
     });
     await expect(
       staffClient.action(api.users.resetPassword, {
-        userId: director._id,
+        userId: admin._id,
         newPassword: "BadReset-123A!",
       }),
-    ).rejects.toThrow(/Only the Director can reset another user's password/);
+    ).rejects.toThrow(/Only the admin can reset another user's password/);
     await staffClient.action(api.users.resetPassword, {
       newPassword: "SelfReset-123A!",
     });

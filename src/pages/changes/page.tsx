@@ -30,7 +30,7 @@ export default function ChangesPage() {
   }, [search]);
 
   if (me === undefined) return null;
-  if (!me || me.role !== "director") return <Navigate to="/" replace />;
+  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
   const openTitle = CHANGE_ENTRIES.find((e) => e.version === open)?.title ?? "";
 
   return (

@@ -39,26 +39,26 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         ) {
           throw new Error("Passwords do not match");
         }
-        const directorUsername = env.DIRECTOR_USERNAME
+        const adminUsername = env.DIRECTOR_USERNAME
           ? normalizeUsername(env.DIRECTOR_USERNAME)
           : undefined;
-        const directorPassword = env.DIRECTOR_PASSWORD;
-        const isDirector = isSignUp && email === directorUsername;
+        const adminPassword = env.DIRECTOR_PASSWORD;
+        const isAdmin = isSignUp && email === adminUsername;
 
         if (
           isSignUp &&
-          (!directorUsername ||
-            !isValidUsername(directorUsername) ||
-            !directorPassword)
+          (!adminUsername ||
+            !isValidUsername(adminUsername) ||
+            !adminPassword)
         ) {
-          throw new Error("Director account setup is not configured");
+          throw new Error("Admin account setup is not configured");
         }
         if (
-          isDirector &&
+          isAdmin &&
           (typeof params.password !== "string" ||
-            params.password !== directorPassword)
+            params.password !== adminPassword)
         ) {
-          throw new Error("Invalid director credentials");
+          throw new Error("Invalid admin credentials");
         }
 
         const name = isString(params.name) ? params.name.trim() : "";
@@ -68,8 +68,8 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         return {
           email,
           name: name || email,
-          role: isDirector ? "director" : "staff",
-          status: isDirector ? "active" : "pending",
+          role: isAdmin ? "admin" : "staff",
+          status: isAdmin ? "active" : "pending",
         };
       },
     }),
@@ -104,13 +104,13 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         );
       }
 
-      const isDirector = profile.role === "director";
+      const isAdmin = profile.role === "admin";
       const name =
         typeof profile.name === "string" && profile.name.trim()
           ? profile.name.trim()
           : email;
-      const role = isDirector ? "director" : "staff";
-      const status = isDirector ? "active" : "pending";
+      const role = isAdmin ? "admin" : "staff";
+      const status = isAdmin ? "active" : "pending";
 
       let userId: Id<"users">;
       if (matchingUsers[0]) {
@@ -136,7 +136,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         {
           category: "user",
           action: "Signed up",
-          summary: `${name} signed up${isDirector ? "" : " (waiting for approval)"}`,
+          summary: `${name} signed up${isAdmin ? "" : " (waiting for approval)"}`,
           detail: email,
         },
       );
