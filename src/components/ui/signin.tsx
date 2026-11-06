@@ -1,6 +1,6 @@
-import { forwardRef, useState } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import { type VariantProps } from "class-variance-authority";
-import {  CircleAlertIcon, CircleCheckIcon, Eye, EyeOff, Loader2, LogIn, LogOut } from "lucide-react";
+import { CircleAlertIcon, CircleCheckIcon, Eye, EyeOff, Loader2, LogIn, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useConvexAuth } from "convex/react";
@@ -14,18 +14,24 @@ import {
 } from "@/components/ui/dialog.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import {
+  hasOnlyAllowedPasswordCharacters,
+  hasSpecialPasswordCharacter,
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   PASSWORD_REQUIREMENTS_MESSAGE,
   validatePasswordRequirements,
 } from "@/convex/lib/password.ts";
-import { signInErrorMessage } from "@/lib/auth-errors.ts";
+import { signInErrorMessage, signUpErrorMessage } from "@/lib/auth-errors.ts";
 import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
+
+function showAuthError(message: string) {
+  toast.error(message, { position: "top-center", richColors: true });
+}
 
 export interface SignInButtonProps
   extends
-    Omit<React.ComponentProps<"button">, "onClick">,
-    VariantProps<typeof buttonVariants> {
+  Omit<React.ComponentProps<"button">, "onClick">,
+  VariantProps<typeof buttonVariants> {
   /**
    * Custom onClick handler that runs before authentication action
    */
@@ -84,6 +90,18 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
     const [signingIn, setSigningIn] = useState(false);
     const [isSignUp, setIsSignUp] = useState(false);
     const [showPassword, setShowPassword] = useState(false);
+    const [credentials, setCredentials] = useState({ username: '', password: '', confirmPassword: '' });
+
+    useEffect(() => {
+      function resetPopup() {
+        setCredentials({ username: '', password: '', confirmPassword: '' });
+        setShowPassword(false);
+        setIsSignUp(false);
+      }
+      if (!dialogOpen) {
+        resetPopup();
+      }
+    }, [dialogOpen])
 
     const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
       onClick?.(event);
@@ -96,7 +114,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
       try {
         await signOut();
       } catch (error) {
-        toast.error(
+        showAuthError(
           error instanceof Error ? error.message : "Could not sign out",
         );
       }
@@ -107,23 +125,23 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
       const formData = new FormData(event.currentTarget);
       const username = formData.get("email");
       if (typeof username !== "string" || !username.trim()) {
-        toast.error("Enter a username in email format");
+        showAuthError("Enter a username in email format");
         return;
       }
       if (!isValidUsername(username)) {
-        toast.error("Enter a valid username in email format");
+        showAuthError("Enter a valid username in email format");
         return;
       }
       const password = formData.get("password");
       if (typeof password !== "string" || !password) {
-        toast.error("Enter a password");
+        showAuthError("Enter a password");
         return;
       }
       if (isSignUp) {
         try {
           validatePasswordRequirements(password);
         } catch (error) {
-          toast.error(
+          showAuthError(
             error instanceof Error
               ? error.message
               : PASSWORD_REQUIREMENTS_MESSAGE,
@@ -131,12 +149,12 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
           return;
         }
         if (formData.get("confirmPassword") !== password) {
-          toast.error("Passwords do not match");
+          showAuthError("Passwords do not match");
           return;
         }
         const name = formData.get("name");
         if (typeof name === "string" && name.length > 80) {
-          toast.error("Name is too long");
+          showAuthError("Name is too long");
           return;
         }
       }
@@ -147,11 +165,9 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
         setDialogOpen(false);
         toast.success(isSignUp ? "Account created" : "Signed in");
       } catch (error) {
-        toast.error(
+        showAuthError(
           isSignUp
-            ? error instanceof Error
-              ? error.message
-              : "Could not sign in"
+            ? signUpErrorMessage(error)
             : signInErrorMessage(error),
         );
       } finally {
@@ -174,7 +190,6 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
       <LogIn className="size-4" />
     );
 
-    const [credentials, setCredentials] = useState({ username: '', password: '', confirmPassword: '' });
 
     return (
       <>
@@ -249,7 +264,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
-                      <span className="text-sm text-muted-foreground">Usernames must be in email format.</span>
+                      <span className="text-sm text-muted-foreground">Username must be in email format</span>
                     </div>
                   </>
                 }
@@ -290,6 +305,14 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                   <>
                     <div className="flex space-x-2 items-center">
                       {
+                        hasOnlyAllowedPasswordCharacters(credentials.password) ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Use only English letters, numbers, and standard special characters (no spaces)</span>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                      {
                         (MIN_PASSWORD_LENGTH <= credentials.password?.length && credentials.password?.length <= MAX_PASSWORD_LENGTH) ?
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
@@ -298,7 +321,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     </div>
                     <div className="flex space-x-2 items-center">
                       {
-                        credentials.password?.match(/[A-Z]+/) != null ?
+                        /[A-Z]/.test(credentials.password) ?
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
@@ -306,7 +329,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     </div>
                     <div className="flex space-x-2 items-center">
                       {
-                        credentials.password?.match(/[a-z]+/) != null ?
+                        /[a-z]/.test(credentials.password) ?
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
@@ -314,7 +337,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     </div>
                     <div className="flex space-x-2 items-center">
                       {
-                        credentials.password?.match(/[^\w\s]+/) != null ?
+                        hasSpecialPasswordCharacter(credentials.password) ?
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
@@ -322,7 +345,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     </div>
                     <div className="flex space-x-2 items-center">
                       {
-                        credentials.password?.match(/[0-9]+/) != null ?
+                        /\d/.test(credentials.password) ?
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
