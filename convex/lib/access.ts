@@ -13,10 +13,7 @@ export async function getSignedInUser(
 export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
-    throw new ConvexError({
-      code: "UNAUTHENTICATED",
-      message: "Please sign in",
-    });
+    throw new ConvexError({ code: "UNAUTHENTICATED", message: "Please sign in" });
   }
   const user = await getSignedInUser(ctx);
   if (!user || user.status !== "active") {
@@ -31,10 +28,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
 export async function requireAdmin(ctx: QueryCtx): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
   if (user.role !== "director") {
-    throw new ConvexError({
-      code: "FORBIDDEN",
-      message: "Only the Director can do this",
-    });
+    throw new ConvexError({ code: "FORBIDDEN", message: "Only the Director can do this" });
   }
   return user;
 }

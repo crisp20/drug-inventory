@@ -1,24 +1,12 @@
 import { motion } from "motion/react";
-import {
-  Barcode,
-  ClipboardList,
-  Clock,
-  PackageCheck,
-  ShieldCheck,
-} from "lucide-react";
+import { Barcode, ClipboardList, Clock, PackageCheck, ShieldCheck } from "lucide-react";
 import { SignInButton } from "@/components/ui/signin.tsx";
 import BrandLogo, { LOGO_URL } from "./brand-logo.tsx";
 
 const FEATURES = [
-  {
-    icon: Barcode,
-    text: "Find any drug by barcode, GS1 code, name or Drug ID",
-  },
+  { icon: Barcode, text: "Find any drug by barcode, GS1 code, name or Drug ID" },
   { icon: PackageCheck, text: "Stock tracked per package form" },
-  {
-    icon: ClipboardList,
-    text: "Every Stock In and Stock Out logged with who did it",
-  },
+  { icon: ClipboardList, text: "Every Stock In and Stock Out logged with who did it" },
 ];
 
 const ease = [0.22, 1, 0.36, 1] as const;
@@ -39,8 +27,7 @@ export function SignedOutScreen() {
               transition={{ duration: 0.7, ease }}
               className="text-balance text-4xl font-extrabold leading-[1.05] tracking-tight md:text-6xl"
             >
-              Every tablet, strip and box{" "}
-              <span className="text-[oklch(0.9_0.17_95)]">accounted for.</span>
+              Every tablet, strip and box <span className="text-[oklch(0.9_0.17_95)]">accounted for.</span>
             </motion.h1>
             <motion.p
               initial={{ opacity: 0, y: 16 }}
@@ -48,26 +35,18 @@ export function SignedOutScreen() {
               transition={{ duration: 0.7, delay: 0.15, ease }}
               className="max-w-lg text-lg text-white/75"
             >
-              ACP's drug inventory with Stock In and Stock Out, built for the
-              dispensary floor.
+              ACP's drug inventory with Stock In and Stock Out, built for the dispensary floor.
             </motion.p>
             <motion.ul
               initial="hidden"
               animate="show"
-              variants={{
-                show: {
-                  transition: { staggerChildren: 0.1, delayChildren: 0.3 },
-                },
-              }}
+              variants={{ show: { transition: { staggerChildren: 0.1, delayChildren: 0.3 } } }}
               className="space-y-3"
             >
               {FEATURES.map((f) => (
                 <motion.li
                   key={f.text}
-                  variants={{
-                    hidden: { opacity: 0, x: -12 },
-                    show: { opacity: 1, x: 0 },
-                  }}
+                  variants={{ hidden: { opacity: 0, x: -12 }, show: { opacity: 1, x: 0 } }}
                   className="flex items-center gap-3 text-white/90"
                 >
                   <span className="flex size-8 items-center justify-center rounded-lg bg-white/10">
@@ -118,11 +97,7 @@ export function AwaitingApprovalScreen({
       <div className="w-full max-w-md space-y-6 rounded-2xl border bg-card p-8 text-center shadow-sm">
         <BrandLogo className="justify-center" />
         <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-accent text-accent-foreground">
-          {disabled ? (
-            <ShieldCheck className="size-7" />
-          ) : (
-            <Clock className="size-7" />
-          )}
+          {disabled ? <ShieldCheck className="size-7" /> : <Clock className="size-7" />}
         </div>
         <div className="space-y-2">
           <h1 className="text-2xl font-bold">

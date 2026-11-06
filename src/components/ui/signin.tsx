@@ -23,8 +23,8 @@ import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
 
 export interface SignInButtonProps
   extends
-  Omit<React.ComponentProps<"button">, "onClick">,
-  VariantProps<typeof buttonVariants> {
+    Omit<React.ComponentProps<"button">, "onClick">,
+    VariantProps<typeof buttonVariants> {
   /**
    * Custom onClick handler that runs before authentication action
    */

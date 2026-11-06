@@ -30,8 +30,8 @@ export default function SettingsPage() {
       />
       <div className="space-y-6">
         <LargeQuantitySetting />
-        <IdleRefreshSetting />
         <ExpiryWarningSetting />
+        <IdleRefreshSetting />
         <CanisterRolloutSetting />
       </div>
     </div>
