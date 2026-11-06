@@ -25,7 +25,7 @@ import { signInErrorMessage, signUpErrorMessage } from "@/lib/auth-errors.ts";
 import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
 
 function showAuthError(message: string) {
-  toast.error(message, { position: "top-center", richColors: true });
+  toast.error(message, { position: "top-center", richColors: true, duration: 10000 });
 }
 
 export interface SignInButtonProps
@@ -101,7 +101,8 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
       if (!dialogOpen) {
         resetPopup();
       }
-    }, [dialogOpen])
+      setCredentials({ ...credentials, confirmPassword: '' });
+    }, [dialogOpen, isSignUp])
 
     const handleClick = async (event: React.MouseEvent<HTMLButtonElement>) => {
       onClick?.(event);
@@ -243,7 +244,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                 </div>
               )}
               <div className="space-y-2">
-                <label htmlFor="auth-email" className="text-sm font-medium">
+                <label htmlFor="auth-email" className="text-sm font-medium after:content-['_*'] after:text-red-400">
                   Username
                 </label>
                 <Input
@@ -264,13 +265,13 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                           <CircleCheckIcon color="green" /> :
                           <CircleAlertIcon color="red" />
                       }
-                      <span className="text-sm text-muted-foreground">Username must be in email format</span>
+                      <span className="text-sm text-muted-foreground">Username must be in email format - <span className="italic">{'<identifier>@<domain.name>'}</span></span>
                     </div>
                   </>
                 }
               </div>
               <div className="space-y-2">
-                <label htmlFor="auth-password" className="text-sm font-medium">
+                <label htmlFor="auth-password" className="text-sm font-medium after:content-['_*'] after:text-red-400">
                   Password
                 </label>
                 <div className="relative">
@@ -358,7 +359,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                 <div className="space-y-2">
                   <label
                     htmlFor="auth-confirm-password"
-                    className="text-sm font-medium"
+                    className="text-sm font-medium after:content-['_*'] after:text-red-400"
                   >
                     Confirm password
                   </label>
