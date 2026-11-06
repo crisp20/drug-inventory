@@ -1,119 +1,55 @@
-import QRCode from "qrcode";
 import {
   canisterTypeLabel,
   formatLabelDate,
   type LabelData,
 } from "./label-data.ts";
+import {
+  boxedText,
+  drawPhotoInBox,
+  drawQr,
+  fitText,
+  loadPhoto,
+  toPrintedDots,
+  type Ctx,
+} from "./draw.ts";
+import { renderCompactLabel } from "./render-compact.ts";
+import type { LabelDesignId } from "./label-designs.ts";
+import {
+  BASE_WIDTH,
+  labelDots,
+  labelScale,
+  type LabelSize,
+} from "./label-sizes.ts";
 
-// 203 dpi thermal printer = 8 dots per mm. The label is 40mm across the roll and 60mm long.
-export const DOTS_PER_MM = 8;
-export const LABEL_WIDTH = 40 * DOTS_PER_MM;
-export const LABEL_HEIGHT = 60 * DOTS_PER_MM;
-
-const FONT = "Arial, Helvetica, sans-serif";
-// Sections along the label: fill record, canister face, small tag
-const TOP_END = 125;
-const MIDDLE_END = 365;
+// The full design is laid out in base units (the 40mm label is 320 wide) and scaled up
+// for bigger labels, so both sizes share one design.
 const MARGIN = 14;
 
-type Ctx = CanvasRenderingContext2D;
-
-// Loads the photo as a local copy, so the canvas can still be read for printing.
-// A photo that can't be loaded is left off rather than stopping the label.
-async function loadImage(url: string): Promise<HTMLImageElement | null> {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const objectUrl = URL.createObjectURL(await res.blob());
-    return await new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = () => resolve(null);
-      img.src = objectUrl;
-    });
-  } catch {
-    return null;
-  }
-}
-
-function drawQr(ctx: Ctx, text: string, x: number, y: number, size: number) {
-  const qr = QRCode.create(text || " ", { errorCorrectionLevel: "M" });
-  const count = qr.modules.size;
-  // Whole dots per module keeps the code sharp enough to scan
-  const cell = Math.max(1, Math.floor(size / count));
-  const offset = Math.floor((size - cell * count) / 2);
-  ctx.fillStyle = "#000";
-  for (let r = 0; r < count; r++) {
-    for (let c = 0; c < count; c++) {
-      if (qr.modules.get(r, c)) {
-        ctx.fillRect(x + offset + c * cell, y + offset + r * cell, cell, cell);
-      }
-    }
-  }
-}
-
-// Writes text, shrinking the font until it fits the width (never below minSize)
-function fitText(
-  ctx: Ctx,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  size: number,
-  bold = false,
-  minSize = 12,
-) {
-  let s = size;
-  ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
-  while (s > minSize && ctx.measureText(text).width > maxWidth) {
-    s -= 1;
-    ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
-  }
-  let shown = text;
-  while (shown.length > 1 && ctx.measureText(shown).width > maxWidth) {
-    shown = shown.slice(0, -2) + "…";
-  }
-  ctx.fillStyle = "#000";
-  ctx.textBaseline = "middle";
-  ctx.fillText(shown, x, y);
-}
-
-function boxedText(
-  ctx: Ctx,
-  text: string,
-  x: number,
-  y: number,
-  h: number,
-  size: number,
-) {
-  ctx.font = `bold ${size}px ${FONT}`;
-  const w = ctx.measureText(text).width + 12;
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "#000";
-  ctx.strokeRect(x, y - h / 2, w, h);
-  ctx.fillStyle = "#000";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, x + 6, y + 1);
-  return w;
-}
+type Layout = {
+  size: LabelSize;
+  scale: number;
+  // Label length in base units
+  length: number;
+};
 
 // Draws a section turned a quarter turn, so its text runs up the label.
-// Inside `draw`, (0,0) is the reading top-left and the area is `length` wide by `across` tall.
+// Inside `draw`, (0,0) is the reading top-left and the area is `length` wide.
 function rotatedSection(
   ctx: Ctx,
   start: number,
   end: number,
-  draw: (length: number, across: number) => void,
+  draw: (length: number) => void,
 ) {
   ctx.save();
   ctx.translate(0, end);
   ctx.rotate(-Math.PI / 2);
-  draw(end - start, LABEL_WIDTH);
+  draw(end - start);
   ctx.restore();
 }
 
-function drawFillRecord(ctx: Ctx, data: LabelData) {
-  rotatedSection(ctx, 0, TOP_END, (length) => {
+function drawFillRecord(ctx: Ctx, layout: Layout, data: LabelData) {
+  const { topEnd } = layout.size;
+  rotatedSection(ctx, 0, topEnd, (length) => {
     const left = 10;
     const width = length - 20;
     fitText(ctx, `B:${data.batch}`, left, 24, width, 22, true);
@@ -157,30 +93,30 @@ function drawFillRecord(ctx: Ctx, data: LabelData) {
     cell(data.fillDate, cols[2], cols[3], 0);
     cell("Chk", cols[0], cols[1], 1);
   });
-  drawQr(ctx, data.qrText, 206, 18, 90);
+  const qr = Math.min(120, topEnd - 30);
+  drawQr(ctx, layout.scale, data.qrText, 296 - qr, (topEnd - qr) / 2, qr);
 }
 
 function drawCanisterFace(
   ctx: Ctx,
+  layout: Layout,
   data: LabelData,
-  photo: HTMLImageElement | null,
+  photo: HTMLCanvasElement | null,
 ) {
-  rotatedSection(ctx, TOP_END, MIDDLE_END, (length) => {
+  const { topEnd, middleEnd, photoW, photoH, photoAcross, faceQr } =
+    layout.size;
+  rotatedSection(ctx, topEnd, middleEnd, (length) => {
     const left = 8;
     const width = length - 16;
     // Photo at the far end; the QR code is drawn upright after this section
     if (photo) {
-      const boxW = 100;
-      const boxH = 80;
-      const scale = Math.min(boxW / photo.width, boxH / photo.height);
-      const w = photo.width * scale;
-      const h = photo.height * scale;
-      ctx.drawImage(
+      drawPhotoInBox(
+        ctx,
         photo,
-        length - 8 - boxW + (boxW - w) / 2,
-        58 + (boxH - h) / 2,
-        w,
-        h,
+        length - 8 - photoW,
+        photoAcross,
+        photoW,
+        photoH,
       );
     }
     fitText(ctx, data.brandName || data.name, left, 160, width, 22, true);
@@ -211,47 +147,74 @@ function drawCanisterFace(
       true,
     );
   });
-  drawQr(ctx, data.qrText, 56, MIDDLE_END - 82, 78);
+  drawQr(
+    ctx,
+    layout.scale,
+    data.qrText,
+    photoAcross,
+    middleEnd - faceQr - 4,
+    faceQr,
+  );
 }
 
-function drawTag(ctx: Ctx, data: LabelData) {
-  const qrSize = 72;
-  const qrX = LABEL_WIDTH - MARGIN - qrSize;
+function drawTag(ctx: Ctx, layout: Layout, data: LabelData) {
+  const { middleEnd, tagQr } = layout.size;
+  const mid = (middleEnd + layout.length) / 2;
+  const qrX = BASE_WIDTH - MARGIN - tagQr;
   const textW = qrX - MARGIN - 8;
-  fitText(ctx, data.name, MARGIN, MIDDLE_END + 34, textW, 19);
-  const boxW = boxedText(ctx, data.drugId, MARGIN, MIDDLE_END + 70, 26, 18);
+  fitText(ctx, data.name, MARGIN, mid - 20, textW, 19);
+  const boxW = boxedText(ctx, data.drugId, MARGIN, mid + 16, 26, 18);
   fitText(
     ctx,
     formatLabelDate(data.expiry),
     MARGIN + boxW + 6,
-    MIDDLE_END + 70,
+    mid + 16,
     textW - boxW - 6,
     18,
     true,
     11,
   );
-  drawQr(ctx, data.qrText, qrX, MIDDLE_END + 16, qrSize);
+  drawQr(ctx, layout.scale, data.qrText, qrX, mid - tagQr / 2, tagQr);
 }
 
 function divider(ctx: Ctx, y: number) {
   ctx.fillStyle = "#000";
-  ctx.fillRect(MARGIN, y - 1, LABEL_WIDTH - MARGIN * 2, 2);
+  ctx.fillRect(MARGIN, y - 1, BASE_WIDTH - MARGIN * 2, 2);
 }
 
-// Draws the full label on a 320 x 480 dot canvas, matching the ACP canister label layout
-export async function renderLabel(data: LabelData): Promise<HTMLCanvasElement> {
+// The full ACP canister label: fill record, canister face and tag
+async function renderFullLabel(
+  data: LabelData,
+  size: LabelSize,
+): Promise<HTMLCanvasElement> {
+  const dots = labelDots(size);
   const canvas = document.createElement("canvas");
-  canvas.width = LABEL_WIDTH;
-  canvas.height = LABEL_HEIGHT;
+  canvas.width = dots.width;
+  canvas.height = dots.height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("This browser cannot draw labels");
-  const photo = data.imageUrl ? await loadImage(data.imageUrl) : null;
+  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
   ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, LABEL_WIDTH, LABEL_HEIGHT);
-  drawFillRecord(ctx, data);
-  divider(ctx, TOP_END);
-  drawCanisterFace(ctx, data, photo);
-  divider(ctx, MIDDLE_END);
-  drawTag(ctx, data);
+  ctx.fillRect(0, 0, dots.width, dots.height);
+  const layout: Layout = { size, ...labelScale(size) };
+  ctx.scale(layout.scale, layout.scale);
+  drawFillRecord(ctx, layout, data);
+  divider(ctx, size.topEnd);
+  drawCanisterFace(ctx, layout, data, photo);
+  divider(ctx, size.middleEnd);
+  drawTag(ctx, layout, data);
+  toPrintedDots(ctx, dots.width, dots.height);
   return canvas;
+}
+
+// Draws the label at printer resolution in its upright (portrait) form;
+// orientCanvas turns it for landscape printing
+export async function renderLabel(
+  data: LabelData,
+  size: LabelSize,
+  design: LabelDesignId = "full",
+): Promise<HTMLCanvasElement> {
+  return design === "compact"
+    ? renderCompactLabel(data, size)
+    : renderFullLabel(data, size);
 }

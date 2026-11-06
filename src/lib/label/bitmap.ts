@@ -64,6 +64,24 @@ export function buildCpclJob(
   return job;
 }
 
+// Stretches a grey photo so its lightest part (usually the background) prints white
+// and its darkest prints black, then darkens the mid-tones so light tablets still
+// show as a dot shade. Ignores the extreme 2% at each end (glare, specks).
+export function boostContrast(gray: Float32Array, gamma = 2): Float32Array {
+  const n = gray.length;
+  const out = new Float32Array(n);
+  if (n === 0) return out;
+  const sorted = Float32Array.from(gray).sort();
+  const lo = sorted[Math.floor((n - 1) * 0.02)];
+  const hi = sorted[Math.floor((n - 1) * 0.98)];
+  const range = hi - lo;
+  for (let i = 0; i < n; i++) {
+    const t = range < 1 ? 1 : Math.min(1, Math.max(0, (gray[i] - lo) / range));
+    out[i] = Math.pow(t, gamma) * 255;
+  }
+  return out;
+}
+
 // Canvas pixels to grey-scale (transparent counts as white paper)
 export function toGray(rgba: Uint8ClampedArray): Float32Array {
   const gray = new Float32Array(rgba.length / 4);

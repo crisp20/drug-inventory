@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/empty.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import DrugSearchInput from "@/components/drug-search-input.tsx";
+import LasaWarningDialog from "@/components/lasa/lasa-warning-dialog.tsx";
 import { useDebounce } from "@/hooks/use-debounce.ts";
 import { useConfirmDiscard } from "@/hooks/use-unsaved-changes.ts";
 import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
@@ -60,6 +61,21 @@ function Hint({ title, description }: { title: string; description: string }) {
   );
 }
 
+// Puts the cursor in the stock form's Quantity box once it has appeared (it may still be loading)
+function focusQuantity() {
+  let tries = 0;
+  const attempt = () => {
+    const input = document.querySelector<HTMLInputElement>('input[name="quantity"]');
+    if (input) {
+      input.focus();
+      input.select();
+    } else if (tries++ < 20) {
+      window.setTimeout(attempt, 100);
+    }
+  };
+  window.requestAnimationFrame(attempt);
+}
+
 // Search or scan a drug, then pick a package form. A barcode scan picks it automatically.
 export default function StockDrugFinder({ children }: Props) {
   const [search, setSearch] = useState("");
@@ -79,7 +95,13 @@ export default function StockDrugFinder({ children }: Props) {
     : undefined;
   const match = results && term ? findBarcodeMatch(results, term) : null;
   const selection: StockSelection | null =
-    pickedSelection ?? (showAll ? null : match);
+    // While a picked package form is still loading (e.g. after switching drug), don't fall back to the old match
+    pickedSelection ?? (showAll || picked ? null : match);
+
+  // Look Alike, Sound Alike drugs stay locked until staff confirm they checked the pictures
+  const [confirmedDrug, setConfirmedDrug] = useState<string | null>(null);
+  const needsWarning = !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
+  const usable = needsWarning ? null : selection;
 
   const confirmDiscard = useConfirmDiscard();
 
@@ -90,6 +112,7 @@ export default function StockDrugFinder({ children }: Props) {
     setSearch("");
     setPicked(null);
     setShowAll(false);
+    setConfirmedDrug(null);
     setFocusSignal((n) => n + 1);
   };
   // Switching drug or package form throws away a half-filled form, so ask first
@@ -98,6 +121,7 @@ export default function StockDrugFinder({ children }: Props) {
     setSearch(value);
     setPicked(null);
     setShowAll(false);
+    setConfirmedDrug(null);
   };
   const handlePick = async (pkgId: string) => {
     if (pkgId === selection?.pkg._id || !(await confirmDiscard())) return;
@@ -160,11 +184,28 @@ export default function StockDrugFinder({ children }: Props) {
         </div>
       )}
       {children({
-        selection,
-        barcodeMatched: !!match && selection?.pkg._id === match.pkg._id,
+        selection: usable,
+        barcodeMatched: !!match && usable?.pkg._id === match.pkg._id,
         term,
         reset,
       })}
+      <LasaWarningDialog
+        drugId={needsWarning && selection ? selection.drug._id : null}
+        highlightPackageId={selection?.pkg._id}
+        confirmLabel="Continue with this drug"
+        switchMode="package"
+        onConfirm={() => selection && setConfirmedDrug(selection.drug._id)}
+        // Load the other drug by its Drug ID and pick its package form; it was just compared, so no second warning
+        onSwitch={(other, packageId) => {
+          setSearch(other.drugId);
+          setPicked(packageId);
+          setShowAll(false);
+          setConfirmedDrug(other._id);
+        }}
+        onAfterChoose={focusQuantity}
+        // Backing out clears the pick so the wrong drug cannot be used by accident
+        onCancel={reset}
+      />
     </div>
   );
 }

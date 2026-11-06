@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AlertTriangle, CheckCircle2, Upload } from "lucide-react";
 import type { Id } from "@/convex/_generated/dataModel.d.ts";
-import { listDosageForms, sheetToRecords, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
+import { listDosageForms, sheetToRecords, type ImportDrug, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
 import { Button } from "@/components/ui/button.tsx";
 import { Checkbox } from "@/components/ui/checkbox.tsx";
 import {
@@ -22,7 +22,8 @@ import { errorMessage } from "@/lib/errors.ts";
 import { cn } from "@/lib/utils.ts";
 import { readImportFile } from "../_lib/read-import-file.ts";
 import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
-import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
+import ImportConflictCard from "./import-conflict-card.tsx";
+import BarcodeClashFix from "./barcode-clash-fix.tsx";
 import ImportFormsStep from "./import-forms-step.tsx";
 import ImportConflictsBar from "./import-conflicts-bar.tsx";
 import FileDropZone from "@/components/file-drop-zone.tsx";
@@ -31,6 +32,8 @@ import {
   allChoices,
   itemFor,
   usesFile,
+  withBarcodeFixes,
+  type BarcodeFixes,
   type Choice,
   type DrugChoices,
   type ImportItem,
@@ -62,7 +65,8 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
           <DialogTitle>Import inventory file</DialogTitle>
           <DialogDescription>
             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
-            form, per and amount. Optional: Specifications and Remarks.
+            form, per and amount. Optional: Specifications, Remarks, LASA (Yes or No for Look Alike, Sound
+            Alike) and DDA (Yes or No for Dangerous Drug).
           </DialogDescription>
         </DialogHeader>
         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
@@ -182,6 +186,9 @@ function ReviewStep({
   const [shownConflicts, setShownConflicts] = useState(PAGE);
   const [shownMissing, setShownMissing] = useState(PAGE);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [barcodeFixes, setBarcodeFixes] = useState<Record<string, BarcodeFixes>>({});
+  const setFixesFor = (drugId: string, fixes: BarcodeFixes) => setBarcodeFixes({ ...barcodeFixes, [drugId]: fixes });
+  const fixed = (drug: ImportDrug) => withBarcodeFixes(drug, barcodeFixes[drug.drugId]);
 
   const choicesOf = (drugId: string): DrugChoices => choices[drugId] ?? DEFAULT_CHOICES;
   const useFileCount = useMemo(
@@ -207,9 +214,9 @@ function ReviewStep({
 
   const submit = async () => {
     const items: ImportItem[] = [
-      ...(addNew ? review.newDrugs.map((i) => ({ drug: i.drug, action: "create" as const })) : []),
+      ...(addNew ? review.newDrugs.map((i) => ({ drug: fixed(i.drug), action: "create" as const })) : []),
       ...[...review.conflicts, ...review.filled].flatMap((i) => {
-        const it = itemFor(i, choicesOf(i.drug.drugId));
+        const it = itemFor({ ...i, drug: fixed(i.drug) }, choicesOf(i.drug.drugId));
         return it ? [it] : [];
       }),
     ];
@@ -254,12 +261,22 @@ function ReviewStep({
             <span>Add all {review.newDrugs.length.toLocaleString()} new drugs (stock starts at 0)</span>
             <Switch checked={addNew} onCheckedChange={setAddNew} />
           </label>
+          {newWithClashes.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {newWithClashes.length.toLocaleString()} new drug{newWithClashes.length === 1 ? " has a barcode" : "s have barcodes"}{" "}
+              already used by another drug. Type a new barcode, or add them without one.
+            </p>
+          )}
           {newWithClashes.map((i) => (
-            <div key={i.drug.drugId} className="space-y-1 rounded-lg border p-2 text-sm">
+            <div key={i.drug.drugId} className="space-y-2 rounded-lg border p-2 text-sm">
               <div className="font-medium">
-                {i.drug.name} <span className="text-muted-foreground">· {i.drug.drugId}</span>
+                {i.drug.name} <span className="text-muted-foreground">· {i.drug.drugId} · row {i.drug.row}</span>
               </div>
-              <ClashNote item={i} />
+              <BarcodeClashFix
+                item={i}
+                fixes={barcodeFixes[i.drug.drugId]}
+                onChange={(f) => setFixesFor(i.drug.drugId, f)}
+              />
             </div>
           ))}
           {review.leftOut > 0 && (
@@ -275,7 +292,7 @@ function ReviewStep({
           {review.conflicts.length === 0 ? (
             <Note>
               {review.filled.length > 0
-                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications or Remarks filled in from the file.`
+                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications, Remarks or a Look Alike, Sound Alike mark from the file.`
                 : "No conflicts. Saved drugs already match the file."}
             </Note>
           ) : (
@@ -290,7 +307,7 @@ function ReviewStep({
               <p className="text-xs text-muted-foreground">
                 Stock, pictures and package forms that are only in the app are always kept.
                 {review.filled.length > 0 &&
-                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks that will be filled from the file.`}
+                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks, or a new Look Alike, Sound Alike mark, that will be taken from the file.`}
               </p>
               {review.conflicts.slice(0, shownConflicts).map((item) => (
                 <ImportConflictCard
@@ -300,6 +317,8 @@ function ReviewStep({
                   onChange={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
                   selected={selected.has(item.drug.drugId)}
                   onSelectedChange={(on) => toggleSelected(item.drug.drugId, on)}
+                  barcodeFixes={barcodeFixes[item.drug.drugId]}
+                  onBarcodeFixesChange={(f) => setFixesFor(item.drug.drugId, f)}
                 />
               ))}
               {shownConflicts < review.conflicts.length && (
@@ -414,7 +433,7 @@ function DoneStep({ report, onClose }: { report: ImportReport; onClose: () => vo
         ))}
         {report.skipped.map((s) => (
           <div key={`s-${s.drugId}`} className="rounded-md bg-muted px-2 py-1.5 text-xs">
-            {s.drugId} {s.name}: barcode {s.barcodes.join(", ")} skipped (already used by another drug)
+            {s.drugId} {s.name}: added without barcode {s.barcodes.join(", ")} (already used by another drug)
           </div>
         ))}
       </div>

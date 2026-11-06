@@ -21,13 +21,26 @@ export const drugsTable = defineTable({
   // Free text shown on drug cards; missing means blank
   specifications: v.optional(v.string()),
   remarks: v.optional(v.string()),
+  // Marked "Look Alike, Sound Alike" by an admin; missing means not marked
+  lasa: v.optional(v.boolean()),
+  // Marked Dangerous Drug (DDA) by an admin; missing means not marked
+  dda: v.optional(v.boolean()),
   // Denormalized text for the search index (Drug ID, names)
   searchText: v.string(),
   updatedAt: v.string(),
 })
   .index("by_drugId", ["drugId"])
   .index("by_name", ["name"])
+  .index("by_lasa_and_name", ["lasa", "name"])
+  .index("by_dda_and_name", ["dda", "name"])
   .searchIndex("search_text", { searchField: "searchText" });
+
+// Which drugs look or sound like which. Stored both ways (A→B and B→A) so either side reads its own list.
+export const lasaLinksTable = defineTable({
+  drugRef: v.id("drugs"),
+  otherRef: v.id("drugs"),
+})
+  .index("by_drugRef_and_otherRef", ["drugRef", "otherRef"]);
 
 // One row per barcode. Each barcode has its own package form and stock amount.
 export const drugPackagesTable = defineTable({

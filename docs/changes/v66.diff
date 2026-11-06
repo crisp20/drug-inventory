@@ -1,0 +1,567 @@
+diff --git a/src/components/stock/label-print-dialog.tsx b/src/components/stock/label-print-dialog.tsx
+index f499f65..c196248 100644
+--- a/src/components/stock/label-print-dialog.tsx
++++ b/src/components/stock/label-print-dialog.tsx
+@@ -24,8 +24,22 @@ import {
+   printCanvasWindow,
+ } from "@/lib/label/print-label.ts";
+ import { renderLabel } from "@/lib/label/render-label.ts";
++import {
++  isLabelSizeId,
++  LABEL_SIZES,
++  loadLabelSize,
++  saveLabelSize,
++  type LabelSizeId,
++} from "@/lib/label/label-sizes.ts";
++import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
++// Preview boxes keep each label's shape (40x60 and 52x110)
++const PREVIEW_CLASS: Record<LabelSizeId, string> = {
++  "40x60": "h-[300px] w-[200px]",
++  "52x110": "h-[330px] w-[156px]",
++};
++
+ type Status =
+   | { state: "drawing" }
+   | { state: "ready" }
+@@ -54,8 +68,20 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const [preview, setPreview] = useState<string | null>(null);
+   const [status, setStatus] = useState<Status>({ state: "drawing" });
++  const [sizeId, setSizeId] = useState<LabelSizeId>(loadLabelSize);
++  // Only the first drawing prints by itself; switching size just redraws the preview
++  const autoPrinted = useRef(false);
++  const size = LABEL_SIZES[sizeId];
+   const canBluetooth = bluetoothSupported();
+ 
++  const changeSize = (value: string) => {
++    if (!isLabelSizeId(value) || value === sizeId) return;
++    saveLabelSize(value);
++    setPreview(null);
++    setStatus({ state: "drawing" });
++    setSizeId(value);
++  };
++
+   const printBluetooth = async () => {
+     const canvas = canvasRef.current;
+     if (!canvas) return;
+@@ -80,23 +106,24 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   const printWindow = () => {
+     if (!canvasRef.current) return;
+     try {
+-      printCanvasWindow(canvasRef.current);
++      printCanvasWindow(canvasRef.current, size);
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not open the print window"));
+     }
+   };
+ 
+-  // Draw once, then print right away if the printer is still connected
++  // Draw the label, and on first draw print right away if the printer is still connected
+   useEffect(() => {
+     let cancelled = false;
+-    void renderLabel(data).then(async (canvas) => {
++    void renderLabel(data, LABEL_SIZES[sizeId]).then(async (canvas) => {
+       if (cancelled) return;
+       canvasRef.current = canvas;
+       setPreview(canvas.toDataURL("image/png"));
+-      if (!printerConnected()) {
++      if (autoPrinted.current || !printerConnected()) {
+         setStatus({ state: "ready" });
+         return;
+       }
++      autoPrinted.current = true;
+       setStatus({ state: "printing" });
+       try {
+         await printCanvasBluetooth(canvas);
+@@ -112,7 +139,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+     return () => {
+       cancelled = true;
+     };
+-  }, [data]);
++  }, [data, sizeId]);
+ 
+   const busy = status.state === "drawing" || status.state === "printing";
+   const name = printerName();
+@@ -132,15 +159,38 @@ function LabelPrinter({ data }: { data: LabelData }) {
+         </DialogDescription>
+       </DialogHeader>
+ 
++      <div className="flex items-center justify-between gap-3">
++        <span className="text-sm font-medium">Label size</span>
++        <ToggleGroup
++          type="single"
++          variant="outline"
++          value={sizeId}
++          onValueChange={changeSize}
++          disabled={status.state === "printing"}
++        >
++          {Object.values(LABEL_SIZES).map((s) => (
++            <ToggleGroupItem
++              key={s.id}
++              value={s.id}
++              className="cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
++            >
++              {s.name}
++            </ToggleGroupItem>
++          ))}
++        </ToggleGroup>
++      </div>
++
+       <div className="flex justify-center rounded-lg bg-muted p-3">
+         {preview ? (
+           <img
+             src={preview}
+-            alt="Label preview"
+-            className="h-[300px] w-[200px] rounded-sm bg-white shadow-sm [image-rendering:pixelated]"
++            alt={`Label preview, ${size.name}`}
++            className={`${PREVIEW_CLASS[sizeId]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
+           />
+         ) : (
+-          <div className="flex h-[300px] w-[200px] items-center justify-center">
++          <div
++            className={`${PREVIEW_CLASS[sizeId]} flex items-center justify-center`}
++          >
+             <Spinner />
+           </div>
+         )}
+diff --git a/src/lib/label/label-data.ts b/src/lib/label/label-data.ts
+index 0c8d9de..4f58fd9 100644
+--- a/src/lib/label/label-data.ts
++++ b/src/lib/label/label-data.ts
+@@ -1,4 +1,4 @@
+-// Everything printed on a canister label (60mm x 40mm roll, printed 40mm wide x 60mm long)
++// Everything printed on a canister label (sizes are in label-sizes.ts)
+ export type LabelData = {
+   drugId: string;
+   brandName: string;
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 9e245f3..2093338 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -6,6 +6,12 @@ import {
+   formatLabelDate,
+   initialsOf,
+ } from "./label-data.ts";
++import {
++  isLabelSizeId,
++  LABEL_SIZES,
++  labelDots,
++  labelScale,
++} from "./label-sizes.ts";
+ 
+ describe("label text", () => {
+   it("turns names into initials", () => {
+@@ -29,6 +35,35 @@ describe("label text", () => {
+   });
+ });
+ 
++describe("label sizes", () => {
++  it("prints each size at 8 dots per mm, scaled from the 40mm design", () => {
++    expect(labelDots(LABEL_SIZES["40x60"])).toEqual({
++      width: 320,
++      height: 480,
++    });
++    expect(labelDots(LABEL_SIZES["52x110"])).toEqual({
++      width: 416,
++      height: 880,
++    });
++    expect(labelScale(LABEL_SIZES["40x60"])).toEqual({ scale: 1, length: 480 });
++    expect(labelScale(LABEL_SIZES["52x110"]).scale).toBeCloseTo(1.3);
++  });
++
++  it("keeps every section inside the label", () => {
++    for (const size of Object.values(LABEL_SIZES)) {
++      const { length } = labelScale(size);
++      expect(size.topEnd).toBeLessThan(size.middleEnd);
++      expect(size.middleEnd).toBeLessThan(length);
++    }
++  });
++
++  it("only accepts known sizes", () => {
++    expect(isLabelSizeId("52x110")).toBe(true);
++    expect(isLabelSizeId("99x99")).toBe(false);
++    expect(isLabelSizeId(null)).toBe(false);
++  });
++});
++
+ describe("printer image", () => {
+   it("prints dark pixels black and light pixels white", () => {
+     const mono = ditherToMono(Float32Array.from([0, 255, 10, 250]), 2, 2);
+diff --git a/src/lib/label/print-label.ts b/src/lib/label/print-label.ts
+index 1da4e57..9713b8b 100644
+--- a/src/lib/label/print-label.ts
++++ b/src/lib/label/print-label.ts
+@@ -1,6 +1,6 @@
+ import { buildCpclJob, ditherToMono, toGray } from "./bitmap.ts";
+ import { sendToPrinter } from "./bluetooth-printer.ts";
+-import { LABEL_HEIGHT, LABEL_WIDTH } from "./render-label.ts";
++import type { LabelSize } from "./label-sizes.ts";
+ 
+ // Sends a drawn label to the Bluetooth printer
+ export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
+@@ -11,8 +11,11 @@ export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
+   await sendToPrinter(buildCpclJob(mono, canvas.width, canvas.height));
+ }
+ 
+-// Fallback: the normal print window, sized to one 40mm x 60mm label
+-export function printCanvasWindow(canvas: HTMLCanvasElement): void {
++// Fallback: the normal print window, sized to one label of the chosen size
++export function printCanvasWindow(
++  canvas: HTMLCanvasElement,
++  size: LabelSize,
++): void {
+   const frame = document.createElement("iframe");
+   frame.style.position = "fixed";
+   frame.style.width = "0";
+@@ -25,8 +28,8 @@ export function printCanvasWindow(canvas: HTMLCanvasElement): void {
+     frame.remove();
+     throw new Error("Could not open the print window");
+   }
+-  const mmW = LABEL_WIDTH / 8;
+-  const mmH = LABEL_HEIGHT / 8;
++  const mmW = size.widthMm;
++  const mmH = size.heightMm;
+   doc.open();
+   doc.write(
+     `<!doctype html><html><head><style>@page{size:${mmW}mm ${mmH}mm;margin:0}html,body{margin:0;padding:0}img{display:block;width:${mmW}mm;height:${mmH}mm;image-rendering:pixelated}</style></head><body><img src="${canvas.toDataURL("image/png")}"></body></html>`,
+diff --git a/src/lib/label/render-label.ts b/src/lib/label/render-label.ts
+index 83fc67f..4286959 100644
+--- a/src/lib/label/render-label.ts
++++ b/src/lib/label/render-label.ts
+@@ -4,20 +4,27 @@ import {
+   formatLabelDate,
+   type LabelData,
+ } from "./label-data.ts";
++import {
++  BASE_WIDTH,
++  labelDots,
++  labelScale,
++  type LabelSize,
++} from "./label-sizes.ts";
+ 
+-// 203 dpi thermal printer = 8 dots per mm. The label is 40mm across the roll and 60mm long.
+-export const DOTS_PER_MM = 8;
+-export const LABEL_WIDTH = 40 * DOTS_PER_MM;
+-export const LABEL_HEIGHT = 60 * DOTS_PER_MM;
+-
++// Everything is laid out in base units (the 40mm label is 320 wide) and scaled up
++// for bigger labels, so both sizes share one design.
+ const FONT = "Arial, Helvetica, sans-serif";
+-// Sections along the label: fill record, canister face, small tag
+-const TOP_END = 125;
+-const MIDDLE_END = 365;
+ const MARGIN = 14;
+ 
+ type Ctx = CanvasRenderingContext2D;
+ 
++type Layout = {
++  size: LabelSize;
++  scale: number;
++  // Label length in base units
++  length: number;
++};
++
+ // Loads the photo as a local copy, so the canvas can still be read for printing.
+ // A photo that can't be loaded is left off rather than stopping the label.
+ async function loadImage(url: string): Promise<HTMLImageElement | null> {
+@@ -36,20 +43,38 @@ async function loadImage(url: string): Promise<HTMLImageElement | null> {
+   }
+ }
+ 
+-function drawQr(ctx: Ctx, text: string, x: number, y: number, size: number) {
++// Drawn in printer dots (not base units) so each QR module is a whole number of dots
++function drawQr(
++  ctx: Ctx,
++  layout: Layout,
++  text: string,
++  x: number,
++  y: number,
++  size: number,
++) {
+   const qr = QRCode.create(text || " ", { errorCorrectionLevel: "M" });
+   const count = qr.modules.size;
+-  // Whole dots per module keeps the code sharp enough to scan
+-  const cell = Math.max(1, Math.floor(size / count));
+-  const offset = Math.floor((size - cell * count) / 2);
++  const dx = Math.round(x * layout.scale);
++  const dy = Math.round(y * layout.scale);
++  const dSize = Math.floor(size * layout.scale);
++  const cell = Math.max(1, Math.floor(dSize / count));
++  const offset = Math.floor((dSize - cell * count) / 2);
++  ctx.save();
++  ctx.setTransform(1, 0, 0, 1, 0, 0);
+   ctx.fillStyle = "#000";
+   for (let r = 0; r < count; r++) {
+     for (let c = 0; c < count; c++) {
+       if (qr.modules.get(r, c)) {
+-        ctx.fillRect(x + offset + c * cell, y + offset + r * cell, cell, cell);
++        ctx.fillRect(
++          dx + offset + c * cell,
++          dy + offset + r * cell,
++          cell,
++          cell,
++        );
+       }
+     }
+   }
++  ctx.restore();
+ }
+ 
+ // Writes text, shrinking the font until it fits the width (never below minSize)
+@@ -98,22 +123,23 @@ function boxedText(
+ }
+ 
+ // Draws a section turned a quarter turn, so its text runs up the label.
+-// Inside `draw`, (0,0) is the reading top-left and the area is `length` wide by `across` tall.
++// Inside `draw`, (0,0) is the reading top-left and the area is `length` wide.
+ function rotatedSection(
+   ctx: Ctx,
+   start: number,
+   end: number,
+-  draw: (length: number, across: number) => void,
++  draw: (length: number) => void,
+ ) {
+   ctx.save();
+   ctx.translate(0, end);
+   ctx.rotate(-Math.PI / 2);
+-  draw(end - start, LABEL_WIDTH);
++  draw(end - start);
+   ctx.restore();
+ }
+ 
+-function drawFillRecord(ctx: Ctx, data: LabelData) {
+-  rotatedSection(ctx, 0, TOP_END, (length) => {
++function drawFillRecord(ctx: Ctx, layout: Layout, data: LabelData) {
++  const { topEnd } = layout.size;
++  rotatedSection(ctx, 0, topEnd, (length) => {
+     const left = 10;
+     const width = length - 20;
+     fitText(ctx, `B:${data.batch}`, left, 24, width, 22, true);
+@@ -157,28 +183,30 @@ function drawFillRecord(ctx: Ctx, data: LabelData) {
+     cell(data.fillDate, cols[2], cols[3], 0);
+     cell("Chk", cols[0], cols[1], 1);
+   });
+-  drawQr(ctx, data.qrText, 206, 18, 90);
++  const qr = Math.min(120, topEnd - 30);
++  drawQr(ctx, layout, data.qrText, 296 - qr, (topEnd - qr) / 2, qr);
+ }
+ 
+ function drawCanisterFace(
+   ctx: Ctx,
++  layout: Layout,
+   data: LabelData,
+   photo: HTMLImageElement | null,
+ ) {
+-  rotatedSection(ctx, TOP_END, MIDDLE_END, (length) => {
++  const { topEnd, middleEnd, photoW, photoH, photoAcross, faceQr } =
++    layout.size;
++  rotatedSection(ctx, topEnd, middleEnd, (length) => {
+     const left = 8;
+     const width = length - 16;
+     // Photo at the far end; the QR code is drawn upright after this section
+     if (photo) {
+-      const boxW = 100;
+-      const boxH = 80;
+-      const scale = Math.min(boxW / photo.width, boxH / photo.height);
++      const scale = Math.min(photoW / photo.width, photoH / photo.height);
+       const w = photo.width * scale;
+       const h = photo.height * scale;
+       ctx.drawImage(
+         photo,
+-        length - 8 - boxW + (boxW - w) / 2,
+-        58 + (boxH - h) / 2,
++        length - 8 - photoW + (photoW - w) / 2,
++        photoAcross + (photoH - h) / 2,
+         w,
+         h,
+       );
+@@ -211,47 +239,54 @@ function drawCanisterFace(
+       true,
+     );
+   });
+-  drawQr(ctx, data.qrText, 56, MIDDLE_END - 82, 78);
++  drawQr(ctx, layout, data.qrText, photoAcross, middleEnd - faceQr - 4, faceQr);
+ }
+ 
+-function drawTag(ctx: Ctx, data: LabelData) {
+-  const qrSize = 72;
+-  const qrX = LABEL_WIDTH - MARGIN - qrSize;
++function drawTag(ctx: Ctx, layout: Layout, data: LabelData) {
++  const { middleEnd, tagQr } = layout.size;
++  const mid = (middleEnd + layout.length) / 2;
++  const qrX = BASE_WIDTH - MARGIN - tagQr;
+   const textW = qrX - MARGIN - 8;
+-  fitText(ctx, data.name, MARGIN, MIDDLE_END + 34, textW, 19);
+-  const boxW = boxedText(ctx, data.drugId, MARGIN, MIDDLE_END + 70, 26, 18);
++  fitText(ctx, data.name, MARGIN, mid - 20, textW, 19);
++  const boxW = boxedText(ctx, data.drugId, MARGIN, mid + 16, 26, 18);
+   fitText(
+     ctx,
+     formatLabelDate(data.expiry),
+     MARGIN + boxW + 6,
+-    MIDDLE_END + 70,
++    mid + 16,
+     textW - boxW - 6,
+     18,
+     true,
+     11,
+   );
+-  drawQr(ctx, data.qrText, qrX, MIDDLE_END + 16, qrSize);
++  drawQr(ctx, layout, data.qrText, qrX, mid - tagQr / 2, tagQr);
+ }
+ 
+ function divider(ctx: Ctx, y: number) {
+   ctx.fillStyle = "#000";
+-  ctx.fillRect(MARGIN, y - 1, LABEL_WIDTH - MARGIN * 2, 2);
++  ctx.fillRect(MARGIN, y - 1, BASE_WIDTH - MARGIN * 2, 2);
+ }
+ 
+-// Draws the full label on a 320 x 480 dot canvas, matching the ACP canister label layout
+-export async function renderLabel(data: LabelData): Promise<HTMLCanvasElement> {
++// Draws the full label at printer resolution, matching the ACP canister label layout
++export async function renderLabel(
++  data: LabelData,
++  size: LabelSize,
++): Promise<HTMLCanvasElement> {
++  const dots = labelDots(size);
+   const canvas = document.createElement("canvas");
+-  canvas.width = LABEL_WIDTH;
+-  canvas.height = LABEL_HEIGHT;
++  canvas.width = dots.width;
++  canvas.height = dots.height;
+   const ctx = canvas.getContext("2d");
+   if (!ctx) throw new Error("This browser cannot draw labels");
+   const photo = data.imageUrl ? await loadImage(data.imageUrl) : null;
+   ctx.fillStyle = "#fff";
+-  ctx.fillRect(0, 0, LABEL_WIDTH, LABEL_HEIGHT);
+-  drawFillRecord(ctx, data);
+-  divider(ctx, TOP_END);
+-  drawCanisterFace(ctx, data, photo);
+-  divider(ctx, MIDDLE_END);
+-  drawTag(ctx, data);
++  ctx.fillRect(0, 0, dots.width, dots.height);
++  const layout: Layout = { size, ...labelScale(size) };
++  ctx.scale(layout.scale, layout.scale);
++  drawFillRecord(ctx, layout, data);
++  divider(ctx, size.topEnd);
++  drawCanisterFace(ctx, layout, data, photo);
++  divider(ctx, size.middleEnd);
++  drawTag(ctx, layout, data);
+   return canvas;
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 95bf6ac..48b41b1 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v65");
++    expect(CHANGE_ENTRIES[0].version).toBe("v66");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/src/lib/label/label-sizes.ts b/src/lib/label/label-sizes.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/label-sizes.ts
+@@ -0,0 +1,95 @@
++// Label sizes the HPRT D35BT can print. Width is across the roll, height is along it.
++// Layout numbers are in "base" units: the 40mm design is 320 units wide, and bigger
++// labels are drawn at a scale so the same 320-unit design fills their width.
++
++export type LabelSizeId = "40x60" | "52x110";
++
++export type LabelSize = {
++  id: LabelSizeId;
++  name: string;
++  widthMm: number;
++  heightMm: number;
++  // Where the fill record ends and the canister face ends, in base units
++  topEnd: number;
++  middleEnd: number;
++  // Photo box on the canister face, in base units
++  photoW: number;
++  photoH: number;
++  photoAcross: number;
++  // QR code sizes on the canister face and the small tag
++  faceQr: number;
++  tagQr: number;
++};
++
++export const DOTS_PER_MM = 8;
++export const BASE_WIDTH = 320;
++
++export const LABEL_SIZES: Record<LabelSizeId, LabelSize> = {
++  "40x60": {
++    id: "40x60",
++    name: "40 × 60 mm",
++    widthMm: 40,
++    heightMm: 60,
++    topEnd: 125,
++    middleEnd: 365,
++    photoW: 100,
++    photoH: 80,
++    photoAcross: 58,
++    faceQr: 78,
++    tagQr: 72,
++  },
++  "52x110": {
++    id: "52x110",
++    name: "52 × 110 mm",
++    widthMm: 52,
++    heightMm: 110,
++    topEnd: 160,
++    middleEnd: 520,
++    photoW: 170,
++    photoH: 120,
++    photoAcross: 20,
++    faceQr: 110,
++    tagQr: 105,
++  },
++};
++
++export const DEFAULT_LABEL_SIZE: LabelSizeId = "40x60";
++
++export function isLabelSizeId(value: unknown): value is LabelSizeId {
++  return typeof value === "string" && value in LABEL_SIZES;
++}
++
++// Printer dots for a size (8 dots per mm at 203 dpi)
++export function labelDots(size: LabelSize): { width: number; height: number } {
++  return {
++    width: size.widthMm * DOTS_PER_MM,
++    height: size.heightMm * DOTS_PER_MM,
++  };
++}
++
++// Scale from base units to printer dots, and the label length in base units
++export function labelScale(size: LabelSize): { scale: number; length: number } {
++  const { width, height } = labelDots(size);
++  const scale = width / BASE_WIDTH;
++  return { scale, length: height / scale };
++}
++
++const STORAGE_KEY = "acp-label-size";
++
++// The chosen size is remembered on this device, since each printer has its own roll
++export function loadLabelSize(): LabelSizeId {
++  try {
++    const saved = localStorage.getItem(STORAGE_KEY);
++    return isLabelSizeId(saved) ? saved : DEFAULT_LABEL_SIZE;
++  } catch {
++    return DEFAULT_LABEL_SIZE;
++  }
++}
++
++export function saveLabelSize(id: LabelSizeId): void {
++  try {
++    localStorage.setItem(STORAGE_KEY, id);
++  } catch {
++    // Private mode: the choice just isn't remembered
++  }
++}

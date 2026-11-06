@@ -1,0 +1,251 @@
+diff --git a/src/components/lasa/lasa-drug-card.tsx b/src/components/lasa/lasa-drug-card.tsx
+index 9fd17b8..7d13e0f 100644
+--- a/src/components/lasa/lasa-drug-card.tsx
++++ b/src/components/lasa/lasa-drug-card.tsx
+@@ -1,6 +1,8 @@
++import { ArrowLeftRight } from "lucide-react";
+ import type { FunctionReturnType } from "convex/server";
+ import type { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import { Button } from "@/components/ui/button.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import ZoomableDrugImage, { type GallerySlide } from "@/components/zoomable-drug-image.tsx";
+ import { cn } from "@/lib/utils.ts";
+@@ -13,10 +15,13 @@ type Props = {
+   selected?: boolean;
+   // Package form picked in Stock In / Stock Out, highlighted on the chosen drug
+   highlightPackageId?: string;
++  // Look-alikes only: lets staff switch to this drug ("package" = pick one of its package forms)
++  switchMode?: "package" | "drug";
++  onSwitch?: (packageId: string | null) => void;
+ };
+ 
+ // One drug in the look-alike comparison: picture, package form pictures, specifications and remarks
+-export default function LasaDrugCard({ drug, selected = false, highlightPackageId }: Props) {
++export default function LasaDrugCard({ drug, selected = false, highlightPackageId, switchMode, onSwitch }: Props) {
+   // Every picture of this drug, so an enlarged view can swipe through them all
+   const slides: GallerySlide[] = [
+     ...(drug.imageUrl ? [{ url: drug.imageUrl, caption: `${drug.name} · drug picture` }] : []),
+@@ -89,15 +94,30 @@ export default function LasaDrugCard({ drug, selected = false, highlightPackageI
+               ) : (
+                 <p className="text-xs italic text-muted-foreground">No package picture</p>
+               )}
++              {onSwitch && switchMode === "package" && (
++                <Button type="button" size="sm" variant="secondary" className="w-full" onClick={() => onSwitch(p._id)}>
++                  <ArrowLeftRight /> Use this drug instead
++                </Button>
++              )}
+             </div>
+           ))}
+         </div>
+       )}
++      {onSwitch && switchMode === "package" && drug.packages.length === 0 && (
++        <p className="text-xs italic text-muted-foreground">
++          No package form yet, so this drug cannot be chosen for stock.
++        </p>
++      )}
+ 
+       <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
+       {!drug.specifications && !drug.remarks && (
+         <p className="text-xs italic text-muted-foreground">No specifications or remarks</p>
+       )}
++      {onSwitch && switchMode === "drug" && (
++        <Button type="button" variant="secondary" className="mt-auto w-full" onClick={() => onSwitch(null)}>
++          <ArrowLeftRight /> Open this drug instead
++        </Button>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/components/lasa/lasa-warning-dialog.tsx b/src/components/lasa/lasa-warning-dialog.tsx
+index ce9f384..b779f4c 100644
+--- a/src/components/lasa/lasa-warning-dialog.tsx
++++ b/src/components/lasa/lasa-warning-dialog.tsx
+@@ -1,4 +1,4 @@
+-import { useState } from "react";
++import { useRef, useState } from "react";
+ import { useQuery } from "convex/react";
+ import { TriangleAlert } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+@@ -14,24 +14,58 @@ import {
+   DialogTitle,
+ } from "@/components/ui/dialog.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+-import LasaDrugCard from "./lasa-drug-card.tsx";
++import LasaDrugCard, { type LasaCompareDrug } from "./lasa-drug-card.tsx";
+ 
+ type Props = {
+   // The marked drug to warn about; null keeps the dialog closed
+   drugId: Id<"drugs"> | null;
+   highlightPackageId?: string;
+   confirmLabel?: string;
++  // "package": switching picks a package form of the other drug (Stock In / Out); "drug": the drug itself (Inventory)
++  switchMode: "package" | "drug";
+   onConfirm: () => void;
++  // Staff decided the other drug is the right one
++  onSwitch: (drug: LasaCompareDrug, packageId: string | null) => void;
+   onCancel: () => void;
++  // Runs once the dialog has fully closed after continuing or switching (e.g. to focus a field)
++  onAfterChoose?: () => void;
+ };
+ 
+-// Firm Look Alike, Sound Alike warning: staff must tick that they checked the pictures to continue
++// Firm Look Alike, Sound Alike warning: staff must tick that they checked the pictures to continue,
++// or switch to one of the look-alike drugs shown
+ export default function LasaWarningDialog(props: Props) {
++  // After continuing or switching, the next screen sets the cursor itself (e.g. the Quantity box),
++  // so don't send focus back to whatever opened the dialog
++  const chose = useRef(false);
++  const wrap =
++    <A extends unknown[]>(fn: (...args: A) => void) =>
++    (...args: A) => {
++      chose.current = true;
++      fn(...args);
++    };
++
+   return (
+     <Dialog open={!!props.drugId} onOpenChange={(o) => !o && props.onCancel()}>
+-      <DialogContent className="max-h-[92vh] max-w-[calc(100vw-1.5rem)] gap-4 overflow-y-auto p-4 sm:max-w-5xl sm:p-6">
++      <DialogContent
++        className="max-h-[92vh] max-w-[calc(100vw-1.5rem)] gap-4 overflow-y-auto p-4 sm:max-w-5xl sm:p-6"
++        onCloseAutoFocus={(e) => {
++          if (chose.current) {
++            e.preventDefault();
++            props.onAfterChoose?.();
++          }
++          chose.current = false;
++        }}
++      >
+         {/* Keyed so the tick box starts empty for every drug */}
+-        {props.drugId && <WarningBody key={props.drugId} {...props} drugId={props.drugId} />}
++        {props.drugId && (
++          <WarningBody
++            key={props.drugId}
++            {...props}
++            drugId={props.drugId}
++            onConfirm={wrap(props.onConfirm)}
++            onSwitch={wrap(props.onSwitch)}
++          />
++        )}
+       </DialogContent>
+     </Dialog>
+   );
+@@ -41,7 +75,9 @@ function WarningBody({
+   drugId,
+   highlightPackageId,
+   confirmLabel = "Continue",
++  switchMode,
+   onConfirm,
++  onSwitch,
+   onCancel,
+ }: Props & { drugId: Id<"drugs"> }) {
+   const [checked, setChecked] = useState(false);
+@@ -55,7 +91,7 @@ function WarningBody({
+         </DialogTitle>
+         <DialogDescription>
+           This drug is easily confused with others. Compare the drug picture, package form pictures,
+-          specifications and remarks before you continue.
++          specifications and remarks before you continue. Picked the wrong one? Choose the correct drug below.
+         </DialogDescription>
+       </DialogHeader>
+ 
+@@ -71,7 +107,12 @@ function WarningBody({
+         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+           <LasaDrugCard drug={data.selected} selected highlightPackageId={highlightPackageId} />
+           {data.lookAlikes.map((d) => (
+-            <LasaDrugCard key={d._id} drug={d} />
++            <LasaDrugCard
++              key={d._id}
++              drug={d}
++              switchMode={switchMode}
++              onSwitch={(packageId) => onSwitch(d, packageId)}
++            />
+           ))}
+           {data.lookAlikes.length === 0 && (
+             <div className="flex items-center justify-center rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index abd832f..e8f297b 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -61,6 +61,21 @@ function Hint({ title, description }: { title: string; description: string }) {
+   );
+ }
+ 
++// Puts the cursor in the stock form's Quantity box once it has appeared (it may still be loading)
++function focusQuantity() {
++  let tries = 0;
++  const attempt = () => {
++    const input = document.querySelector<HTMLInputElement>('input[name="quantity"]');
++    if (input) {
++      input.focus();
++      input.select();
++    } else if (tries++ < 20) {
++      window.setTimeout(attempt, 100);
++    }
++  };
++  window.requestAnimationFrame(attempt);
++}
++
+ // Search or scan a drug, then pick a package form. A barcode scan picks it automatically.
+ export default function StockDrugFinder({ children }: Props) {
+   const [search, setSearch] = useState("");
+@@ -80,7 +95,8 @@ export default function StockDrugFinder({ children }: Props) {
+     : undefined;
+   const match = results && term ? findBarcodeMatch(results, term) : null;
+   const selection: StockSelection | null =
+-    pickedSelection ?? (showAll ? null : match);
++    // While a picked package form is still loading (e.g. after switching drug), don't fall back to the old match
++    pickedSelection ?? (showAll || picked ? null : match);
+ 
+   // Look Alike, Sound Alike drugs stay locked until staff confirm they checked the pictures
+   const [confirmedDrug, setConfirmedDrug] = useState<string | null>(null);
+@@ -177,7 +193,16 @@ export default function StockDrugFinder({ children }: Props) {
+         drugId={needsWarning && selection ? selection.drug._id : null}
+         highlightPackageId={selection?.pkg._id}
+         confirmLabel="Continue with this drug"
++        switchMode="package"
+         onConfirm={() => selection && setConfirmedDrug(selection.drug._id)}
++        // Load the other drug by its Drug ID and pick its package form; it was just compared, so no second warning
++        onSwitch={(other, packageId) => {
++          setSearch(other.drugId);
++          setPicked(packageId);
++          setShowAll(false);
++          setConfirmedDrug(other._id);
++        }}
++        onAfterChoose={focusQuantity}
+         // Backing out clears the pick so the wrong drug cannot be used by accident
+         onCancel={reset}
+       />
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index dd25ccf..6350ccc 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v60");
++    expect(CHANGE_ENTRIES[0].version).toBe("v61");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/page.tsx b/src/pages/inventory/page.tsx
+index a97b83f..c7d434d 100644
+--- a/src/pages/inventory/page.tsx
++++ b/src/pages/inventory/page.tsx
+@@ -206,10 +206,15 @@ export default function InventoryPage() {
+       <LasaWarningDialog
+         drugId={pendingLasa?._id ?? null}
+         confirmLabel="Open drug details"
++        switchMode="drug"
+         onConfirm={() => {
+           setSelected(pendingLasa);
+           setPendingLasa(null);
+         }}
++        onSwitch={(other) => {
++          setSelected(other);
++          setPendingLasa(null);
++        }}
+         onCancel={() => setPendingLasa(null)}
+       />
+       <DrugDetailSheet

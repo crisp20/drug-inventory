@@ -6,7 +6,7 @@ import { MAX_PHOTO_BATCH, MAX_PHOTO_CHECK } from "@/convex/lib/drugPhotos.ts";
 import { useUploadImage } from "@/hooks/use-upload-image.ts";
 import type { PickedPhoto } from "../_lib/read-photo-files.ts";
 
-export type PhotoMatch = PickedPhoto & { name: string; hasPhoto: boolean };
+export type PhotoMatch = PickedPhoto & { name: string; hasPhoto: boolean; photoUrl: string | null };
 
 export type PhotoReview = { matched: PhotoMatch[]; notFound: PickedPhoto[] };
 
@@ -38,7 +38,7 @@ export function usePhotoImport() {
         const results = await convex.query(api.drugPhotos.checkPhotos, { drugIds: batches[i].map((p) => p.drugId) });
         results.forEach((r, j) => {
           const photo = batches[i][j];
-          if (r.found) review.matched.push({ ...photo, name: r.name, hasPhoto: r.hasPhoto });
+          if (r.found) review.matched.push({ ...photo, name: r.name, hasPhoto: r.hasPhoto, photoUrl: r.photoUrl });
           else review.notFound.push(photo);
         });
       }

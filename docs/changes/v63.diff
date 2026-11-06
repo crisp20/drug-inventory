@@ -1,0 +1,416 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+index d52dd84..c7dcca8 100644
+--- a/convex/drugImport.test.ts
++++ b/convex/drugImport.test.ts
+@@ -102,7 +102,7 @@ describe("drug import", () => {
+     expect(cleared.remarks).toBeUndefined();
+   });
+ 
+-  it("skips barcodes already used by another drug", async () => {
++  it("adds the package form without a barcode already used by another drug", async () => {
+     const { owner } = await setup();
+     await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
+     const other = { ...fileDrug, drugId: "33", packages: [...fileDrug.packages, { ...fileDrug.packages[0], barcode: "", qtyPerUnit: 10, baseUnit: "Strip" as const }] };
+@@ -111,7 +111,37 @@ describe("drug import", () => {
+     const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: other, action: "create" }] });
+     expect(res.skipped).toEqual([{ drugId: "33", name: other.name, barcodes: ["4046222740115"] }]);
+     const [created] = await owner.query(api.drugs.search, { term: "33" });
++    expect(created.packages.map((p) => [p.barcode, p.qtyPerUnit, p.baseUnit])).toEqual(
++      expect.arrayContaining([["", 100, "Box"], ["", 10, "Strip"]]),
++    );
++    expect(created.packages).toHaveLength(2);
++    // The barcode stays with the first drug
++    const [first] = await owner.query(api.drugs.search, { term: "32" });
++    expect(first.packages[0].barcode).toBe("4046222740115");
++  });
++
++  it("saves a changed barcode given for a clash", async () => {
++    const { owner } = await setup();
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
++    const changed = { ...fileDrug, drugId: "34", packages: [{ ...fileDrug.packages[0], barcode: "4891234567890" }] };
++    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: changed, action: "create" }] });
++    expect(res.skipped).toEqual([]);
++    const [created] = await owner.query(api.drugs.search, { term: "4891234567890" });
++    expect(created.drugId).toBe("34");
++  });
++
++  it("merges two clashing barcodes with the same form into one form", async () => {
++    const { owner } = await setup();
++    const owners = [
++      { ...fileDrug, drugId: "50", packages: [{ ...fileDrug.packages[0], barcode: "1111111111116" }] },
++      { ...fileDrug, drugId: "51", packages: [{ ...fileDrug.packages[0], barcode: "2222222222222" }] },
++    ];
++    await owner.mutation(api.drugImport.applyBatch, { items: owners.map((drug) => ({ drug, action: "create" as const })) });
++    const both = { ...fileDrug, drugId: "52", packages: owners.map((o) => o.packages[0]) };
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: both, action: "create" }] });
++    const [created] = await owner.query(api.drugs.search, { term: "52" });
+     expect(created.packages).toHaveLength(1);
++    expect(created.packages[0].barcode).toBe("");
+   });
+ 
+   it("sets the Look Alike, Sound Alike mark, and unmarking removes the links", async () => {
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index af8245a..5c1e149 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -126,6 +126,18 @@ export const checkBatch = query({
+   },
+ });
+ 
++// Checks a replacement barcode typed during the import review: who already has it, if anyone
++export const barcodeOwner = query({
++  args: { barcode: v.string(), drugId: v.string() },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    if (!args.barcode.trim()) return null;
++    const own = await findDrug(ctx, args.drugId);
++    const [clash] = await findClashes(ctx, [{ barcode: args.barcode, qtyPerUnit: 1, baseUnit: "Box", unitCount: 1 }], own?._id);
++    return clash ? { drugId: clash.otherDrugId, name: clash.otherName } : null;
++  },
++});
++
+ // Every saved drug (one page at a time) so the import can find drugs missing from the file
+ export const listForImport = query({
+   args: { paginationOpts: paginationOptsValidator },
+@@ -210,8 +222,9 @@ async function applyDrug(
+   if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
+   if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
+ 
++  // A barcode that belongs to another drug is dropped, but its package form is still added without a barcode
+   const clashes = new Set((await findClashes(ctx, d.packages, existing?._id)).map((c) => c.barcode));
+-  const usable = d.packages.filter((p) => !clashes.has(p.barcode));
++  const usable = d.packages.map((p) => (clashes.has(p.barcode) ? { ...p, barcode: "" } : p));
+   const current = existing ? await getPackages(ctx, existing._id) : [];
+   const currentByKey = new Map(current.map((p) => [packageMatchKey(p), p]));
+ 
+@@ -229,8 +242,12 @@ async function applyDrug(
+       imageIds: p.imageIds,
+     };
+   });
++  // Two clashing barcodes with the same form become one form without a barcode
++  const added = new Set(currentByKey.keys());
+   for (const p of usable) {
+-    if (currentByKey.has(packageMatchKey(p)) || merged.length >= MAX_PACKAGES_PER_DRUG) continue;
++    const key = packageMatchKey(p);
++    if (added.has(key) || merged.length >= MAX_PACKAGES_PER_DRUG) continue;
++    added.add(key);
+     merged.push({ ...p, stock: 0, imageIds: [] });
+   }
+ 
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index e19393e..6911c47 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v62");
++    expect(CHANGE_ENTRIES[0].version).toBe("v63");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index ac7da87..daeac76 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -5,7 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox.tsx";
+ import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
+ import { cn } from "@/lib/utils.ts";
+ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+-import { allChoices, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
++import { allChoices, type BarcodeFixes, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
++import BarcodeClashFix from "./barcode-clash-fix.tsx";
+ 
+ function pkgLabel(p: ImportPackage) {
+   return `${formatPackageForm(p)}${p.barcode ? ` · ${p.barcode}` : " · no barcode"}`;
+@@ -68,12 +69,16 @@ export default function ImportConflictCard({
+   onChange,
+   selected,
+   onSelectedChange,
++  barcodeFixes,
++  onBarcodeFixesChange,
+ }: {
+   item: ReviewItem;
+   choices: DrugChoices;
+   onChange: (c: DrugChoices) => void;
+   selected: boolean;
+   onSelectedChange: (on: boolean) => void;
++  barcodeFixes: BarcodeFixes | undefined;
++  onBarcodeFixesChange: (fixes: BarcodeFixes) => void;
+ }) {
+   const diff = item.check.diff;
+   if (!diff) return null;
+@@ -193,18 +198,9 @@ export default function ImportConflictCard({
+           will be filled from the file.
+         </p>
+       )}
+-      {item.check.clashes.length > 0 && <ClashNote item={item} />}
++      {item.check.clashes.length > 0 && (
++        <BarcodeClashFix item={item} fixes={barcodeFixes} onChange={onBarcodeFixesChange} />
++      )}
+     </div>
+   );
+ }
+-
+-export function ClashNote({ item }: { item: ReviewItem }) {
+-  return (
+-    <p className="rounded-md bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+-      {item.check.clashes
+-        .map((c) => `Barcode ${c.barcode} already belongs to ${c.otherName} (${c.otherDrugId})`)
+-        .join("; ")}
+-      . It will be skipped.
+-    </p>
+-  );
+-}
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index 10ae7e7..7d2b172 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
+ import { toast } from "sonner";
+ import { AlertTriangle, CheckCircle2, Upload } from "lucide-react";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
+-import { listDosageForms, sheetToRecords, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
++import { listDosageForms, sheetToRecords, type ImportDrug, type PackageFilter, type SheetRecord } from "@/convex/lib/drugImport.ts";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Checkbox } from "@/components/ui/checkbox.tsx";
+ import {
+@@ -22,7 +22,8 @@ import { errorMessage } from "@/lib/errors.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { readImportFile } from "../_lib/read-import-file.ts";
+ import { useDrugImport, type ImportReport, type ImportReview } from "../_hooks/use-drug-import.ts";
+-import ImportConflictCard, { ClashNote } from "./import-conflict-card.tsx";
++import ImportConflictCard from "./import-conflict-card.tsx";
++import BarcodeClashFix from "./barcode-clash-fix.tsx";
+ import ImportFormsStep from "./import-forms-step.tsx";
+ import ImportConflictsBar from "./import-conflicts-bar.tsx";
+ import FileDropZone from "@/components/file-drop-zone.tsx";
+@@ -31,6 +32,8 @@ import {
+   allChoices,
+   itemFor,
+   usesFile,
++  withBarcodeFixes,
++  type BarcodeFixes,
+   type Choice,
+   type DrugChoices,
+   type ImportItem,
+@@ -183,6 +186,9 @@ function ReviewStep({
+   const [shownConflicts, setShownConflicts] = useState(PAGE);
+   const [shownMissing, setShownMissing] = useState(PAGE);
+   const [selected, setSelected] = useState<Set<string>>(new Set());
++  const [barcodeFixes, setBarcodeFixes] = useState<Record<string, BarcodeFixes>>({});
++  const setFixesFor = (drugId: string, fixes: BarcodeFixes) => setBarcodeFixes({ ...barcodeFixes, [drugId]: fixes });
++  const fixed = (drug: ImportDrug) => withBarcodeFixes(drug, barcodeFixes[drug.drugId]);
+ 
+   const choicesOf = (drugId: string): DrugChoices => choices[drugId] ?? DEFAULT_CHOICES;
+   const useFileCount = useMemo(
+@@ -208,9 +214,9 @@ function ReviewStep({
+ 
+   const submit = async () => {
+     const items: ImportItem[] = [
+-      ...(addNew ? review.newDrugs.map((i) => ({ drug: i.drug, action: "create" as const })) : []),
++      ...(addNew ? review.newDrugs.map((i) => ({ drug: fixed(i.drug), action: "create" as const })) : []),
+       ...[...review.conflicts, ...review.filled].flatMap((i) => {
+-        const it = itemFor(i, choicesOf(i.drug.drugId));
++        const it = itemFor({ ...i, drug: fixed(i.drug) }, choicesOf(i.drug.drugId));
+         return it ? [it] : [];
+       }),
+     ];
+@@ -255,12 +261,22 @@ function ReviewStep({
+             <span>Add all {review.newDrugs.length.toLocaleString()} new drugs (stock starts at 0)</span>
+             <Switch checked={addNew} onCheckedChange={setAddNew} />
+           </label>
++          {newWithClashes.length > 0 && (
++            <p className="text-xs text-muted-foreground">
++              {newWithClashes.length.toLocaleString()} new drug{newWithClashes.length === 1 ? " has a barcode" : "s have barcodes"}{" "}
++              already used by another drug. Type a new barcode, or add them without one.
++            </p>
++          )}
+           {newWithClashes.map((i) => (
+-            <div key={i.drug.drugId} className="space-y-1 rounded-lg border p-2 text-sm">
++            <div key={i.drug.drugId} className="space-y-2 rounded-lg border p-2 text-sm">
+               <div className="font-medium">
+-                {i.drug.name} <span className="text-muted-foreground">· {i.drug.drugId}</span>
++                {i.drug.name} <span className="text-muted-foreground">· {i.drug.drugId} · row {i.drug.row}</span>
+               </div>
+-              <ClashNote item={i} />
++              <BarcodeClashFix
++                item={i}
++                fixes={barcodeFixes[i.drug.drugId]}
++                onChange={(f) => setFixesFor(i.drug.drugId, f)}
++              />
+             </div>
+           ))}
+           {review.leftOut > 0 && (
+@@ -301,6 +317,8 @@ function ReviewStep({
+                   onChange={(c) => setChoices({ ...choices, [item.drug.drugId]: c })}
+                   selected={selected.has(item.drug.drugId)}
+                   onSelectedChange={(on) => toggleSelected(item.drug.drugId, on)}
++                  barcodeFixes={barcodeFixes[item.drug.drugId]}
++                  onBarcodeFixesChange={(f) => setFixesFor(item.drug.drugId, f)}
+                 />
+               ))}
+               {shownConflicts < review.conflicts.length && (
+@@ -415,7 +433,7 @@ function DoneStep({ report, onClose }: { report: ImportReport; onClose: () => vo
+         ))}
+         {report.skipped.map((s) => (
+           <div key={`s-${s.drugId}`} className="rounded-md bg-muted px-2 py-1.5 text-xs">
+-            {s.drugId} {s.name}: barcode {s.barcodes.join(", ")} skipped (already used by another drug)
++            {s.drugId} {s.name}: added without barcode {s.barcodes.join(", ")} (already used by another drug)
+           </div>
+         ))}
+       </div>
+diff --git a/src/pages/inventory/_lib/import-choices.ts b/src/pages/inventory/_lib/import-choices.ts
+index 9179a8c..b4ea777 100644
+--- a/src/pages/inventory/_lib/import-choices.ts
++++ b/src/pages/inventory/_lib/import-choices.ts
+@@ -1,3 +1,4 @@
++import { toStoredBarcode } from "@/convex/lib/barcode.ts";
+ import type { ImportDrug, NoteKey } from "@/convex/lib/drugImport.ts";
+ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+ 
+@@ -32,6 +33,22 @@ export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | nu
+   return notesChanged ? { drug, action: "notes" } : null;
+ }
+ 
++// Per drug: clashing barcode -> replacement typed by the admin. Missing or blank = add without a barcode.
++export type BarcodeFixes = Record<string, string>;
++
++// Swaps clashing barcodes for the admin's replacements. Unfixed clashes are dropped by the server,
++// which still adds the package form without a barcode.
++export function withBarcodeFixes(drug: ImportDrug, fixes: BarcodeFixes | undefined): ImportDrug {
++  if (!fixes) return drug;
++  return {
++    ...drug,
++    packages: drug.packages.map((p) => {
++      const fix = fixes[p.barcode]?.trim();
++      return fix ? { ...p, barcode: toStoredBarcode(fix) } : p;
++    }),
++  };
++}
++
+ export function allChoices(item: ReviewItem, c: Choice): DrugChoices {
+   const diff = item.check.diff;
+   const notes = Object.fromEntries((diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]));
+
+diff --git a/src/pages/inventory/_components/barcode-clash-fix.tsx b/src/pages/inventory/_components/barcode-clash-fix.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/barcode-clash-fix.tsx
+@@ -0,0 +1,115 @@
++import { useQuery } from "convex/react";
++import { api } from "@/convex/_generated/api.js";
++import { Input } from "@/components/ui/input.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { useDebounce } from "@/hooks/use-debounce.ts";
++import { cn } from "@/lib/utils.ts";
++import type { ReviewItem } from "../_hooks/use-drug-import.ts";
++import type { BarcodeFixes } from "../_lib/import-choices.ts";
++
++type Clash = ReviewItem["check"]["clashes"][number];
++
++function ModeButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
++  return (
++    <button
++      type="button"
++      onClick={onClick}
++      className={cn(
++        "cursor-pointer rounded-md px-3 py-1.5 text-xs font-semibold transition-colors",
++        active ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground hover:bg-accent",
++      )}
++    >
++      {children}
++    </button>
++  );
++}
++
++// Live check of a typed replacement, so the admin sees right away if it is also taken
++function ReplacementStatus({ barcode, drugId }: { barcode: string; drugId: string }) {
++  const [debounced] = useDebounce(barcode.trim(), 300);
++  const owner = useQuery(api.drugImport.barcodeOwner, debounced ? { barcode: debounced, drugId } : "skip");
++  if (!barcode.trim()) return <p className="text-xs text-muted-foreground">Leave blank to add without a barcode.</p>;
++  if (owner === undefined || debounced !== barcode.trim()) return <Spinner className="size-3" />;
++  if (owner) {
++    return (
++      <p className="text-xs text-destructive">
++        Also used by {owner.name} ({owner.drugId}). It will be added without a barcode unless you change it.
++      </p>
++    );
++  }
++  return <p className="text-xs text-primary">This barcode is free.</p>;
++}
++
++function ClashRow({
++  clash,
++  drugId,
++  fix,
++  onFix,
++}: {
++  clash: Clash;
++  drugId: string;
++  fix: string | undefined;
++  onFix: (value: string | undefined) => void;
++}) {
++  const changing = fix !== undefined;
++  return (
++    <div className="space-y-2 rounded-md bg-destructive/10 p-2">
++      <p className="text-xs text-destructive">
++        Barcode {clash.barcode} already belongs to {clash.otherName} ({clash.otherDrugId}).
++      </p>
++      <div className="flex flex-wrap gap-1">
++        <ModeButton active={!changing} onClick={() => onFix(undefined)}>
++          Add without barcode
++        </ModeButton>
++        <ModeButton active={changing} onClick={() => onFix(fix ?? "")}>
++          Change barcode
++        </ModeButton>
++      </div>
++      {changing ? (
++        <div className="space-y-1">
++          <Input
++            autoFocus
++            value={fix}
++            onChange={(e) => onFix(e.target.value)}
++            placeholder="New barcode, e.g. 4891234567890"
++            aria-label={`New barcode instead of ${clash.barcode}`}
++            className="h-8 bg-background"
++          />
++          <ReplacementStatus barcode={fix} drugId={drugId} />
++        </div>
++      ) : (
++        <p className="text-xs text-muted-foreground">The package form is still added, just without this barcode.</p>
++      )}
++    </div>
++  );
++}
++
++export default function BarcodeClashFix({
++  item,
++  fixes,
++  onChange,
++}: {
++  item: ReviewItem;
++  fixes: BarcodeFixes | undefined;
++  onChange: (fixes: BarcodeFixes) => void;
++}) {
++  const setFix = (barcode: string, value: string | undefined) => {
++    const next = { ...fixes };
++    if (value === undefined) delete next[barcode];
++    else next[barcode] = value;
++    onChange(next);
++  };
++  return (
++    <div className="space-y-2">
++      {item.check.clashes.map((c) => (
++        <ClashRow
++          key={c.barcode}
++          clash={c}
++          drugId={item.drug.drugId}
++          fix={fixes?.[c.barcode]}
++          onFix={(v) => setFix(c.barcode, v)}
++        />
++      ))}
++    </div>
++  );
++}

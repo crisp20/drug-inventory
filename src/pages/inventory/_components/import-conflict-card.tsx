@@ -5,7 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox.tsx";
 import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
 import { cn } from "@/lib/utils.ts";
 import type { ReviewItem } from "../_hooks/use-drug-import.ts";
-import { allChoices, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
+import { allChoices, type BarcodeFixes, type Choice, type DrugChoices } from "../_lib/import-choices.ts";
+import BarcodeClashFix from "./barcode-clash-fix.tsx";
 
 function pkgLabel(p: ImportPackage) {
   return `${formatPackageForm(p)}${p.barcode ? ` · ${p.barcode}` : " · no barcode"}`;
@@ -26,7 +27,7 @@ function ChoiceButton({ active, onClick, children }: { active: boolean; onClick:
   );
 }
 
-function ChoicePair({ choice, onChoose }: { choice: Choice; onChoose: (c: Choice) => void }) {
+export function ChoicePair({ choice, onChoose }: { choice: Choice; onChoose: (c: Choice) => void }) {
   return (
     <div className="flex shrink-0 gap-1">
       <ChoiceButton active={choice === "keep"} onClick={() => onChoose("keep")}>
@@ -68,18 +69,25 @@ export default function ImportConflictCard({
   onChange,
   selected,
   onSelectedChange,
+  barcodeFixes,
+  onBarcodeFixesChange,
 }: {
   item: ReviewItem;
   choices: DrugChoices;
   onChange: (c: DrugChoices) => void;
   selected: boolean;
   onSelectedChange: (on: boolean) => void;
+  barcodeFixes: BarcodeFixes | undefined;
+  onBarcodeFixesChange: (fixes: BarcodeFixes) => void;
 }) {
   const diff = item.check.diff;
   if (!diff) return null;
   const askNotes = diff.notes.filter((n) => !n.auto);
   const autoNotes = diff.notes.filter((n) => n.auto);
-  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length;
+  const askLasa = diff.lasa && !diff.lasa.auto ? diff.lasa : null;
+  const askDda = diff.dda && !diff.dda.auto ? diff.dda : null;
+  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length + (askLasa ? 1 : 0) + (askDda ? 1 : 0);
+  const yesNo = (b: boolean) => (b ? "Yes" : "No");
   const setNote = (key: NoteKey, c: Choice) => onChange({ ...choices, notes: { ...choices.notes, [key]: c } });
 
   return (
@@ -162,24 +170,57 @@ export default function ImportConflictCard({
         );
       })}
 
+      {askLasa && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Look Alike, Sound Alike
+            </span>
+            <ChoicePair
+              choice={choices.lasa ?? "keep"}
+              onChoose={(c) => onChange({ ...choices, lasa: c })}
+            />
+          </div>
+          <FieldRows
+            fields={[{ label: "Marked", current: yesNo(askLasa.current), file: yesNo(askLasa.file) }]}
+            choice={choices.lasa ?? "keep"}
+          />
+          <p className="text-xs text-muted-foreground">Using the file also removes its links to look-alike drugs.</p>
+        </div>
+      )}
+
+      {diff.lasa?.auto && (
+        <p className="text-xs text-muted-foreground">Will be marked Look Alike, Sound Alike from the file.</p>
+      )}
+
+      {askDda && (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Dangerous Drug (DDA)
+            </span>
+            <ChoicePair choice={choices.dda ?? "keep"} onChoose={(c) => onChange({ ...choices, dda: c })} />
+          </div>
+          <FieldRows
+            fields={[{ label: "Marked", current: yesNo(askDda.current), file: yesNo(askDda.file) }]}
+            choice={choices.dda ?? "keep"}
+          />
+        </div>
+      )}
+
+      {diff.dda?.auto && (
+        <p className="text-xs text-muted-foreground">Will be marked Dangerous Drug (DDA) from the file.</p>
+      )}
+
       {autoNotes.length > 0 && (
         <p className="text-xs text-muted-foreground">
           {autoNotes.map((n) => n.label).join(" and ")} {autoNotes.length === 1 ? "is" : "are"} blank in the app and
           will be filled from the file.
         </p>
       )}
-      {item.check.clashes.length > 0 && <ClashNote item={item} />}
+      {item.check.clashes.length > 0 && (
+        <BarcodeClashFix item={item} fixes={barcodeFixes} onChange={onBarcodeFixesChange} />
+      )}
     </div>
-  );
-}
-
-export function ClashNote({ item }: { item: ReviewItem }) {
-  return (
-    <p className="rounded-md bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
-      {item.check.clashes
-        .map((c) => `Barcode ${c.barcode} already belongs to ${c.otherName} (${c.otherDrugId})`)
-        .join("; ")}
-      . It will be skipped.
-    </p>
   );
 }

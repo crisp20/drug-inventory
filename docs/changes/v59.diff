@@ -1,0 +1,143 @@
+diff --git a/convex/lib/lasa.ts b/convex/lib/lasa.ts
+index 4540bb5..e49b7ef 100644
+--- a/convex/lib/lasa.ts
++++ b/convex/lib/lasa.ts
+@@ -5,7 +5,9 @@ import type { Doc, Id } from "../_generated/dataModel";
+ // "Look Alike, Sound Alike" links between drugs. Each link is stored both ways.
+ export const MAX_LASA_LINKS = 20;
+ 
+-export type LookAlike = Pick<Doc<"drugs">, "_id" | "drugId" | "name" | "brandName">;
++export type LookAlike = Pick<Doc<"drugs">, "_id" | "drugId" | "name" | "brandName"> & {
++  imageUrl: string | null;
++};
+ 
+ async function linkRows(ctx: QueryCtx, drugRef: Id<"drugs">) {
+   return await ctx.db
+@@ -18,10 +20,17 @@ async function linkRows(ctx: QueryCtx, drugRef: Id<"drugs">) {
+ export async function getLookAlikes(ctx: QueryCtx, drugRef: Id<"drugs">): Promise<LookAlike[]> {
+   const rows = await linkRows(ctx, drugRef);
+   const drugs = await Promise.all(rows.map((r) => ctx.db.get("drugs", r.otherRef)));
+-  return drugs
+-    .filter((d): d is Doc<"drugs"> => d !== null)
+-    .map((d) => ({ _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName }))
+-    .sort((a, b) => a.name.localeCompare(b.name));
++  const found = drugs.filter((d): d is Doc<"drugs"> => d !== null);
++  const withImages = await Promise.all(
++    found.map(async (d) => ({
++      _id: d._id,
++      drugId: d.drugId,
++      name: d.name,
++      brandName: d.brandName,
++      imageUrl: d.imageId ? await ctx.storage.getUrl(d.imageId) : null,
++    })),
++  );
++  return withImages.sort((a, b) => a.name.localeCompare(b.name));
+ }
+ 
+ async function findLink(ctx: QueryCtx, drugRef: Id<"drugs">, otherRef: Id<"drugs">) {
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 9cdf6a1..6a25624 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v58");
++    expect(CHANGE_ENTRIES[0].version).toBe("v59");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/look-alike-picker.tsx b/src/pages/inventory/_components/look-alike-picker.tsx
+index bca269d..82eec5d 100644
+--- a/src/pages/inventory/_components/look-alike-picker.tsx
++++ b/src/pages/inventory/_components/look-alike-picker.tsx
+@@ -4,12 +4,19 @@ import { Plus, X } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
+ import DrugImage from "@/components/drug-image.tsx";
++import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
+ import { cn } from "@/lib/utils.ts";
+ 
+-export type LookAlikeOption = { _id: Id<"drugs">; drugId: string; name: string; brandName: string };
++export type LookAlikeOption = {
++  _id: Id<"drugs">;
++  drugId: string;
++  name: string;
++  brandName: string;
++  imageUrl: string | null;
++};
+ 
+ type Props = {
+   // The drug being edited (left out of the results); undefined when adding a new drug
+@@ -34,7 +41,10 @@ export default function LookAlikePicker({ selfId, value, onChange }: Props) {
+   const activeIndex = Math.min(active, Math.max(options.length - 1, 0));
+ 
+   const add = (d: LookAlikeOption) => {
+-    onChange([...value, { _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName }]);
++    onChange([
++      ...value,
++      { _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName, imageUrl: d.imageUrl },
++    ]);
+     setSearch("");
+     setActive(0);
+   };
+@@ -71,23 +81,26 @@ export default function LookAlikePicker({ selfId, value, onChange }: Props) {
+   return (
+     <div className="space-y-2">
+       {value.length > 0 && (
+-        <div className="flex flex-wrap gap-2">
++        <div className="grid gap-2 sm:grid-cols-2">
+           {value.map((d) => (
+-            <span
+-              key={d._id}
+-              className="inline-flex max-w-full items-center gap-1 rounded-full border bg-secondary py-1 pl-3 pr-1 text-xs"
+-            >
+-              <span className="truncate font-medium">{d.name}</span>
+-              <span className="font-mono text-muted-foreground">{d.drugId}</span>
++            <div key={d._id} className="flex min-w-0 items-center gap-2 rounded-lg border bg-card p-1.5 pr-1">
++              <ZoomableDrugImage url={d.imageUrl} alt={d.name} className="size-12" hoverPreview />
++              <div className="min-w-0 flex-1 text-sm">
++                <div className="truncate font-medium">{d.name}</div>
++                <div className="truncate text-xs text-muted-foreground">
++                  {d.brandName && <>{d.brandName} · </>}
++                  <span className="font-mono">{d.drugId}</span>
++                </div>
++              </div>
+               <button
+                 type="button"
+                 onClick={() => onChange(value.filter((x) => x._id !== d._id))}
+-                className="cursor-pointer rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
++                className="cursor-pointer self-start rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                 aria-label={`Remove ${d.name}`}
+               >
+-                <X className="size-3.5" />
++                <X className="size-4" />
+               </button>
+-            </span>
++            </div>
+           ))}
+         </div>
+       )}
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index 6ac97d2..8b8f6f6 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -28,7 +28,13 @@ export const drugFormSchema = z.object({
+   // Look Alike, Sound Alike mark and the drugs it is confused with
+   lasa: z.boolean(),
+   lookAlikes: z.array(
+-    z.object({ _id: z.custom<Id<"drugs">>(), drugId: z.string(), name: z.string(), brandName: z.string() }),
++    z.object({
++      _id: z.custom<Id<"drugs">>(),
++      drugId: z.string(),
++      name: z.string(),
++      brandName: z.string(),
++      imageUrl: z.string().nullable(),
++    }),
+   ),
+   packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });

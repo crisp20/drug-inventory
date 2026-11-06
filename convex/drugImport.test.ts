@@ -97,15 +97,96 @@ describe("drug import", () => {
     expect(cleared.remarks).toBeUndefined();
   });
 
-  it("skips barcodes already used by another drug", async () => {
+  it("adds the package form without a barcode already used by another drug", async () => {
     const { owner } = await setup();
     await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
     const other = { ...fileDrug, drugId: "33", packages: [...fileDrug.packages, { ...fileDrug.packages[0], barcode: "", qtyPerUnit: 10, baseUnit: "Strip" as const }] };
     const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [other] });
     expect(check.clashes).toHaveLength(1);
+    expect(check.clashes[0]).toMatchObject({
+      otherDrugId: "32",
+      otherBrand: "PK-Merz",
+      otherManufacturer: "JACOBSON",
+      otherPackage: { qtyPerUnit: 100, baseUnit: "Box", unitCount: 1, stock: 0 },
+      otherImageUrl: null,
+    });
     const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: other, action: "create" }] });
     expect(res.skipped).toEqual([{ drugId: "33", name: other.name, barcodes: ["4046222740115"] }]);
     const [created] = await owner.query(api.drugs.search, { term: "33" });
+    expect(created.packages.map((p) => [p.barcode, p.qtyPerUnit, p.baseUnit])).toEqual(
+      expect.arrayContaining([["", 100, "Box"], ["", 10, "Strip"]]),
+    );
+    expect(created.packages).toHaveLength(2);
+    // The barcode stays with the first drug
+    const [first] = await owner.query(api.drugs.search, { term: "32" });
+    expect(first.packages[0].barcode).toBe("4046222740115");
+  });
+
+  it("saves a changed barcode given for a clash", async () => {
+    const { owner } = await setup();
+    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
+    const changed = { ...fileDrug, drugId: "34", packages: [{ ...fileDrug.packages[0], barcode: "4891234567890" }] };
+    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: changed, action: "create" }] });
+    expect(res.skipped).toEqual([]);
+    const [created] = await owner.query(api.drugs.search, { term: "4891234567890" });
+    expect(created.drugId).toBe("34");
+  });
+
+  it("merges two clashing barcodes with the same form into one form", async () => {
+    const { owner } = await setup();
+    const owners = [
+      { ...fileDrug, drugId: "50", packages: [{ ...fileDrug.packages[0], barcode: "1111111111116" }] },
+      { ...fileDrug, drugId: "51", packages: [{ ...fileDrug.packages[0], barcode: "2222222222222" }] },
+    ];
+    await owner.mutation(api.drugImport.applyBatch, { items: owners.map((drug) => ({ drug, action: "create" as const })) });
+    const both = { ...fileDrug, drugId: "52", packages: owners.map((o) => o.packages[0]) };
+    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: both, action: "create" }] });
+    const [created] = await owner.query(api.drugs.search, { term: "52" });
     expect(created.packages).toHaveLength(1);
+    expect(created.packages[0].barcode).toBe("");
+  });
+
+  it("sets the Look Alike, Sound Alike mark, and unmarking removes the links", async () => {
+    const { owner } = await setup();
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [
+        { drug: { ...fileDrug, lasa: true }, action: "create" },
+        { drug: { ...fileDrug, drugId: "40", name: "Amiodarone", packages: [] }, action: "create" },
+      ],
+    });
+    const [marked] = await owner.query(api.drugs.search, { term: "32" });
+    expect(marked.lasa).toBe(true);
+    const [other] = await owner.query(api.drugs.search, { term: "Amiodarone" });
+    expect(other.lasa).toBeUndefined();
+
+    // Link it from the form, then leave the mark alone when the file cell is blank
+    await owner.mutation(api.drugs.update, {
+      id: marked._id,
+      drugId: "32",
+      name: marked.name,
+      brandName: marked.brandName,
+      manufacturer: marked.manufacturer,
+      pieceName: marked.pieceName,
+      lasa: true,
+      lookAlikeIds: [other._id],
+      packages: marked.packages.map((p) => ({
+        packageId: p._id,
+        barcode: p.barcode,
+        qtyPerUnit: p.qtyPerUnit,
+        baseUnit: p.baseUnit,
+        unitCount: p.unitCount,
+        imageIds: p.imageIds,
+        stock: p.stock,
+      })),
+    });
+    const [same] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
+    expect(same.status).toBe("same");
+
+    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [{ ...fileDrug, lasa: false }] });
+    expect(check.status).toBe("conflict");
+    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: { ...fileDrug, lasa: false }, action: "notes" }] });
+    const after = await owner.query(api.drugs.get, { id: marked._id });
+    expect(after?.lasa).toBeUndefined();
+    expect(after?.lookAlikes).toEqual([]);
   });
 });

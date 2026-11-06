@@ -1,0 +1,523 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+index d8d3964..d52dd84 100644
+--- a/convex/drugImport.test.ts
++++ b/convex/drugImport.test.ts
+@@ -113,4 +113,48 @@ describe("drug import", () => {
+     const [created] = await owner.query(api.drugs.search, { term: "33" });
+     expect(created.packages).toHaveLength(1);
+   });
++
++  it("sets the Look Alike, Sound Alike mark, and unmarking removes the links", async () => {
++    const { owner } = await setup();
++    await owner.mutation(api.drugImport.applyBatch, {
++      items: [
++        { drug: { ...fileDrug, lasa: true }, action: "create" },
++        { drug: { ...fileDrug, drugId: "40", name: "Amiodarone", packages: [] }, action: "create" },
++      ],
++    });
++    const [marked] = await owner.query(api.drugs.search, { term: "32" });
++    expect(marked.lasa).toBe(true);
++    const [other] = await owner.query(api.drugs.search, { term: "Amiodarone" });
++    expect(other.lasa).toBeUndefined();
++
++    // Link it from the form, then leave the mark alone when the file cell is blank
++    await owner.mutation(api.drugs.update, {
++      id: marked._id,
++      drugId: "32",
++      name: marked.name,
++      brandName: marked.brandName,
++      manufacturer: marked.manufacturer,
++      pieceName: marked.pieceName,
++      lasa: true,
++      lookAlikeIds: [other._id],
++      packages: marked.packages.map((p) => ({
++        packageId: p._id,
++        barcode: p.barcode,
++        qtyPerUnit: p.qtyPerUnit,
++        baseUnit: p.baseUnit,
++        unitCount: p.unitCount,
++        imageIds: p.imageIds,
++        stock: p.stock,
++      })),
++    });
++    const [same] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
++    expect(same.status).toBe("same");
++
++    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [{ ...fileDrug, lasa: false }] });
++    expect(check.status).toBe("conflict");
++    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: { ...fileDrug, lasa: false }, action: "notes" }] });
++    const after = await owner.query(api.drugs.get, { id: marked._id });
++    expect(after?.lasa).toBeUndefined();
++    expect(after?.lookAlikes).toEqual([]);
++  });
+ });
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index 371e064..af8245a 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -21,6 +21,7 @@ import {
+   getPackages,
+   type PackageInput,
+ } from "./lib/drugs";
++import { clearLookAlikes, getLookAlikes } from "./lib/lasa";
+ import { baseUnit } from "./schema/drugs";
+ 
+ const importPackageArg = v.object({
+@@ -40,11 +41,14 @@ const importDrugArg = v.object({
+   // Undefined = leave the saved text alone
+   specifications: v.optional(v.string()),
+   remarks: v.optional(v.string()),
++  // Undefined = leave the saved Look Alike, Sound Alike mark alone
++  lasa: v.optional(v.boolean()),
+   row: v.number(),
+   packages: v.array(importPackageArg),
+ });
+ 
+-// create: new drug. update: bring details in line with the file. notes: only Specifications/Remarks.
++// create: new drug. update: bring details in line with the file.
++// notes: only Specifications/Remarks and the Look Alike, Sound Alike mark.
+ const importAction = v.union(v.literal("create"), v.literal("update"), v.literal("notes"));
+ type ImportAction = "create" | "update" | "notes";
+ 
+@@ -87,6 +91,7 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
+     pieceName: drug.pieceName,
+     specifications: drug.specifications,
+     remarks: drug.remarks,
++    lasa: drug.lasa,
+     packages: packages.map((p) => ({
+       barcode: p.barcode,
+       qtyPerUnit: p.qtyPerUnit,
+@@ -152,7 +157,20 @@ function failureMessage(error: unknown): string {
+   return "Could not be saved";
+ }
+ 
+-// Only Specifications/Remarks from the file (undefined ones are kept). Everything else is untouched.
++// Unmarking a drug also removes its look-alike links; returns them for the activity log
++async function unlinkIfUnmarked(ctx: MutationCtx, existing: Doc<"drugs"> | null, lasa: boolean | undefined) {
++  if (!existing?.lasa || lasa !== false) return undefined;
++  const before = (await getLookAlikes(ctx, existing._id)).map((d) => `${d.name} (${d.drugId})`);
++  await clearLookAlikes(ctx, existing._id);
++  return { before, after: [] };
++}
++
++// The mark to save: the file's value when given, otherwise the saved one. false is stored as "not set".
++function lasaToSave(fromFile: boolean | undefined, saved: boolean | undefined) {
++  return (fromFile ?? saved) || undefined;
++}
++
++// Only Specifications/Remarks and the mark from the file (undefined ones are kept). Everything else is untouched.
+ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promise<ApplyResult> {
+   const existing = await findDrug(ctx, d.drugId);
+   if (!existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
+@@ -160,8 +178,10 @@ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promis
+     const notes = {
+       specifications: cleanNote(d.specifications ?? existing.specifications, "Specifications"),
+       remarks: cleanNote(d.remarks ?? existing.remarks, "Remarks"),
++      lasa: lasaToSave(d.lasa, existing.lasa),
+     };
+     await ctx.db.patch("drugs", existing._id, { ...notes, updatedAt: new Date().toISOString() });
++    const lookAlikes = await unlinkIfUnmarked(ctx, existing, d.lasa);
+     const packages = await getPackages(ctx, existing._id);
+     await logDrugImport(ctx, actor, {
+       drug: existing,
+@@ -169,6 +189,7 @@ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promis
+       beforePackages: packages,
+       after: { ...existing, ...notes },
+       afterPackages: packages.map((p) => ({ ...p, packageId: p._id })),
++      lookAlikes,
+     });
+     return { failure: null, skippedBarcodes: [] };
+   } catch (error) {
+@@ -223,6 +244,7 @@ async function applyDrug(
+       imageId: existing?.imageId,
+       specifications: d.specifications ?? existing?.specifications,
+       remarks: d.remarks ?? existing?.remarks,
++      lasa: lasaToSave(d.lasa, existing?.lasa),
+       packages: merged,
+     }, { allowNoPackages: true });
+     const fields = {
+@@ -233,11 +255,13 @@ async function applyDrug(
+       pieceName: input.pieceName,
+       specifications: input.specifications,
+       remarks: input.remarks,
++      lasa: input.lasa,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     };
+     const drugRef = existing ? existing._id : await ctx.db.insert("drugs", fields);
+     if (existing) await ctx.db.patch("drugs", existing._id, fields);
++    const lookAlikes = await unlinkIfUnmarked(ctx, existing, d.lasa);
+     const saved: PackageInput[] = [];
+     for (const p of input.packages) {
+       const form = { qtyPerUnit: p.qtyPerUnit, baseUnit: p.baseUnit, unitCount: p.unitCount };
+@@ -262,6 +286,7 @@ async function applyDrug(
+       beforePackages: current,
+       after: input,
+       afterPackages: saved,
++      lookAlikes,
+     });
+     return { failure: null, skippedBarcodes: [...clashes] };
+   } catch (error) {
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index 19b165a..913f9f8 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -188,7 +188,7 @@ type DrugSave = {
+   beforePackages: SavedPackage[];
+   after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean };
+   afterPackages: PackageInput[];
+-  // Left out by the import, which never changes the mark
++  // The import only sends this when unmarking removed links
+   lookAlikes?: LookAlikeChange;
+ };
+ 
+@@ -296,7 +296,10 @@ export async function logDrugImport(
+   s: DrugSave,
+ ) {
+   const { drug, before, after } = s;
+-  const changes = diffDrugFields(before, after);
++  const changes = [
++    ...diffDrugFields(before, after),
++    ...diffLasa(before?.lasa, after.lasa, s.lookAlikes ?? { before: [], after: [] }),
++  ];
+   const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
+   for (const p of s.afterPackages) {
+     const old = p.packageId ? byId.get(p.packageId) : undefined;
+diff --git a/convex/lib/drugImport.test.ts b/convex/lib/drugImport.test.ts
+index 0ce9c66..dc8c1e3 100644
+--- a/convex/lib/drugImport.test.ts
++++ b/convex/lib/drugImport.test.ts
+@@ -121,3 +121,36 @@ describe("note columns", () => {
+     expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].remarks).toBeUndefined();
+   });
+ });
++
++describe("Look Alike, Sound Alike column", () => {
++  const read = (header: string, cells: string[]) =>
++    buildImportDrugs(
++      sheetToRecords([
++        [...HEADER, header],
++        ...cells.map((c, i) => ["32", "A", "B", "M", "TABLET", String(i), "32", `11${i}`, "Box", i + 1, 1, c]),
++      ]).records,
++      ["TABLET"],
++    );
++
++  it("reads Yes/No under common header names, blank means leave alone", () => {
++    expect(read("LASA", ["Yes"]).drugs[0].lasa).toBe(true);
++    expect(read("Look Alike, Sound Alike", ["", "n"]).drugs[0].lasa).toBe(false);
++    expect(read("look_alike", [""]).drugs[0].lasa).toBeUndefined();
++    expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].lasa).toBeUndefined();
++  });
++
++  it("reports values that are not Yes or No and leaves the mark alone", () => {
++    const { drugs, problems } = read("LASA", ["maybe"]);
++    expect(drugs[0].lasa).toBeUndefined();
++    expect(problems[0].message).toContain("not Yes or No");
++  });
++
++  it("marks without asking but asks before unmarking", () => {
++    const base = { name: "A", brandName: "B", manufacturer: "M", pieceName: "TABLET", packages: [] };
++    const file = { ...read("LASA", ["Yes"]).drugs[0], packages: [] };
++    expect(diffDrug(file, base)).toMatchObject({ lasa: { current: false, file: true, auto: true }, needsReview: false, hasChanges: true });
++    expect(diffDrug(file, { ...base, lasa: true }).lasa).toBeNull();
++    const unmark = diffDrug({ ...file, lasa: false }, { ...base, lasa: true });
++    expect(unmark).toMatchObject({ lasa: { auto: false }, needsReview: true });
++  });
++});
+diff --git a/convex/lib/drugImport.ts b/convex/lib/drugImport.ts
+index 629218e..72a96c1 100644
+--- a/convex/lib/drugImport.ts
++++ b/convex/lib/drugImport.ts
+@@ -24,6 +24,8 @@ export type ImportDrug = {
+   // (column not in the file, or the admin chose to keep the saved text).
+   specifications?: string;
+   remarks?: string;
++  // Look Alike, Sound Alike mark from the file. Undefined = leave the saved mark alone.
++  lasa?: boolean;
+   // First spreadsheet row of this drug (1 = header row)
+   row: number;
+   packages: ImportPackage[];
+@@ -36,6 +38,15 @@ export const NOTE_FIELDS: ReadonlyArray<{ key: NoteKey; label: string; aliases:
+   { key: "remarks", label: "Remarks", aliases: ["remarks", "remark", "notes", "note", "comments", "comment"] },
+ ];
+ 
++// Optional Yes/No column for the Look Alike, Sound Alike mark
++export const LASA_COLUMN = "lasa";
++const LASA_ALIASES = ["lasa", "lookalikesoundalike", "lookalike", "soundalike", "lookalikesoundalikelasa"];
++
++const OPTIONAL_COLUMNS: ReadonlyArray<{ key: string; aliases: string[] }> = [
++  ...NOTE_FIELDS,
++  { key: LASA_COLUMN, aliases: LASA_ALIASES },
++];
++
+ export type ImportProblem = { row: number; drugId: string; name: string; message: string };
+ 
+ export type SheetRecord = { row: number; values: Record<string, string> };
+@@ -55,8 +66,9 @@ export const COLUMNS = {
+ 
+ const REQUIRED = Object.values(COLUMNS);
+ 
++// Drops spaces and punctuation so "Look Alike, Sound Alike" and "look_alike" both match
+ export function normalizeHeader(header: string): string {
+-  return header.trim().toLowerCase().replace(/[\s_-]+/g, "");
++  return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+ }
+ 
+ function cellText(cell: unknown): string {
+@@ -73,10 +85,10 @@ export function sheetToRecords(rows: unknown[][]): { records: SheetRecord[]; mis
+     const key = normalizeHeader(cellText(h));
+     if (key && !columnIndex.has(key)) columnIndex.set(key, i);
+   });
+-  // Optional note columns: accept common header variations, stored under the canonical key
+-  for (const note of NOTE_FIELDS) {
+-    const found = note.aliases.find((a) => columnIndex.has(a));
+-    if (found !== undefined && !columnIndex.has(note.key)) columnIndex.set(note.key, columnIndex.get(found) ?? 0);
++  // Optional columns: accept common header variations, stored under the canonical key
++  for (const col of OPTIONAL_COLUMNS) {
++    const found = col.aliases.find((a) => columnIndex.has(a));
++    if (found !== undefined && !columnIndex.has(col.key)) columnIndex.set(col.key, columnIndex.get(found) ?? 0);
+   }
+   const missingColumns = REQUIRED.filter((c) => !columnIndex.has(c));
+   const records: SheetRecord[] = [];
+@@ -139,6 +151,26 @@ function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
+   return rows.map((r) => r.values[key] ?? "").find((v) => v !== "") ?? "";
+ }
+ 
++// "Yes"/"No" and common variations. null = not readable.
++export function parseYesNo(raw: string): boolean | null {
++  const v = raw.trim().toLowerCase();
++  if (["yes", "y", "true", "1", "x"].includes(v)) return true;
++  if (["no", "n", "false", "0"].includes(v)) return false;
++  return null;
++}
++
++// First non-blank Look Alike, Sound Alike cell across a drug's rows. Blank or absent = leave alone.
++function lasaOf(rows: SheetRecord[], report: (row: number, message: string) => void): boolean | undefined {
++  const r = rows.find((x) => (x.values[LASA_COLUMN] ?? "") !== "");
++  if (!r) return undefined;
++  const value = parseYesNo(r.values[LASA_COLUMN]);
++  if (value === null) {
++    report(r.row, `Look Alike, Sound Alike value "${r.values[LASA_COLUMN]}" is not Yes or No, mark left unchanged`);
++    return undefined;
++  }
++  return value;
++}
++
+ // Which drugs to import: with at least one barcode/package form, without any, or both
+ export type PackageFilter = "with" | "without" | "both";
+ 
+@@ -219,6 +251,7 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[], filter
+       dosageForm: dosageFormOf(first),
+       specifications: noteOf(rows, "specifications"),
+       remarks: noteOf(rows, "remarks"),
++      lasa: lasaOf(rows, report),
+       row: first.row,
+       packages: [...packages.values()],
+     });
+@@ -240,6 +273,7 @@ export type ExistingDrug = {
+   pieceName: string;
+   specifications?: string;
+   remarks?: string;
++  lasa?: boolean;
+   packages: ImportPackage[];
+ };
+ 
+@@ -268,6 +302,15 @@ function diffNotes(file: ImportDrug, current: ExistingDrug): NoteChange[] {
+   return changes;
+ }
+ 
++// A Look Alike, Sound Alike difference. Marking (file says Yes) only adds a safety warning, so it is
++// applied without asking (`auto`). Unmarking also removes the drug's look-alike links, so it is asked.
++export type LasaChange = { current: boolean; file: boolean; auto: boolean };
++
++function diffLasaMark(file: ImportDrug, current: ExistingDrug): LasaChange | null {
++  if (file.lasa === undefined || file.lasa === !!current.lasa) return null;
++  return { current: !!current.lasa, file: file.lasa, auto: file.lasa };
++}
++
+ // What "Use file" would change. Package forms only in the app are always kept.
+ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+   const fields: FieldChange[] = DIFF_FIELDS.filter(
+@@ -283,15 +326,17 @@ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+     else if (!sameForm(match, p)) changed.push({ current: match, file: p });
+   }
+   const detailChanges = fields.length + added.length + changed.length > 0;
++  const lasa = diffLasaMark(file, current);
+   return {
+     fields,
+     added,
+     changed,
+     notes,
++    lasa,
+     // Name/brand/manufacturer/pieces or package forms differ (decided with "Keep current"/"Use file")
+     detailChanges,
+-    // Anything the admin must decide on; auto-filled notes need no decision
+-    needsReview: detailChanges || notes.some((n) => !n.auto),
+-    hasChanges: detailChanges || notes.length > 0,
++    // Anything the admin must decide on; auto-filled notes and new marks need no decision
++    needsReview: detailChanges || notes.some((n) => !n.auto) || (lasa !== null && !lasa.auto),
++    hasChanges: detailChanges || notes.length > 0 || lasa !== null,
+   };
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 6350ccc..e19393e 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v61");
++    expect(CHANGE_ENTRIES[0].version).toBe("v62");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index 135add1..ac7da87 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -79,7 +79,9 @@ export default function ImportConflictCard({
+   if (!diff) return null;
+   const askNotes = diff.notes.filter((n) => !n.auto);
+   const autoNotes = diff.notes.filter((n) => n.auto);
+-  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length;
++  const askLasa = diff.lasa && !diff.lasa.auto ? diff.lasa : null;
++  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length + (askLasa ? 1 : 0);
++  const yesNo = (b: boolean) => (b ? "Yes" : "No");
+   const setNote = (key: NoteKey, c: Choice) => onChange({ ...choices, notes: { ...choices.notes, [key]: c } });
+ 
+   return (
+@@ -162,6 +164,29 @@ export default function ImportConflictCard({
+         );
+       })}
+ 
++      {askLasa && (
++        <div className="space-y-2">
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
++              Look Alike, Sound Alike
++            </span>
++            <ChoicePair
++              choice={choices.lasa ?? "keep"}
++              onChoose={(c) => onChange({ ...choices, lasa: c })}
++            />
++          </div>
++          <FieldRows
++            fields={[{ label: "Marked", current: yesNo(askLasa.current), file: yesNo(askLasa.file) }]}
++            choice={choices.lasa ?? "keep"}
++          />
++          <p className="text-xs text-muted-foreground">Using the file also removes its links to look-alike drugs.</p>
++        </div>
++      )}
++
++      {diff.lasa?.auto && (
++        <p className="text-xs text-muted-foreground">Will be marked Look Alike, Sound Alike from the file.</p>
++      )}
++
+       {autoNotes.length > 0 && (
+         <p className="text-xs text-muted-foreground">
+           {autoNotes.map((n) => n.label).join(" and ")} {autoNotes.length === 1 ? "is" : "are"} blank in the app and
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index 399e231..10ae7e7 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -62,7 +62,8 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
+           <DialogTitle>Import inventory file</DialogTitle>
+           <DialogDescription>
+             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
+-            form, per and amount. Optional: Specifications and Remarks.
++            form, per and amount. Optional: Specifications, Remarks and LASA (Yes or No for Look Alike, Sound
++            Alike).
+           </DialogDescription>
+         </DialogHeader>
+         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
+@@ -275,7 +276,7 @@ function ReviewStep({
+           {review.conflicts.length === 0 ? (
+             <Note>
+               {review.filled.length > 0
+-                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications or Remarks filled in from the file.`
++                ? `No conflicts. ${review.filled.length.toLocaleString()} drugs will get Specifications, Remarks or a Look Alike, Sound Alike mark from the file.`
+                 : "No conflicts. Saved drugs already match the file."}
+             </Note>
+           ) : (
+@@ -290,7 +291,7 @@ function ReviewStep({
+               <p className="text-xs text-muted-foreground">
+                 Stock, pictures and package forms that are only in the app are always kept.
+                 {review.filled.length > 0 &&
+-                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks that will be filled from the file.`}
++                  ` ${review.filled.length.toLocaleString()} other drug${review.filled.length === 1 ? " has" : "s have"} blank Specifications or Remarks, or a new Look Alike, Sound Alike mark, that will be taken from the file.`}
+               </p>
+               {review.conflicts.slice(0, shownConflicts).map((item) => (
+                 <ImportConflictCard
+diff --git a/src/pages/inventory/_hooks/use-drug-import.ts b/src/pages/inventory/_hooks/use-drug-import.ts
+index 353147b..72790bb 100644
+--- a/src/pages/inventory/_hooks/use-drug-import.ts
++++ b/src/pages/inventory/_hooks/use-drug-import.ts
+@@ -21,7 +21,7 @@ export type ReviewItem = { drug: ImportDrug; check: CheckResult };
+ export type ImportReview = {
+   newDrugs: ReviewItem[];
+   conflicts: ReviewItem[];
+-  // Saved drugs whose blank Specifications/Remarks will be filled from the file without asking
++  // Saved drugs whose blank Specifications/Remarks or new mark are taken from the file without asking
+   filled: ReviewItem[];
+   unchanged: number;
+   missing: MissingDrug[];
+diff --git a/src/pages/inventory/_lib/import-choices.ts b/src/pages/inventory/_lib/import-choices.ts
+index f25999b..9179a8c 100644
+--- a/src/pages/inventory/_lib/import-choices.ts
++++ b/src/pages/inventory/_lib/import-choices.ts
+@@ -3,19 +3,20 @@ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+ 
+ export type Choice = "keep" | "file";
+ 
+-// Per drug: one choice for the main details, and one per Specifications/Remarks conflict
+-export type DrugChoices = { details: Choice; notes: Partial<Record<NoteKey, Choice>> };
++// Per drug: one choice for the main details, one per Specifications/Remarks conflict,
++// and one for unmarking Look Alike, Sound Alike
++export type DrugChoices = { details: Choice; notes: Partial<Record<NoteKey, Choice>>; lasa?: Choice };
+ 
+ export const DEFAULT_CHOICES: DrugChoices = { details: "keep", notes: {} };
+ 
+ export type ImportItem = { drug: ImportDrug; action: "create" | "update" | "notes" };
+ 
+ // Turns a reviewed existing drug into what is sent to the import, or null when nothing changes.
+-// Blank notes in the app are always filled from the file; other note conflicts follow the choice.
++// Blank notes in the app and new marks are always taken from the file; other conflicts follow the choice.
+ export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | null {
+   const diff = item.check.diff;
+   if (!diff) return null;
+-  const drug: ImportDrug = { ...item.drug, specifications: undefined, remarks: undefined };
++  const drug: ImportDrug = { ...item.drug, specifications: undefined, remarks: undefined, lasa: undefined };
+   let notesChanged = false;
+   for (const n of diff.notes) {
+     if (n.auto || (choices.notes[n.key] ?? "keep") === "file") {
+@@ -23,13 +24,18 @@ export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | nu
+       notesChanged = true;
+     }
+   }
++  if (diff.lasa && (diff.lasa.auto || choices.lasa === "file")) {
++    drug.lasa = diff.lasa.file;
++    notesChanged = true;
++  }
+   if (diff.detailChanges && choices.details === "file") return { drug, action: "update" };
+   return notesChanged ? { drug, action: "notes" } : null;
+ }
+ 
+ export function allChoices(item: ReviewItem, c: Choice): DrugChoices {
+-  const notes = Object.fromEntries((item.check.diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]));
+-  return { details: c, notes };
++  const diff = item.check.diff;
++  const notes = Object.fromEntries((diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]));
++  return { details: c, notes, lasa: diff?.lasa && !diff.lasa.auto ? c : undefined };
+ }
+ 
+ // True when at least one thing in this drug will take the file's value
+@@ -38,6 +44,7 @@ export function usesFile(item: ReviewItem, choices: DrugChoices): boolean {
+   if (!diff) return false;
+   return (
+     (diff.detailChanges && choices.details === "file") ||
+-    diff.notes.some((n) => !n.auto && choices.notes[n.key] === "file")
++    diff.notes.some((n) => !n.auto && choices.notes[n.key] === "file") ||
++    (!!diff.lasa && !diff.lasa.auto && choices.lasa === "file")
+   );
+ }

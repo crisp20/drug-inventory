@@ -1,0 +1,1301 @@
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index 97a7750..39a3a49 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -43,6 +43,8 @@ const importDrugArg = v.object({
+   remarks: v.optional(v.string()),
+   // Undefined = leave the saved Look Alike, Sound Alike mark alone
+   lasa: v.optional(v.boolean()),
++  // Undefined = leave the saved Dangerous Drug (DDA) mark alone
++  dda: v.optional(v.boolean()),
+   row: v.number(),
+   packages: v.array(importPackageArg),
+ });
+@@ -122,6 +124,7 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
+     specifications: drug.specifications,
+     remarks: drug.remarks,
+     lasa: drug.lasa,
++    dda: drug.dda,
+     packages: packages.map((p) => ({
+       barcode: p.barcode,
+       qtyPerUnit: p.qtyPerUnit,
+@@ -192,6 +195,38 @@ export const listForImport = query({
+   },
+ });
+ 
++// Every saved drug with its package forms, one page at a time, for the spreadsheet export
++// (same columns the import reads, so the file can be edited and imported back)
++export const listForExport = query({
++  args: { paginationOpts: paginationOptsValidator },
++  handler: async (ctx, args) => {
++    await requireAdmin(ctx);
++    const result = await ctx.db.query("drugs").withIndex("by_drugId").paginate(args.paginationOpts);
++    return {
++      ...result,
++      page: await Promise.all(
++        result.page.map(async (d) => ({
++          drugId: d.drugId,
++          name: d.name,
++          brandName: d.brandName,
++          manufacturer: d.manufacturer,
++          pieceName: d.pieceName,
++          specifications: d.specifications ?? "",
++          remarks: d.remarks ?? "",
++          lasa: !!d.lasa,
++          dda: !!d.dda,
++          packages: (await getPackages(ctx, d._id)).map((p) => ({
++            barcode: p.barcode,
++            qtyPerUnit: p.qtyPerUnit,
++            baseUnit: p.baseUnit,
++            unitCount: p.unitCount,
++          })),
++        })),
++      ),
++    };
++  },
++});
++
+ type ApplyResult = { failure: string | null; skippedBarcodes: string[] };
+ 
+ function failureMessage(error: unknown): string {
+@@ -207,7 +242,7 @@ async function unlinkIfUnmarked(ctx: MutationCtx, existing: Doc<"drugs"> | null,
+   return { before, after: [] };
+ }
+ 
+-// The mark to save: the file's value when given, otherwise the saved one. false is stored as "not set".
++// A mark to save: the file's value when given, otherwise the saved one. false is stored as "not set".
+ function lasaToSave(fromFile: boolean | undefined, saved: boolean | undefined) {
+   return (fromFile ?? saved) || undefined;
+ }
+@@ -221,6 +256,7 @@ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promis
+       specifications: cleanNote(d.specifications ?? existing.specifications, "Specifications"),
+       remarks: cleanNote(d.remarks ?? existing.remarks, "Remarks"),
+       lasa: lasaToSave(d.lasa, existing.lasa),
++      dda: lasaToSave(d.dda, existing.dda),
+     };
+     await ctx.db.patch("drugs", existing._id, { ...notes, updatedAt: new Date().toISOString() });
+     const lookAlikes = await unlinkIfUnmarked(ctx, existing, d.lasa);
+@@ -292,6 +328,7 @@ async function applyDrug(
+       specifications: d.specifications ?? existing?.specifications,
+       remarks: d.remarks ?? existing?.remarks,
+       lasa: lasaToSave(d.lasa, existing?.lasa),
++      dda: lasaToSave(d.dda, existing?.dda),
+       packages: merged,
+     }, { allowNoPackages: true });
+     const fields = {
+@@ -303,6 +340,7 @@ async function applyDrug(
+       specifications: input.specifications,
+       remarks: input.remarks,
+       lasa: input.lasa,
++      dda: input.dda,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     };
+diff --git a/convex/drugs.test.ts b/convex/drugs.test.ts
+index c120783..aec3c3b 100644
+--- a/convex/drugs.test.ts
++++ b/convex/drugs.test.ts
+@@ -168,3 +168,36 @@ describe("look alike, sound alike", () => {
+     expect(await owner.query(api.drugs.lasaCompare, { id: "bad-id" })).toBeNull();
+   });
+ });
++
++describe("Dangerous Drug (DDA)", () => {
++  it("saves, lists and clears the mark, and logs the change", async () => {
++    const { owner } = await setup();
++    const a = await owner.mutation(api.drugs.create, { ...drug, dda: true });
++    await owner.mutation(api.drugs.create, {
++      ...drug,
++      drugId: "PCM650",
++      name: "Other",
++      packages: [{ ...drug.packages[0], barcode: "9300000000001" }],
++    });
++    const list = await owner.query(api.drugs.listDda, { paginationOpts: { numItems: 10, cursor: null } });
++    expect(list.page.map((d) => d.drugId)).toEqual(["PCM500"]);
++
++    const saved = await owner.query(api.drugs.get, { id: a });
++    if (!saved) throw new Error("missing");
++    const pkg = saved.packages[0];
++    const packages = [{ packageId: pkg._id, barcode: pkg.barcode, qtyPerUnit: 10, baseUnit: "Strip" as const, unitCount: 10, stock: 3, imageIds: [] }];
++    await owner.mutation(api.drugs.update, { id: a, ...drug, packages, dda: false });
++    expect((await owner.query(api.drugs.get, { id: a }))?.dda).toBeUndefined();
++
++    const log = await owner.query(api.activity.list, { paginationOpts: { numItems: 10, cursor: null } });
++    const edit = log.page.find((e) => e.action === "Edited");
++    expect(edit?.changes).toContainEqual({ field: "Dangerous Drug (DDA)", before: "Yes", after: "No" });
++  });
++
++  it("only lets admins mark a drug DDA", async () => {
++    const { owner, staff } = await setup();
++    const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
++    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
++    await expect(staff.mutation(api.drugs.create, { ...drug, dda: true })).rejects.toThrow(/admins/);
++  });
++});
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 6da2b76..db8e2db 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -49,6 +49,8 @@ const drugArgs = {
+   lasa: v.optional(v.boolean()),
+   // Drugs this one looks or sounds like; ignored when lasa is off
+   lookAlikeIds: v.optional(v.array(v.id("drugs"))),
++  // Dangerous Drug (DDA)
++  dda: v.optional(v.boolean()),
+   packages: v.array(packageArg),
+ };
+ 
+@@ -105,6 +107,23 @@ export const listLasa = query({
+   },
+ });
+ 
++// Only drugs marked Dangerous Drug (DDA), by name
++export const listDda = query({
++  args: { paginationOpts: paginationOptsValidator },
++  handler: async (ctx, args) => {
++    await requireActiveUser(ctx);
++    const result = await ctx.db
++      .query("drugs")
++      .withIndex("by_dda_and_name", (q) => q.eq("dda", true))
++      .order("asc")
++      .paginate(args.paginationOpts);
++    return {
++      ...result,
++      page: await Promise.all(result.page.map((d) => withDetails(ctx, d))),
++    };
++  },
++});
++
+ // Finds drugs by barcode/GS1 code (exact) or by Drug ID, name, or brand (text)
+ export const search = query({
+   args: { term: v.string() },
+@@ -200,6 +219,7 @@ export const create = mutation({
+       specifications: input.specifications,
+       remarks: input.remarks,
+       lasa: input.lasa || undefined,
++      dda: input.dda || undefined,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
+@@ -245,6 +265,7 @@ export const update = mutation({
+       specifications: input.specifications,
+       remarks: input.remarks,
+       lasa: input.lasa || undefined,
++      dda: input.dda || undefined,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index 913f9f8..59285ec 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -120,6 +120,12 @@ export function diffLasa(
+   return changes;
+ }
+ 
++// The Dangerous Drug (DDA) mark, as an activity change
++export function diffDda(beforeMark: boolean | undefined, afterMark: boolean | undefined): Change[] {
++  if (!!beforeMark === !!afterMark) return [];
++  return [{ field: "Dangerous Drug (DDA)", before: beforeMark ? "Yes" : "No", after: afterMark ? "Yes" : "No" }];
++}
++
+ type PackageLike = Pick<
+   PackageInput,
+   "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount"
+@@ -184,9 +190,9 @@ function pictureDetail(added: number, removed: number) {
+ 
+ type DrugSave = {
+   drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
+-  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean }) | null;
++  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean }) | null;
+   beforePackages: SavedPackage[];
+-  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean };
++  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean };
+   afterPackages: PackageInput[];
+   // The import only sends this when unmarking removed links
+   lookAlikes?: LookAlikeChange;
+@@ -195,7 +201,10 @@ type DrugSave = {
+ // Activity entries for a medicine saved from the Inventory form
+ export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
+   const { drug, before, after } = s;
+-  const lasaChanges = s.lookAlikes ? diffLasa(before?.lasa, after.lasa, s.lookAlikes) : [];
++  const lasaChanges = [
++    ...(s.lookAlikes ? diffLasa(before?.lasa, after.lasa, s.lookAlikes) : []),
++    ...diffDda(before?.dda, after.dda),
++  ];
+   if (!before) {
+     await logActivity(ctx, actor, {
+       category: "medicine",
+@@ -299,6 +308,7 @@ export async function logDrugImport(
+   const changes = [
+     ...diffDrugFields(before, after),
+     ...diffLasa(before?.lasa, after.lasa, s.lookAlikes ?? { before: [], after: [] }),
++    ...diffDda(before?.dda, after.dda),
+   ];
+   const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
+   for (const p of s.afterPackages) {
+diff --git a/convex/lib/drugImport.test.ts b/convex/lib/drugImport.test.ts
+index dc8c1e3..90cbad3 100644
+--- a/convex/lib/drugImport.test.ts
++++ b/convex/lib/drugImport.test.ts
+@@ -154,3 +154,29 @@ describe("Look Alike, Sound Alike column", () => {
+     expect(unmark).toMatchObject({ lasa: { auto: false }, needsReview: true });
+   });
+ });
++
++describe("Dangerous Drug (DDA) column", () => {
++  const read = (header: string, cells: string[]) =>
++    buildImportDrugs(
++      sheetToRecords([
++        [...HEADER, header],
++        ...cells.map((c, i) => ["32", "A", "B", "M", "TABLET", String(i), "32", `11${i}`, "Box", i + 1, 1, c]),
++      ]).records,
++      ["TABLET"],
++    );
++
++  it("reads Yes/No under DDA or Dangerous Drug headers", () => {
++    expect(read("DDA", ["Yes"]).drugs[0].dda).toBe(true);
++    expect(read("Dangerous Drug", ["no"]).drugs[0].dda).toBe(false);
++    expect(read("DDA", [""]).drugs[0].dda).toBeUndefined();
++    expect(read("DDA", ["maybe"]).problems[0].message).toContain("Dangerous Drug (DDA)");
++  });
++
++  it("marks without asking but asks before unmarking", () => {
++    const base = { name: "A", brandName: "B", manufacturer: "M", pieceName: "TABLET", packages: [] };
++    const file = { ...read("DDA", ["Yes"]).drugs[0], packages: [] };
++    expect(diffDrug(file, base)).toMatchObject({ dda: { file: true, auto: true }, needsReview: false, hasChanges: true });
++    expect(diffDrug(file, { ...base, dda: true }).dda).toBeNull();
++    expect(diffDrug({ ...file, dda: false }, { ...base, dda: true })).toMatchObject({ dda: { auto: false }, needsReview: true });
++  });
++});
+diff --git a/convex/lib/drugImport.ts b/convex/lib/drugImport.ts
+index 72a96c1..a690ead 100644
+--- a/convex/lib/drugImport.ts
++++ b/convex/lib/drugImport.ts
+@@ -26,6 +26,8 @@ export type ImportDrug = {
+   remarks?: string;
+   // Look Alike, Sound Alike mark from the file. Undefined = leave the saved mark alone.
+   lasa?: boolean;
++  // Dangerous Drug (DDA) mark from the file. Undefined = leave the saved mark alone.
++  dda?: boolean;
+   // First spreadsheet row of this drug (1 = header row)
+   row: number;
+   packages: ImportPackage[];
+@@ -42,9 +44,14 @@ export const NOTE_FIELDS: ReadonlyArray<{ key: NoteKey; label: string; aliases:
+ export const LASA_COLUMN = "lasa";
+ const LASA_ALIASES = ["lasa", "lookalikesoundalike", "lookalike", "soundalike", "lookalikesoundalikelasa"];
+ 
++// Optional Yes/No column for the Dangerous Drug (DDA) mark
++export const DDA_COLUMN = "dda";
++const DDA_ALIASES = ["dda", "dangerousdrug", "dangerousdrugs", "dangerousdrugdda"];
++
+ const OPTIONAL_COLUMNS: ReadonlyArray<{ key: string; aliases: string[] }> = [
+   ...NOTE_FIELDS,
+   { key: LASA_COLUMN, aliases: LASA_ALIASES },
++  { key: DDA_COLUMN, aliases: DDA_ALIASES },
+ ];
+ 
+ export type ImportProblem = { row: number; drugId: string; name: string; message: string };
+@@ -159,13 +166,18 @@ export function parseYesNo(raw: string): boolean | null {
+   return null;
+ }
+ 
+-// First non-blank Look Alike, Sound Alike cell across a drug's rows. Blank or absent = leave alone.
+-function lasaOf(rows: SheetRecord[], report: (row: number, message: string) => void): boolean | undefined {
+-  const r = rows.find((x) => (x.values[LASA_COLUMN] ?? "") !== "");
++// First non-blank Yes/No cell of a mark column across a drug's rows. Blank or absent = leave alone.
++function markOf(
++  rows: SheetRecord[],
++  column: string,
++  label: string,
++  report: (row: number, message: string) => void,
++): boolean | undefined {
++  const r = rows.find((x) => (x.values[column] ?? "") !== "");
+   if (!r) return undefined;
+-  const value = parseYesNo(r.values[LASA_COLUMN]);
++  const value = parseYesNo(r.values[column]);
+   if (value === null) {
+-    report(r.row, `Look Alike, Sound Alike value "${r.values[LASA_COLUMN]}" is not Yes or No, mark left unchanged`);
++    report(r.row, `${label} value "${r.values[column]}" is not Yes or No, mark left unchanged`);
+     return undefined;
+   }
+   return value;
+@@ -251,7 +263,8 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[], filter
+       dosageForm: dosageFormOf(first),
+       specifications: noteOf(rows, "specifications"),
+       remarks: noteOf(rows, "remarks"),
+-      lasa: lasaOf(rows, report),
++      lasa: markOf(rows, LASA_COLUMN, "Look Alike, Sound Alike", report),
++      dda: markOf(rows, DDA_COLUMN, "Dangerous Drug (DDA)", report),
+       row: first.row,
+       packages: [...packages.values()],
+     });
+@@ -274,6 +287,7 @@ export type ExistingDrug = {
+   specifications?: string;
+   remarks?: string;
+   lasa?: boolean;
++  dda?: boolean;
+   packages: ImportPackage[];
+ };
+ 
+@@ -311,6 +325,15 @@ function diffLasaMark(file: ImportDrug, current: ExistingDrug): LasaChange | nul
+   return { current: !!current.lasa, file: file.lasa, auto: file.lasa };
+ }
+ 
++// A Dangerous Drug (DDA) difference. Marking is applied without asking; unmarking is asked,
++// because it takes the DDA warning off the drug.
++export type DdaChange = LasaChange;
++
++function diffDdaMark(file: ImportDrug, current: ExistingDrug): DdaChange | null {
++  if (file.dda === undefined || file.dda === !!current.dda) return null;
++  return { current: !!current.dda, file: file.dda, auto: file.dda };
++}
++
+ // What "Use file" would change. Package forms only in the app are always kept.
+ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+   const fields: FieldChange[] = DIFF_FIELDS.filter(
+@@ -327,16 +350,19 @@ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
+   }
+   const detailChanges = fields.length + added.length + changed.length > 0;
+   const lasa = diffLasaMark(file, current);
++  const dda = diffDdaMark(file, current);
++  const askMark = (m: LasaChange | null) => m !== null && !m.auto;
+   return {
+     fields,
+     added,
+     changed,
+     notes,
+     lasa,
++    dda,
+     // Name/brand/manufacturer/pieces or package forms differ (decided with "Keep current"/"Use file")
+     detailChanges,
+     // Anything the admin must decide on; auto-filled notes and new marks need no decision
+-    needsReview: detailChanges || notes.some((n) => !n.auto) || (lasa !== null && !lasa.auto),
+-    hasChanges: detailChanges || notes.length > 0 || lasa !== null,
++    needsReview: detailChanges || notes.some((n) => !n.auto) || askMark(lasa) || askMark(dda),
++    hasChanges: detailChanges || notes.length > 0 || lasa !== null || dda !== null,
+   };
+ }
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index 1b0c679..877c26d 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -28,6 +28,7 @@ export type DrugInput = {
+   specifications?: string;
+   remarks?: string;
+   lasa?: boolean;
++  dda?: boolean;
+   packages: PackageInput[];
+ };
+ 
+diff --git a/convex/schema/drugs.ts b/convex/schema/drugs.ts
+index 2343fca..529e626 100644
+--- a/convex/schema/drugs.ts
++++ b/convex/schema/drugs.ts
+@@ -23,6 +23,8 @@ export const drugsTable = defineTable({
+   remarks: v.optional(v.string()),
+   // Marked "Look Alike, Sound Alike" by an admin; missing means not marked
+   lasa: v.optional(v.boolean()),
++  // Marked Dangerous Drug (DDA) by an admin; missing means not marked
++  dda: v.optional(v.boolean()),
+   // Denormalized text for the search index (Drug ID, names)
+   searchText: v.string(),
+   updatedAt: v.string(),
+@@ -30,6 +32,7 @@ export const drugsTable = defineTable({
+   .index("by_drugId", ["drugId"])
+   .index("by_name", ["name"])
+   .index("by_lasa_and_name", ["lasa", "name"])
++  .index("by_dda_and_name", ["dda", "name"])
+   .searchIndex("search_text", { searchField: "searchText" });
+ 
+ // Which drugs look or sound like which. Stored both ways (A→B and B→A) so either side reads its own list.
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 111e724..ee5f3fc 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -1,6 +1,7 @@
+ import { Barcode, Check } from "lucide-react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import LasaBadge from "@/components/lasa-badge.tsx";
++import DdaBadge from "@/components/dda-badge.tsx";
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import ZoomableDrugImage, {
+@@ -42,7 +43,12 @@ export default function DrugPackagePicker({
+           className="size-32 sm:size-40"
+         />
+         <div className="min-w-0">
+-          {drug.lasa && <LasaBadge className="mb-1" />}
++          {(drug.lasa || drug.dda) && (
++            <div className="mb-1 flex flex-wrap gap-1">
++              {drug.lasa && <LasaBadge />}
++              {drug.dda && <DdaBadge />}
++            </div>
++          )}
+           <div className="truncate text-lg font-semibold">{drug.name}</div>
+           <div className="truncate text-sm text-muted-foreground">
+             {drug.brandName || "No brand"} ·{" "}
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 24e36c7..8796b49 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -10,7 +10,7 @@ import LabelPrintDialog from "./label-print-dialog.tsx";
+ import { useForm, useWatch } from "react-hook-form";
+ import { zodResolver } from "@hookform/resolvers/zod";
+ import { useMutation, useQuery } from "convex/react";
+-import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
++import { ArrowDownToLine, ArrowUpFromLine, ShieldAlert } from "lucide-react";
+ import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+@@ -267,6 +267,7 @@ export default function MovementForm({
+           fillDate: fillDateCode(new Date()),
+           qrText: drug.drugId,
+           imageUrl: drug.imageUrl,
++          dangerousDrug: !!drug.dda,
+         });
+         form.reset(form.getValues());
+         return;
+@@ -290,6 +291,16 @@ export default function MovementForm({
+           </span>
+         </div>
+ 
++        {kind === "out" && drug.dda && (
++          <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-200">
++            <ShieldAlert className="mt-0.5 size-4 shrink-0" />
++            <div>
++              <div className="font-semibold">Dangerous Drug (DDA)</div>
++              <div>Follow the DDA procedure for this medicine. DDA is printed on the canister label.</div>
++            </div>
++          </div>
++        )}
++
+         <FormField
+           control={form.control}
+           name="quantity"
+diff --git a/src/components/stock/reprint-label-dialog.tsx b/src/components/stock/reprint-label-dialog.tsx
+index 776202e..22bcbb5 100644
+--- a/src/components/stock/reprint-label-dialog.tsx
++++ b/src/components/stock/reprint-label-dialog.tsx
+@@ -20,7 +20,7 @@ export default function ReprintLabelDialog({ movement, onClose }: Props) {
+   const canister = movement?.canister;
+   const data =
+     movement && canister && drug !== undefined
+-      ? labelFromMovement({ ...movement, canister }, drug?.imageUrl ?? null)
++      ? labelFromMovement({ ...movement, canister }, drug?.imageUrl ?? null, !!drug?.dda)
+       : null;
+ 
+   return (
+diff --git a/src/lib/label/label-data.ts b/src/lib/label/label-data.ts
+index a06a40e..d238b8c 100644
+--- a/src/lib/label/label-data.ts
++++ b/src/lib/label/label-data.ts
+@@ -12,6 +12,7 @@ export type LabelData = {
+   // Not collected yet; the Canister QR label leaves room and prints them when given
+   residentName?: string;
+   ownStock?: boolean;
++  // From the medicine's DDA mark
+   dangerousDrug?: boolean;
+   // Initials of the person filling, e.g. "HS"
+   filledBy: string;
+@@ -59,10 +60,12 @@ export type ReprintSource = {
+   canister: { batch: string; expiry: string; quantity: number; type: number };
+ };
+ 
+-// Rebuilds the label of an earlier fill: initials and fill date are the original ones
++// Rebuilds the label of an earlier fill: initials and fill date are the original ones.
++// `dangerousDrug` is the medicine's current DDA mark (it isn't saved on the entry).
+ export function labelFromMovement(
+   m: ReprintSource,
+   imageUrl: string | null,
++  dangerousDrug = false,
+ ): LabelData {
+   return {
+     drugId: m.drugCode,
+@@ -76,6 +79,7 @@ export function labelFromMovement(
+     fillDate: fillDateCode(new Date(m.occurredAt)),
+     qrText: m.drugCode,
+     imageUrl,
++    dangerousDrug,
+   };
+ }
+ 
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index a887276..aa7f232 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -67,6 +67,7 @@ describe("label text", () => {
+         },
+       },
+       null,
++      true,
+     );
+     expect(label).toEqual({
+       drugId: "32",
+@@ -76,6 +77,7 @@ describe("label text", () => {
+       expiry: "2028-09-09",
+       canisterType: 0.5,
+       canisterQty: 100,
++      dangerousDrug: true,
+       filledBy: "HS",
+       fillDate: "261103",
+       qrText: "32",
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 442a12e..50a0438 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v70");
++    expect(CHANGE_ENTRIES[0].version).toBe("v71");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/drug-detail-sheet.tsx b/src/pages/inventory/_components/drug-detail-sheet.tsx
+index da0c9da..c676949 100644
+--- a/src/pages/inventory/_components/drug-detail-sheet.tsx
++++ b/src/pages/inventory/_components/drug-detail-sheet.tsx
+@@ -25,6 +25,7 @@ import {
+ import DrugImage from "@/components/drug-image.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import LasaBadge from "@/components/lasa-badge.tsx";
++import DdaBadge from "@/components/dda-badge.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import PackageHistoryDialog from "./package-history-dialog.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -65,6 +66,12 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+               </SheetDescription>
+             </SheetHeader>
+             <div className="space-y-6 px-4 pb-6">
++              {drug.dda && (
++                <section className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-sm dark:bg-amber-400/10">
++                  <DdaBadge />
++                  <span className="text-muted-foreground">Dangerous Drug</span>
++                </section>
++              )}
+               {drug.lasa && (
+                 <section className="space-y-2 rounded-xl border border-destructive/25 bg-destructive/5 p-3">
+                   <LasaBadge />
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 57e95ed..ba4a2a1 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -36,6 +36,7 @@ import {
+ } from "../_lib/drug-form-schema.ts";
+ import ImagePicker, { type PickedImage } from "./image-picker.tsx";
+ import LasaFields from "./lasa-fields.tsx";
++import DdaField from "./dda-field.tsx";
+ import PackageRowsEditor from "./package-rows-editor.tsx";
+ 
+ type Props = {
+@@ -56,6 +57,7 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+       remarks: "",
+       lasa: false,
+       lookAlikes: [],
++      dda: false,
+       packages: [],
+     };
+   }
+@@ -69,6 +71,7 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+     remarks: drug.remarks ?? "",
+     lasa: !!drug.lasa,
+     lookAlikes: drug.lookAlikes,
++    dda: !!drug.dda,
+     packages: drug.packages.map((p) => ({
+       packageId: p._id,
+       barcode: p.barcode,
+@@ -188,6 +191,7 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+           {noteField("remarks", "Remarks", "e.g. Store below 25°C")}
+         </div>
+         <LasaFields control={form.control} selfId={drug?._id} />
++        <DdaField control={form.control} />
+         <div className="space-y-2">
+           <div className="text-sm font-medium">Drug picture</div>
+           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>
+diff --git a/src/pages/inventory/_components/drug-row.tsx b/src/pages/inventory/_components/drug-row.tsx
+index 14b0a15..16232a7 100644
+--- a/src/pages/inventory/_components/drug-row.tsx
++++ b/src/pages/inventory/_components/drug-row.tsx
+@@ -1,4 +1,5 @@
+ import LasaBadge from "@/components/lasa-badge.tsx";
++import DdaBadge from "@/components/dda-badge.tsx";
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import { Badge } from "@/components/ui/badge.tsx";
+@@ -27,7 +28,12 @@ export default function DrugRow({
+           {drug.brandName && <span className="truncate text-sm text-muted-foreground">{drug.brandName}</span>}
+           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
+         </div>
+-        {drug.lasa && <LasaBadge />}
++        {(drug.lasa || drug.dda) && (
++          <div className="flex flex-wrap gap-2">
++            {drug.lasa && <LasaBadge />}
++            {drug.dda && <DdaBadge />}
++          </div>
++        )}
+         <ManufacturerLine manufacturer={drug.manufacturer} />
+         <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
+         <div className="flex flex-wrap gap-2">
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index 007fe60..63a4e93 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -85,7 +85,8 @@ export default function ImportConflictCard({
+   const askNotes = diff.notes.filter((n) => !n.auto);
+   const autoNotes = diff.notes.filter((n) => n.auto);
+   const askLasa = diff.lasa && !diff.lasa.auto ? diff.lasa : null;
+-  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length + (askLasa ? 1 : 0);
++  const askDda = diff.dda && !diff.dda.auto ? diff.dda : null;
++  const decisions = (diff.detailChanges ? 1 : 0) + askNotes.length + (askLasa ? 1 : 0) + (askDda ? 1 : 0);
+   const yesNo = (b: boolean) => (b ? "Yes" : "No");
+   const setNote = (key: NoteKey, c: Choice) => onChange({ ...choices, notes: { ...choices.notes, [key]: c } });
+ 
+@@ -192,6 +193,25 @@ export default function ImportConflictCard({
+         <p className="text-xs text-muted-foreground">Will be marked Look Alike, Sound Alike from the file.</p>
+       )}
+ 
++      {askDda && (
++        <div className="space-y-2">
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
++              Dangerous Drug (DDA)
++            </span>
++            <ChoicePair choice={choices.dda ?? "keep"} onChoose={(c) => onChange({ ...choices, dda: c })} />
++          </div>
++          <FieldRows
++            fields={[{ label: "Marked", current: yesNo(askDda.current), file: yesNo(askDda.file) }]}
++            choice={choices.dda ?? "keep"}
++          />
++        </div>
++      )}
++
++      {diff.dda?.auto && (
++        <p className="text-xs text-muted-foreground">Will be marked Dangerous Drug (DDA) from the file.</p>
++      )}
++
+       {autoNotes.length > 0 && (
+         <p className="text-xs text-muted-foreground">
+           {autoNotes.map((n) => n.label).join(" and ")} {autoNotes.length === 1 ? "is" : "are"} blank in the app and
+diff --git a/src/pages/inventory/_components/import-dialog.tsx b/src/pages/inventory/_components/import-dialog.tsx
+index 7d2b172..f28640e 100644
+--- a/src/pages/inventory/_components/import-dialog.tsx
++++ b/src/pages/inventory/_components/import-dialog.tsx
+@@ -65,8 +65,8 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
+           <DialogTitle>Import inventory file</DialogTitle>
+           <DialogDescription>
+             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
+-            form, per and amount. Optional: Specifications, Remarks and LASA (Yes or No for Look Alike, Sound
+-            Alike).
++            form, per and amount. Optional: Specifications, Remarks, LASA (Yes or No for Look Alike, Sound
++            Alike) and DDA (Yes or No for Dangerous Drug).
+           </DialogDescription>
+         </DialogHeader>
+         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index 8b8f6f6..fdf76be 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -36,6 +36,8 @@ export const drugFormSchema = z.object({
+       imageUrl: z.string().nullable(),
+     }),
+   ),
++  // Dangerous Drug (DDA)
++  dda: z.boolean(),
+   packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });
+ 
+diff --git a/src/pages/inventory/_lib/import-choices.ts b/src/pages/inventory/_lib/import-choices.ts
+index b4ea777..036e3ae 100644
+--- a/src/pages/inventory/_lib/import-choices.ts
++++ b/src/pages/inventory/_lib/import-choices.ts
+@@ -5,19 +5,39 @@ import type { ReviewItem } from "../_hooks/use-drug-import.ts";
+ export type Choice = "keep" | "file";
+ 
+ // Per drug: one choice for the main details, one per Specifications/Remarks conflict,
+-// and one for unmarking Look Alike, Sound Alike
+-export type DrugChoices = { details: Choice; notes: Partial<Record<NoteKey, Choice>>; lasa?: Choice };
++// and one each for unmarking Look Alike, Sound Alike and Dangerous Drug (DDA)
++export type DrugChoices = {
++  details: Choice;
++  notes: Partial<Record<NoteKey, Choice>>;
++  lasa?: Choice;
++  dda?: Choice;
++};
+ 
+ export const DEFAULT_CHOICES: DrugChoices = { details: "keep", notes: {} };
+ 
+-export type ImportItem = { drug: ImportDrug; action: "create" | "update" | "notes" };
++export type ImportItem = {
++  drug: ImportDrug;
++  action: "create" | "update" | "notes";
++};
++
++type MarkKey = "lasa" | "dda";
++const MARK_KEYS: readonly MarkKey[] = ["lasa", "dda"];
+ 
+ // Turns a reviewed existing drug into what is sent to the import, or null when nothing changes.
+ // Blank notes in the app and new marks are always taken from the file; other conflicts follow the choice.
+-export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | null {
++export function itemFor(
++  item: ReviewItem,
++  choices: DrugChoices,
++): ImportItem | null {
+   const diff = item.check.diff;
+   if (!diff) return null;
+-  const drug: ImportDrug = { ...item.drug, specifications: undefined, remarks: undefined, lasa: undefined };
++  const drug: ImportDrug = {
++    ...item.drug,
++    specifications: undefined,
++    remarks: undefined,
++    lasa: undefined,
++    dda: undefined,
++  };
+   let notesChanged = false;
+   for (const n of diff.notes) {
+     if (n.auto || (choices.notes[n.key] ?? "keep") === "file") {
+@@ -25,11 +45,15 @@ export function itemFor(item: ReviewItem, choices: DrugChoices): ImportItem | nu
+       notesChanged = true;
+     }
+   }
+-  if (diff.lasa && (diff.lasa.auto || choices.lasa === "file")) {
+-    drug.lasa = diff.lasa.file;
+-    notesChanged = true;
++  for (const key of MARK_KEYS) {
++    const mark = diff[key];
++    if (mark && (mark.auto || choices[key] === "file")) {
++      drug[key] = mark.file;
++      notesChanged = true;
++    }
+   }
+-  if (diff.detailChanges && choices.details === "file") return { drug, action: "update" };
++  if (diff.detailChanges && choices.details === "file")
++    return { drug, action: "update" };
+   return notesChanged ? { drug, action: "notes" } : null;
+ }
+ 
+@@ -38,7 +62,10 @@ export type BarcodeFixes = Record<string, string>;
+ 
+ // Swaps clashing barcodes for the admin's replacements. Unfixed clashes are dropped by the server,
+ // which still adds the package form without a barcode.
+-export function withBarcodeFixes(drug: ImportDrug, fixes: BarcodeFixes | undefined): ImportDrug {
++export function withBarcodeFixes(
++  drug: ImportDrug,
++  fixes: BarcodeFixes | undefined,
++): ImportDrug {
+   if (!fixes) return drug;
+   return {
+     ...drug,
+@@ -51,8 +78,15 @@ export function withBarcodeFixes(drug: ImportDrug, fixes: BarcodeFixes | undefin
+ 
+ export function allChoices(item: ReviewItem, c: Choice): DrugChoices {
+   const diff = item.check.diff;
+-  const notes = Object.fromEntries((diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]));
+-  return { details: c, notes, lasa: diff?.lasa && !diff.lasa.auto ? c : undefined };
++  const notes = Object.fromEntries(
++    (diff?.notes ?? []).filter((n) => !n.auto).map((n) => [n.key, c]),
++  );
++  return {
++    details: c,
++    notes,
++    lasa: diff?.lasa && !diff.lasa.auto ? c : undefined,
++    dda: diff?.dda && !diff.dda.auto ? c : undefined,
++  };
+ }
+ 
+ // True when at least one thing in this drug will take the file's value
+@@ -62,6 +96,6 @@ export function usesFile(item: ReviewItem, choices: DrugChoices): boolean {
+   return (
+     (diff.detailChanges && choices.details === "file") ||
+     diff.notes.some((n) => !n.auto && choices.notes[n.key] === "file") ||
+-    (!!diff.lasa && !diff.lasa.auto && choices.lasa === "file")
++    MARK_KEYS.some((k) => !!diff[k] && !diff[k].auto && choices[k] === "file")
+   );
+ }
+diff --git a/src/pages/inventory/page.tsx b/src/pages/inventory/page.tsx
+index c7d434d..3214dbb 100644
+--- a/src/pages/inventory/page.tsx
++++ b/src/pages/inventory/page.tsx
+@@ -1,6 +1,15 @@
+ import { useState } from "react";
+-import { usePaginatedQuery, useQuery } from "convex/react";
+-import { ImageUp, PackageSearch, Plus, TriangleAlert, Upload } from "lucide-react";
++import { useConvex, usePaginatedQuery, useQuery } from "convex/react";
++import {
++  Download,
++  ImageUp,
++  PackageSearch,
++  Plus,
++  ShieldAlert,
++  TriangleAlert,
++  Upload,
++} from "lucide-react";
++import { toast } from "sonner";
+ import { api } from "@/convex/_generated/api.js";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Toggle } from "@/components/ui/toggle.tsx";
+@@ -13,17 +22,38 @@ import {
+   EmptyTitle,
+ } from "@/components/ui/empty.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
+ import DrugSearchInput from "@/components/drug-search-input.tsx";
+ import PageHeader from "@/components/page-header.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
++import { errorMessage } from "@/lib/errors.ts";
+ import DrugDetailSheet from "./_components/drug-detail-sheet.tsx";
+ import LasaWarningDialog from "@/components/lasa/lasa-warning-dialog.tsx";
+ import DrugFormDialog from "./_components/drug-form-dialog.tsx";
+ import DrugRow from "./_components/drug-row.tsx";
+ import ImportDialog from "./_components/import-dialog.tsx";
+ import PhotoImportDialog from "./_components/photo-import-dialog.tsx";
++import { downloadDrugsCsv } from "./_lib/export-drugs.ts";
++
++// Which marked drugs to show; one at a time so each list can use its own index
++type MarkFilter = "all" | "lasa" | "dda";
++
++const FILTER_COPY = {
++  lasa: {
++    title: "No Look Alike, Sound Alike drugs",
++    adminHint: "Edit a drug and switch on Look Alike, Sound Alike to mark it.",
++    match: "Look Alike, Sound Alike ",
++    icon: TriangleAlert,
++  },
++  dda: {
++    title: "No Dangerous Drugs (DDA)",
++    adminHint: "Edit a drug and tick Dangerous Drug (DDA) to mark it.",
++    match: "DDA ",
++    icon: ShieldAlert,
++  },
++} as const;
+ 
+ function ListSkeleton() {
+   return (
+@@ -35,7 +65,13 @@ function ListSkeleton() {
+   );
+ }
+ 
+-function DrugList({ drugs, onSelect }: { drugs: DrugWithDetails[]; onSelect: (d: DrugWithDetails) => void }) {
++function DrugList({
++  drugs,
++  onSelect,
++}: {
++  drugs: DrugWithDetails[];
++  onSelect: (d: DrugWithDetails) => void;
++}) {
+   return (
+     <div className="space-y-3">
+       {drugs.map((d) => (
+@@ -45,33 +81,42 @@ function DrugList({ drugs, onSelect }: { drugs: DrugWithDetails[]; onSelect: (d:
+   );
+ }
+ 
++const LIST_QUERY = {
++  all: api.drugs.list,
++  lasa: api.drugs.listLasa,
++  dda: api.drugs.listDda,
++} as const;
++
+ function AllDrugs({
+   isAdmin,
+-  lasaOnly,
++  filter,
+   onAdd,
+   onSelect,
+ }: {
+   isAdmin: boolean;
+-  lasaOnly: boolean;
++  filter: MarkFilter;
+   onAdd: () => void;
+   onSelect: (d: DrugWithDetails) => void;
+ }) {
+   const { results, status, loadMore } = usePaginatedQuery(
+-    lasaOnly ? api.drugs.listLasa : api.drugs.list,
++    LIST_QUERY[filter],
+     {},
+     { initialNumItems: 30 },
+   );
+   if (status === "LoadingFirstPage") return <ListSkeleton />;
+-  if (status === "Exhausted" && results.length === 0 && lasaOnly) {
++  if (status === "Exhausted" && results.length === 0 && filter !== "all") {
++    const copy = FILTER_COPY[filter];
+     return (
+       <Empty className="border">
+         <EmptyHeader>
+           <EmptyMedia variant="icon">
+-            <TriangleAlert />
++            <copy.icon />
+           </EmptyMedia>
+-          <EmptyTitle>No Look Alike, Sound Alike drugs</EmptyTitle>
++          <EmptyTitle>{copy.title}</EmptyTitle>
+           <EmptyDescription>
+-            {isAdmin ? "Edit a drug and switch on Look Alike, Sound Alike to mark it." : "An admin has not marked any drugs yet."}
++            {isAdmin
++              ? copy.adminHint
++              : "An admin has not marked any drugs yet."}
+           </EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+@@ -86,7 +131,9 @@ function AllDrugs({
+           </EmptyMedia>
+           <EmptyTitle>No drugs yet</EmptyTitle>
+           <EmptyDescription>
+-            {isAdmin ? "Add your first drug to start tracking stock." : "An admin has not added any drugs yet."}
++            {isAdmin
++              ? "Add your first drug to start tracking stock."
++              : "An admin has not added any drugs yet."}
+           </EmptyDescription>
+         </EmptyHeader>
+         {isAdmin && (
+@@ -103,7 +150,11 @@ function AllDrugs({
+     <div className="space-y-4">
+       <DrugList drugs={results} onSelect={onSelect} />
+       {status === "CanLoadMore" && (
+-        <Button variant="secondary" className="w-full" onClick={() => loadMore(30)}>
++        <Button
++          variant="secondary"
++          className="w-full"
++          onClick={() => loadMore(30)}
++        >
+           Load more
+         </Button>
+       )}
+@@ -113,17 +164,17 @@ function AllDrugs({
+ 
+ function SearchResults({
+   term,
+-  lasaOnly,
++  filter,
+   onSelect,
+ }: {
+   term: string;
+-  lasaOnly: boolean;
++  filter: MarkFilter;
+   onSelect: (d: DrugWithDetails) => void;
+ }) {
+   const found = useQuery(api.drugs.search, { term });
+   if (found === undefined) return <ListSkeleton />;
+   // Search returns a small capped list, so narrowing it here is safe
+-  const results = lasaOnly ? found.filter((d) => d.lasa) : found;
++  const results = filter === "all" ? found : found.filter((d) => d[filter]);
+   if (results.length === 0) {
+     return (
+       <Empty className="border">
+@@ -132,9 +183,12 @@ function SearchResults({
+             <PackageSearch />
+           </EmptyMedia>
+           <EmptyTitle>
+-            No {lasaOnly ? "Look Alike, Sound Alike " : ""}match for “{term}”
++            No {filter === "all" ? "" : FILTER_COPY[filter].match}match for “
++            {term}”
+           </EmptyTitle>
+-          <EmptyDescription>Try another barcode, name, brand or Drug ID.</EmptyDescription>
++          <EmptyDescription>
++            Try another barcode, name, brand or Drug ID.
++          </EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+     );
+@@ -145,6 +199,7 @@ function SearchResults({
+ export default function InventoryPage() {
+   const user = useCurrentUser();
+   const isAdmin = user?.role === "admin";
++  const convex = useConvex();
+   const [search, setSearch] = useState("");
+   const [term] = useDebounce(search.trim(), 250);
+   const [selected, setSelected] = useState<DrugWithDetails | null>(null);
+@@ -152,13 +207,20 @@ export default function InventoryPage() {
+   const [editing, setEditing] = useState<DrugWithDetails | undefined>();
+   const [importOpen, setImportOpen] = useState(false);
+   const [photosOpen, setPhotosOpen] = useState(false);
+-  const [lasaOnly, setLasaOnly] = useState(false);
++  const [exporting, setExporting] = useState(false);
++  const [filter, setFilter] = useState<MarkFilter>("all");
++  const toggleFilter = (f: Exclude<MarkFilter, "all">) => (on: boolean) =>
++    setFilter(on ? f : "all");
+   // A marked drug waits here until staff tick the warning, then its details open
+   const [pendingLasa, setPendingLasa] = useState<DrugWithDetails | null>(null);
+-  const openDrug = (d: DrugWithDetails) => (d.lasa ? setPendingLasa(d) : setSelected(d));
++  const openDrug = (d: DrugWithDetails) =>
++    d.lasa ? setPendingLasa(d) : setSelected(d);
+ 
+   // Keep the open detail panel in sync with live data
+-  const live = useQuery(api.drugs.get, selected ? { id: selected._id } : "skip");
++  const live = useQuery(
++    api.drugs.get,
++    selected ? { id: selected._id } : "skip",
++  );
+   const shown = selected ? (live === undefined ? selected : live) : null;
+ 
+   const openAdd = () => {
+@@ -166,6 +228,18 @@ export default function InventoryPage() {
+     setFormOpen(true);
+   };
+ 
++  const handleExport = async () => {
++    setExporting(true);
++    try {
++      const count = await downloadDrugsCsv(convex);
++      toast.success(`Exported ${count} medicines`);
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not export medicines"));
++    } finally {
++      setExporting(false);
++    }
++  };
++
+   return (
+     <div className="mx-auto max-w-5xl p-4 md:p-8">
+       <PageHeader
+@@ -177,6 +251,13 @@ export default function InventoryPage() {
+               <Button variant="secondary" onClick={() => setImportOpen(true)}>
+                 <Upload /> Import file
+               </Button>
++              <Button
++                variant="secondary"
++                onClick={() => void handleExport()}
++                disabled={exporting}
++              >
++                {exporting ? <Spinner /> : <Download />} Export file
++              </Button>
+               <Button variant="secondary" onClick={() => setPhotosOpen(true)}>
+                 <ImageUp /> Upload photos
+               </Button>
+@@ -189,18 +270,33 @@ export default function InventoryPage() {
+       />
+       <div className="space-y-6">
+         <DrugSearchInput value={search} onChange={setSearch} autoFocus />
+-        <Toggle
+-          pressed={lasaOnly}
+-          onPressedChange={setLasaOnly}
+-          variant="outline"
+-          className="cursor-pointer data-[state=on]:border-destructive/40 data-[state=on]:bg-destructive/10 data-[state=on]:text-destructive"
+-        >
+-          <TriangleAlert /> Look Alike, Sound Alike only
+-        </Toggle>
++        <div className="flex flex-wrap gap-2">
++          <Toggle
++            pressed={filter === "lasa"}
++            onPressedChange={toggleFilter("lasa")}
++            variant="outline"
++            className="cursor-pointer data-[state=on]:border-destructive/40 data-[state=on]:bg-destructive/10 data-[state=on]:text-destructive"
++          >
++            <TriangleAlert /> Look Alike, Sound Alike only
++          </Toggle>
++          <Toggle
++            pressed={filter === "dda"}
++            onPressedChange={toggleFilter("dda")}
++            variant="outline"
++            className="cursor-pointer data-[state=on]:border-amber-500/50 data-[state=on]:bg-amber-500/10 data-[state=on]:text-amber-700 dark:data-[state=on]:text-amber-300"
++          >
++            <ShieldAlert /> DDA only
++          </Toggle>
++        </div>
+         {term ? (
+-          <SearchResults term={term} lasaOnly={lasaOnly} onSelect={openDrug} />
++          <SearchResults term={term} filter={filter} onSelect={openDrug} />
+         ) : (
+-          <AllDrugs isAdmin={isAdmin} lasaOnly={lasaOnly} onAdd={openAdd} onSelect={openDrug} />
++          <AllDrugs
++            isAdmin={isAdmin}
++            filter={filter}
++            onAdd={openAdd}
++            onSelect={openDrug}
++          />
+         )}
+       </div>
+       <LasaWarningDialog
+@@ -226,9 +322,17 @@ export default function InventoryPage() {
+           setFormOpen(true);
+         }}
+       />
+-      <DrugFormDialog open={formOpen} onOpenChange={setFormOpen} drug={editing} />
+-      {isAdmin && <ImportDialog open={importOpen} onOpenChange={setImportOpen} />}
+-      {isAdmin && <PhotoImportDialog open={photosOpen} onOpenChange={setPhotosOpen} />}
++      <DrugFormDialog
++        open={formOpen}
++        onOpenChange={setFormOpen}
++        drug={editing}
++      />
++      {isAdmin && (
++        <ImportDialog open={importOpen} onOpenChange={setImportOpen} />
++      )}
++      {isAdmin && (
++        <PhotoImportDialog open={photosOpen} onOpenChange={setPhotosOpen} />
++      )}
+     </div>
+   );
+ }
+
+diff --git a/src/components/dda-badge.tsx b/src/components/dda-badge.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/dda-badge.tsx
+@@ -0,0 +1,19 @@
++import { ShieldAlert } from "lucide-react";
++import { Badge } from "@/components/ui/badge.tsx";
++import { cn } from "@/lib/utils.ts";
++
++// Tag for drugs marked Dangerous Drug (DDA)
++export default function DdaBadge({ className }: { className?: string }) {
++  return (
++    <Badge
++      variant="outline"
++      className={cn(
++        "gap-1 border-amber-500/40 bg-amber-500/10 font-semibold text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-300",
++        className,
++      )}
++    >
++      <ShieldAlert className="size-3" />
++      DDA
++    </Badge>
++  );
++}
+diff --git a/src/pages/inventory/_components/dda-field.tsx b/src/pages/inventory/_components/dda-field.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/dda-field.tsx
+@@ -0,0 +1,46 @@
++import type { Control } from "react-hook-form";
++import { ShieldAlert } from "lucide-react";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import {
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++} from "@/components/ui/form.tsx";
++import type {
++  DrugFormInput,
++  DrugFormValues,
++} from "../_lib/drug-form-schema.ts";
++
++type Props = { control: Control<DrugFormInput, unknown, DrugFormValues> };
++
++// Dangerous Drug (DDA) tick box. Set once on the medicine.
++export default function DdaField({ control }: Props) {
++  return (
++    <FormField
++      control={control}
++      name="dda"
++      render={({ field }) => (
++        <FormItem className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 dark:border-amber-400/30 dark:bg-amber-400/10">
++          <FormControl>
++            <Checkbox
++              checked={field.value}
++              onCheckedChange={(on) => field.onChange(on === true)}
++              className="mt-0.5 size-5 cursor-pointer"
++            />
++          </FormControl>
++          <div className="space-y-1">
++            <FormLabel className="flex cursor-pointer items-center gap-2">
++              <ShieldAlert className="size-4 text-amber-600 dark:text-amber-400" />{" "}
++              Dangerous Drug (DDA)
++            </FormLabel>
++            <p className="text-xs text-muted-foreground">
++              Staff see a DDA notice at Stock Out, and DDA prints on the
++              canister label.
++            </p>
++          </div>
++        </FormItem>
++      )}
++    />
++  );
++}
+diff --git a/src/pages/inventory/_lib/export-drugs.ts b/src/pages/inventory/_lib/export-drugs.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_lib/export-drugs.ts
+@@ -0,0 +1,89 @@
++import Papa from "papaparse";
++import { format } from "date-fns";
++import type { ConvexReactClient } from "convex/react";
++import type { FunctionReturnType } from "convex/server";
++import { api } from "@/convex/_generated/api.js";
++
++type ExportDrug = FunctionReturnType<
++  typeof api.drugImport.listForExport
++>["page"][number];
++
++const PAGE_SIZE = 200;
++// Safety cap so a huge export cannot run forever
++const MAX_EXPORT_DRUGS = 20_000;
++
++// Spreadsheet formulas in cells are an injection risk; prefix them
++function safeCell(value: string): string {
++  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
++}
++
++const yesNo = (b: boolean) => (b ? "Yes" : "No");
++
++// One row per package form, with the same headers the import reads, so the file can be imported back
++export function exportRows(drugs: ExportDrug[]): Record<string, string>[] {
++  return drugs.flatMap((d) => {
++    const base = {
++      "Drug ID": d.drugId,
++      "Print Out Name": d.name,
++      "Brand Name": d.brandName,
++      Manufacturer: d.manufacturer,
++      "Dosage Form": d.pieceName,
++    };
++    const extra = {
++      Specifications: d.specifications,
++      Remarks: d.remarks,
++      LASA: yesNo(d.lasa),
++      DDA: yesNo(d.dda),
++    };
++    const forms =
++      d.packages.length > 0
++        ? d.packages.map((p) => ({
++            Barcode: p.barcode,
++            Form: p.baseUnit,
++            Per: String(p.qtyPerUnit),
++            Amount: String(p.unitCount),
++          }))
++        : [{ Barcode: "", Form: "", Per: "", Amount: "" }];
++    return forms.map((f) =>
++      Object.fromEntries(
++        Object.entries({ ...base, ...f, ...extra }).map(([k, v]) => [
++          k,
++          safeCell(v),
++        ]),
++      ),
++    );
++  });
++}
++
++async function fetchAllDrugs(convex: ConvexReactClient): Promise<ExportDrug[]> {
++  const drugs: ExportDrug[] = [];
++  let cursor: string | null = null;
++  while (drugs.length < MAX_EXPORT_DRUGS) {
++    const res: FunctionReturnType<typeof api.drugImport.listForExport> =
++      await convex.query(api.drugImport.listForExport, {
++        paginationOpts: { numItems: PAGE_SIZE, cursor },
++      });
++    drugs.push(...res.page);
++    if (res.isDone) break;
++    cursor = res.continueCursor;
++  }
++  return drugs;
++}
++
++// Downloads every medicine as a CSV file; returns how many medicines were exported
++export async function downloadDrugsCsv(
++  convex: ConvexReactClient,
++): Promise<number> {
++  const drugs = await fetchAllDrugs(convex);
++  // BOM so Excel reads Chinese characters correctly
++  const csv = "\uFEFF" + Papa.unparse(exportRows(drugs));
++  const url = URL.createObjectURL(
++    new Blob([csv], { type: "text/csv;charset=utf-8" }),
++  );
++  const a = document.createElement("a");
++  a.href = url;
++  a.download = `acp-medicines-${format(new Date(), "yyyy-MM-dd")}.csv`;
++  a.click();
++  URL.revokeObjectURL(url);
++  return drugs.length;
++}

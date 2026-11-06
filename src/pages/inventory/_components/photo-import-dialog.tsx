@@ -18,6 +18,10 @@ import { errorMessage } from "@/lib/errors.ts";
 import { cn } from "@/lib/utils.ts";
 import { readPhotoFiles } from "../_lib/read-photo-files.ts";
 import { usePhotoImport, type PhotoReport, type PhotoReview } from "../_hooks/use-photo-import.ts";
+import type { Choice } from "../_lib/import-choices.ts";
+import { applyKeepChoice, photosToUpload, splitMatches } from "../_lib/photo-choices.ts";
+import ImportConflictsBar from "./import-conflicts-bar.tsx";
+import { AddPhotoRow, ReplacePhotoRow } from "./photo-review-rows.tsx";
 
 const PAGE = 60;
 
@@ -42,8 +46,8 @@ export default function PhotoImportDialog({ open, onOpenChange }: { open: boolea
         <DialogHeader>
           <DialogTitle>Upload drug photos</DialogTitle>
           <DialogDescription>
-            Name each photo by its Drug ID, for example 25.jpg. Each photo becomes that drug's main picture and replaces
-            any current one.
+            Name each photo by its Drug ID, for example 25.jpg. Each photo becomes that drug's main picture. For drugs
+            that already have one, you can compare and choose to keep the current picture.
           </DialogDescription>
         </DialogHeader>
         <Steps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
@@ -134,17 +138,38 @@ function ReviewStep({
   onBack: () => void;
   onDone: (r: PhotoReport) => void;
 }) {
-  const [shown, setShown] = useState(PAGE);
-  const replacing = review.matched.filter((m) => m.hasPhoto).length;
+  const [shownAdd, setShownAdd] = useState(PAGE);
+  const [shownReplace, setShownReplace] = useState(PAGE);
+  // Drug IDs whose current picture is kept; empty = replace all (the default)
+  const [keep, setKeep] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const { adding, replacing } = splitMatches(review.matched);
+  const toUpload = photosToUpload(review.matched, keep);
+  const keptCount = review.matched.length - toUpload.length;
   const skipped = [
     ...review.notFound.map((p) => `${p.fileName}: no drug with Drug ID ${p.drugId}`),
     ...ignored.map((f) => `${f}: not a photo named by Drug ID`),
     ...duplicates.map((f) => `${f}: another photo for the same Drug ID was used`),
   ];
 
+  const choose = (drugId: string, c: Choice) => setKeep(applyKeepChoice(keep, replacing, new Set([drugId]), c));
+  const applyChoice = (c: Choice) => {
+    setKeep(applyKeepChoice(keep, replacing, selected, c));
+    if (selected.size > 0) {
+      toast.success(`${c === "file" ? "Replacing" : "Keeping current"} for ${selected.size} drug${selected.size === 1 ? "" : "s"}`);
+      setSelected(new Set());
+    }
+  };
+  const toggleSelected = (drugId: string, on: boolean) => {
+    const next = new Set(selected);
+    if (on) next.add(drugId);
+    else next.delete(drugId);
+    setSelected(next);
+  };
+
   const submit = async () => {
     try {
-      onDone(await importer.run(review.matched));
+      onDone(await importer.run(toUpload));
     } catch (error) {
       toast.error(errorMessage(error, "The upload stopped part way. Upload the photos again to continue."));
     }
@@ -153,29 +178,56 @@ function ReviewStep({
   return (
     <>
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="Will be added" value={review.matched.length - replacing} />
-        <Stat label="Will replace" value={replacing} />
+        <Stat label="Will be added" value={adding.length} />
+        <Stat label={keptCount > 0 ? `Will replace (${keptCount} kept)` : "Will replace"} value={replacing.length - keptCount} />
         <Stat label="Skipped" value={skipped.length} highlight={skipped.length > 0} />
       </div>
-      <Tabs defaultValue="matched" className="min-h-0 flex-1">
+      <Tabs defaultValue={replacing.length > 0 ? "replace" : "add"} className="min-h-0 flex-1">
         <TabsList className="w-full">
-          <TabsTrigger value="matched">Matched ({review.matched.length})</TabsTrigger>
+          <TabsTrigger value="add">Will be added ({adding.length})</TabsTrigger>
+          <TabsTrigger value="replace">Will replace ({replacing.length})</TabsTrigger>
           <TabsTrigger value="skipped">Skipped ({skipped.length})</TabsTrigger>
         </TabsList>
-        <TabsContent value="matched" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
-          {review.matched.length === 0 ? (
-            <Note>No photo matches a saved Drug ID.</Note>
+        <TabsContent value="add" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
+          {adding.length === 0 ? (
+            <Note>No new pictures. Every matched drug already has one.</Note>
           ) : (
             <>
-              {review.matched.slice(0, shown).map((m) => (
-                <div key={m.drugId} className="flex items-center gap-3 rounded-md border px-2 py-1.5 text-sm">
-                  <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">{m.drugId}</span>
-                  <span className="min-w-0 flex-1 truncate">{m.name}</span>
-                  {m.hasPhoto && <span className="shrink-0 text-xs text-chart-3">Replaces current</span>}
-                </div>
+              {adding.slice(0, shownAdd).map((m) => (
+                <AddPhotoRow key={m.drugId} m={m} />
               ))}
-              {shown < review.matched.length && (
-                <Button variant="secondary" className="w-full" onClick={() => setShown(shown + PAGE)}>
+              {shownAdd < adding.length && (
+                <Button variant="secondary" className="w-full" onClick={() => setShownAdd(shownAdd + PAGE)}>
+                  Show more
+                </Button>
+              )}
+            </>
+          )}
+        </TabsContent>
+        <TabsContent value="replace" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
+          {replacing.length === 0 ? (
+            <Note>No current pictures will be replaced.</Note>
+          ) : (
+            <>
+              <ImportConflictsBar
+                total={replacing.length}
+                selected={selected.size}
+                useFileCount={replacing.length - keptCount}
+                onSelectAll={(on) => setSelected(on ? new Set(replacing.map((m) => m.drugId)) : new Set())}
+                onApply={applyChoice}
+              />
+              {replacing.slice(0, shownReplace).map((m) => (
+                <ReplacePhotoRow
+                  key={m.drugId}
+                  m={m}
+                  choice={keep.has(m.drugId) ? "keep" : "file"}
+                  onChoose={(c) => choose(m.drugId, c)}
+                  selected={selected.has(m.drugId)}
+                  onSelectedChange={(on) => toggleSelected(m.drugId, on)}
+                />
+              ))}
+              {shownReplace < replacing.length && (
+                <Button variant="secondary" className="w-full" onClick={() => setShownReplace(shownReplace + PAGE)}>
                   Show more
                 </Button>
               )}
@@ -198,8 +250,9 @@ function ReviewStep({
         <Button variant="ghost" onClick={onBack}>
           Choose other photos
         </Button>
-        <Button disabled={review.matched.length === 0} onClick={() => void submit()}>
-          Upload {review.matched.length.toLocaleString()} photos
+        <Button disabled={toUpload.length === 0} onClick={() => void submit()}>
+          Upload {toUpload.length.toLocaleString()} photos
+          {keptCount > 0 && ` (${keptCount.toLocaleString()} kept current)`}
         </Button>
       </DialogFooter>
     </>

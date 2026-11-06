@@ -1,0 +1,172 @@
+diff --git a/src/lib/label/bitmap.ts b/src/lib/label/bitmap.ts
+index e60816a..710aa15 100644
+--- a/src/lib/label/bitmap.ts
++++ b/src/lib/label/bitmap.ts
+@@ -64,6 +64,24 @@ export function buildCpclJob(
+   return job;
+ }
+ 
++// Stretches a grey photo so its lightest part (usually the background) prints white
++// and its darkest prints black, then darkens the mid-tones so light tablets still
++// show as a dot shade. Ignores the extreme 2% at each end (glare, specks).
++export function boostContrast(gray: Float32Array, gamma = 2): Float32Array {
++  const n = gray.length;
++  const out = new Float32Array(n);
++  if (n === 0) return out;
++  const sorted = Float32Array.from(gray).sort();
++  const lo = sorted[Math.floor((n - 1) * 0.02)];
++  const hi = sorted[Math.floor((n - 1) * 0.98)];
++  const range = hi - lo;
++  for (let i = 0; i < n; i++) {
++    const t = range < 1 ? 1 : Math.min(1, Math.max(0, (gray[i] - lo) / range));
++    out[i] = Math.pow(t, gamma) * 255;
++  }
++  return out;
++}
++
+ // Canvas pixels to grey-scale (transparent counts as white paper)
+ export function toGray(rgba: Uint8ClampedArray): Float32Array {
+   const gray = new Float32Array(rgba.length / 4);
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 2093338..458e93b 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -1,5 +1,10 @@
+ import { describe, expect, it } from "vitest";
+-import { buildCpclJob, ditherToMono, packRows } from "./bitmap.ts";
++import {
++  boostContrast,
++  buildCpclJob,
++  ditherToMono,
++  packRows,
++} from "./bitmap.ts";
+ import {
+   canisterTypeLabel,
+   fillDateCode,
+@@ -65,6 +70,21 @@ describe("label sizes", () => {
+ });
+ 
+ describe("printer image", () => {
++  it("stretches a pale photo so the background is white and the tablet shows", () => {
++    // Pale purple background (230) with a pink tablet (200) and a dark mark (90)
++    const gray = Float32Array.from([
++      ...Array<number>(60).fill(230),
++      ...Array<number>(35).fill(200),
++      ...Array<number>(5).fill(90),
++    ]);
++    const out = boostContrast(gray);
++    expect(out[0]).toBe(255);
++    expect(out[99]).toBe(0);
++    // The tablet becomes a clear mid shade, so it dithers into visible dots
++    expect(out[70]).toBeGreaterThan(80);
++    expect(out[70]).toBeLessThan(180);
++    expect(boostContrast(Float32Array.from([120, 120]))[0]).toBe(255);
++  });
+   it("prints dark pixels black and light pixels white", () => {
+     const mono = ditherToMono(Float32Array.from([0, 255, 10, 250]), 2, 2);
+     expect([...mono]).toEqual([1, 0, 1, 0]);
+diff --git a/src/lib/label/render-label.ts b/src/lib/label/render-label.ts
+index 4286959..186c1f5 100644
+--- a/src/lib/label/render-label.ts
++++ b/src/lib/label/render-label.ts
+@@ -4,6 +4,7 @@ import {
+   formatLabelDate,
+   type LabelData,
+ } from "./label-data.ts";
++import { boostContrast, ditherToMono, toGray } from "./bitmap.ts";
+ import {
+   BASE_WIDTH,
+   labelDots,
+@@ -43,6 +44,54 @@ async function loadImage(url: string): Promise<HTMLImageElement | null> {
+   }
+ }
+ 
++// Largest photo side kept before drawing; the label prints it far smaller anyway
++const PHOTO_MAX = 400;
++
++// Grey, high-contrast copy of the tablet photo, so a pale tablet on a pale
++// background still prints as a visible shape instead of fading to white
++async function loadPhoto(url: string): Promise<HTMLCanvasElement | null> {
++  const img = await loadImage(url);
++  if (!img) return null;
++  const s = Math.min(1, PHOTO_MAX / Math.max(img.width, img.height));
++  const w = Math.max(1, Math.round(img.width * s));
++  const h = Math.max(1, Math.round(img.height * s));
++  const canvas = document.createElement("canvas");
++  canvas.width = w;
++  canvas.height = h;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) return null;
++  ctx.fillStyle = "#fff";
++  ctx.fillRect(0, 0, w, h);
++  ctx.drawImage(img, 0, 0, w, h);
++  const pixels = ctx.getImageData(0, 0, w, h);
++  const gray = boostContrast(toGray(pixels.data));
++  for (let i = 0; i < gray.length; i++) {
++    pixels.data[i * 4] = gray[i];
++    pixels.data[i * 4 + 1] = gray[i];
++    pixels.data[i * 4 + 2] = gray[i];
++    pixels.data[i * 4 + 3] = 255;
++  }
++  ctx.putImageData(pixels, 0, 0);
++  return canvas;
++}
++
++// Turns the finished label into pure black and white dots. Label printers can't
++// print grey, and the computer's print window rounds light grey to white, which
++// lost the canister dot and the photo. Doing it here makes every print path,
++// and the preview, show exactly the dots that will print.
++function toPrintedDots(ctx: Ctx, width: number, height: number) {
++  const pixels = ctx.getImageData(0, 0, width, height);
++  const mono = ditherToMono(toGray(pixels.data), width, height);
++  for (let i = 0; i < mono.length; i++) {
++    const v = mono[i] ? 0 : 255;
++    pixels.data[i * 4] = v;
++    pixels.data[i * 4 + 1] = v;
++    pixels.data[i * 4 + 2] = v;
++    pixels.data[i * 4 + 3] = 255;
++  }
++  ctx.putImageData(pixels, 0, 0);
++}
++
+ // Drawn in printer dots (not base units) so each QR module is a whole number of dots
+ function drawQr(
+   ctx: Ctx,
+@@ -191,7 +240,7 @@ function drawCanisterFace(
+   ctx: Ctx,
+   layout: Layout,
+   data: LabelData,
+-  photo: HTMLImageElement | null,
++  photo: HTMLCanvasElement | null,
+ ) {
+   const { topEnd, middleEnd, photoW, photoH, photoAcross, faceQr } =
+     layout.size;
+@@ -278,7 +327,7 @@ export async function renderLabel(
+   canvas.height = dots.height;
+   const ctx = canvas.getContext("2d");
+   if (!ctx) throw new Error("This browser cannot draw labels");
+-  const photo = data.imageUrl ? await loadImage(data.imageUrl) : null;
++  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
+   ctx.fillStyle = "#fff";
+   ctx.fillRect(0, 0, dots.width, dots.height);
+   const layout: Layout = { size, ...labelScale(size) };
+@@ -288,5 +337,6 @@ export async function renderLabel(
+   drawCanisterFace(ctx, layout, data, photo);
+   divider(ctx, size.middleEnd);
+   drawTag(ctx, layout, data);
++  toPrintedDots(ctx, dots.width, dots.height);
+   return canvas;
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 48b41b1..a5c35aa 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v66");
++    expect(CHANGE_ENTRIES[0].version).toBe("v67");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,

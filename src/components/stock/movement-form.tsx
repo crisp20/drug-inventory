@@ -10,7 +10,7 @@ import LabelPrintDialog from "./label-print-dialog.tsx";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "convex/react";
-import { ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
@@ -262,10 +262,12 @@ export default function MovementForm({
           batch: canister.batch,
           expiry: canister.expiry,
           canisterType: canister.type,
+          canisterQty: canister.quantity,
           filledBy: initialsOf(currentUser?.name ?? currentUser?.email),
           fillDate: fillDateCode(new Date()),
           qrText: drug.drugId,
           imageUrl: drug.imageUrl,
+          dangerousDrug: !!drug.dda,
         });
         form.reset(form.getValues());
         return;
@@ -288,6 +290,16 @@ export default function MovementForm({
             {drug.name}
           </span>
         </div>
+
+        {kind === "out" && drug.dda && (
+          <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-200">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+            <div>
+              <div className="font-semibold">Dangerous Drug (DDA)</div>
+              <div>Follow the DDA procedure for this medicine. DDA is printed on the canister label.</div>
+            </div>
+          </div>
+        )}
 
         <FormField
           control={form.control}

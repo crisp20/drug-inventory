@@ -1,5 +1,7 @@
 import { Barcode, Check } from "lucide-react";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
+import LasaBadge from "@/components/lasa-badge.tsx";
+import DdaBadge from "@/components/dda-badge.tsx";
 import ManufacturerLine from "@/components/manufacturer-line.tsx";
 import DrugNotes from "@/components/drug-notes.tsx";
 import ZoomableDrugImage, {
@@ -41,6 +43,12 @@ export default function DrugPackagePicker({
           className="size-32 sm:size-40"
         />
         <div className="min-w-0">
+          {(drug.lasa || drug.dda) && (
+            <div className="mb-1 flex flex-wrap gap-1">
+              {drug.lasa && <LasaBadge />}
+              {drug.dda && <DdaBadge />}
+            </div>
+          )}
           <div className="truncate text-lg font-semibold">{drug.name}</div>
           <div className="truncate text-sm text-muted-foreground">
             {drug.brandName || "No brand"} ·{" "}

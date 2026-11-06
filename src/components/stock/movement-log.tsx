@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePaginatedQuery } from "convex/react";
 import { format } from "date-fns";
-import { History, Undo2 } from "lucide-react";
+import { History, Printer, Undo2 } from "lucide-react";
 import { api } from "@/convex/_generated/api.js";
 import { formatPackageForm } from "@/convex/lib/barcode.ts";
 import type { MovementKind } from "@/convex/lib/stock.ts";
@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { cn } from "@/lib/utils.ts";
 import UndoMovementDialog from "./undo-movement-dialog.tsx";
+import ReprintLabelDialog from "./reprint-label-dialog.tsx";
 
 const PAGE_SIZE = 25;
 
@@ -65,8 +66,11 @@ export default function MovementLog({
   );
   const currentUser = useCurrentUser();
   const isAdmin =
-    currentUser?.role === "director" && currentUser.status === "active";
+    currentUser?.role === "admin" && currentUser.status === "active";
   const [undoing, setUndoing] = useState<Doc<"stockMovements"> | null>(null);
+  const [reprinting, setReprinting] = useState<Doc<"stockMovements"> | null>(
+    null,
+  );
   const mixed = kind === undefined;
   const label = kind ? KIND_LABEL[kind] : "Stock In or Stock Out";
 
@@ -197,6 +201,17 @@ export default function MovementLog({
               <div className="font-medium text-foreground">{m.userName}</div>
               <div>{format(new Date(m.occurredAt), "d MMM yyyy")}</div>
               <div>{format(new Date(m.occurredAt), "h:mm a")}</div>
+              {m.canister && !m.undo && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
+                  onClick={() => setReprinting(m)}
+                >
+                  <Printer className="size-3.5" />
+                  Reprint label
+                </Button>
+              )}
               {isAdmin && !m.undo && (
                 <Button
                   variant="ghost"
@@ -222,6 +237,10 @@ export default function MovementLog({
         </Button>
       )}
       <UndoMovementDialog movement={undoing} onClose={() => setUndoing(null)} />
+      <ReprintLabelDialog
+        movement={reprinting}
+        onClose={() => setReprinting(null)}
+      />
     </div>
   );
 }

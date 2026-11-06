@@ -1,0 +1,322 @@
+diff --git a/src/components/stock/label-print-dialog.tsx b/src/components/stock/label-print-dialog.tsx
+index c196248..d2a91a4 100644
+--- a/src/components/stock/label-print-dialog.tsx
++++ b/src/components/stock/label-print-dialog.tsx
+@@ -20,26 +20,41 @@ import {
+ } from "@/lib/label/bluetooth-printer.ts";
+ import type { LabelData } from "@/lib/label/label-data.ts";
+ import {
++  orientCanvas,
+   printCanvasBluetooth,
+   printCanvasWindow,
+ } from "@/lib/label/print-label.ts";
+ import { renderLabel } from "@/lib/label/render-label.ts";
+ import {
++  isLabelOrientation,
+   isLabelSizeId,
++  LABEL_ORIENTATIONS,
+   LABEL_SIZES,
++  loadLabelOrientation,
+   loadLabelSize,
++  saveLabelOrientation,
+   saveLabelSize,
++  type LabelOrientation,
+   type LabelSizeId,
+ } from "@/lib/label/label-sizes.ts";
+ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
+-// Preview boxes keep each label's shape (40x60 and 52x110)
+-const PREVIEW_CLASS: Record<LabelSizeId, string> = {
+-  "40x60": "h-[300px] w-[200px]",
+-  "52x110": "h-[330px] w-[156px]",
++// Preview boxes keep each label's shape (40x60 and 52x110) in either direction
++const PREVIEW_CLASS: Record<LabelSizeId, Record<LabelOrientation, string>> = {
++  "40x60": {
++    portrait: "h-[300px] w-[200px]",
++    landscape: "h-[200px] w-[300px]",
++  },
++  "52x110": {
++    portrait: "h-[330px] w-[156px]",
++    landscape: "h-[156px] w-[330px]",
++  },
+ };
+ 
++const TOGGLE_ITEM_CLASS =
++  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
++
+ type Status =
+   | { state: "drawing" }
+   | { state: "ready" }
+@@ -69,17 +84,33 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   const [preview, setPreview] = useState<string | null>(null);
+   const [status, setStatus] = useState<Status>({ state: "drawing" });
+   const [sizeId, setSizeId] = useState<LabelSizeId>(loadLabelSize);
+-  // Only the first drawing prints by itself; switching size just redraws the preview
++  const [orientation, setOrientation] = useState<LabelOrientation>(() =>
++    loadLabelOrientation(sizeId),
++  );
++  // Only the first drawing prints by itself; switching size or direction just redraws the preview
+   const autoPrinted = useRef(false);
+   const size = LABEL_SIZES[sizeId];
+   const canBluetooth = bluetoothSupported();
+ 
++  const redraw = () => {
++    setPreview(null);
++    setStatus({ state: "drawing" });
++  };
++
+   const changeSize = (value: string) => {
+     if (!isLabelSizeId(value) || value === sizeId) return;
+     saveLabelSize(value);
+-    setPreview(null);
+-    setStatus({ state: "drawing" });
++    redraw();
+     setSizeId(value);
++    // Each size keeps its own direction
++    setOrientation(loadLabelOrientation(value));
++  };
++
++  const changeOrientation = (value: string) => {
++    if (!isLabelOrientation(value) || value === orientation) return;
++    saveLabelOrientation(sizeId, value);
++    redraw();
++    setOrientation(value);
+   };
+ 
+   const printBluetooth = async () => {
+@@ -106,7 +137,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   const printWindow = () => {
+     if (!canvasRef.current) return;
+     try {
+-      printCanvasWindow(canvasRef.current, size);
++      printCanvasWindow(canvasRef.current);
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not open the print window"));
+     }
+@@ -115,8 +146,9 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   // Draw the label, and on first draw print right away if the printer is still connected
+   useEffect(() => {
+     let cancelled = false;
+-    void renderLabel(data, LABEL_SIZES[sizeId]).then(async (canvas) => {
++    void renderLabel(data, LABEL_SIZES[sizeId]).then(async (drawn) => {
+       if (cancelled) return;
++      const canvas = orientCanvas(drawn, orientation);
+       canvasRef.current = canvas;
+       setPreview(canvas.toDataURL("image/png"));
+       if (autoPrinted.current || !printerConnected()) {
+@@ -139,7 +171,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+     return () => {
+       cancelled = true;
+     };
+-  }, [data, sizeId]);
++  }, [data, sizeId, orientation]);
+ 
+   const busy = status.state === "drawing" || status.state === "printing";
+   const name = printerName();
+@@ -172,7 +204,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+             <ToggleGroupItem
+               key={s.id}
+               value={s.id}
+-              className="cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
++              className={TOGGLE_ITEM_CLASS}
+             >
+               {s.name}
+             </ToggleGroupItem>
+@@ -180,16 +212,37 @@ function LabelPrinter({ data }: { data: LabelData }) {
+         </ToggleGroup>
+       </div>
+ 
++      <div className="flex items-center justify-between gap-3">
++        <span className="text-sm font-medium">Direction</span>
++        <ToggleGroup
++          type="single"
++          variant="outline"
++          value={orientation}
++          onValueChange={changeOrientation}
++          disabled={status.state === "printing"}
++        >
++          {LABEL_ORIENTATIONS.map((o) => (
++            <ToggleGroupItem
++              key={o.id}
++              value={o.id}
++              className={TOGGLE_ITEM_CLASS}
++            >
++              {o.name}
++            </ToggleGroupItem>
++          ))}
++        </ToggleGroup>
++      </div>
++
+       <div className="flex justify-center rounded-lg bg-muted p-3">
+         {preview ? (
+           <img
+             src={preview}
+-            alt={`Label preview, ${size.name}`}
+-            className={`${PREVIEW_CLASS[sizeId]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
++            alt={`Label preview, ${size.name}, ${orientation}`}
++            className={`${PREVIEW_CLASS[sizeId][orientation]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
+           />
+         ) : (
+           <div
+-            className={`${PREVIEW_CLASS[sizeId]} flex items-center justify-center`}
++            className={`${PREVIEW_CLASS[sizeId][orientation]} flex items-center justify-center`}
+           >
+             <Spinner />
+           </div>
+diff --git a/src/lib/label/label-sizes.ts b/src/lib/label/label-sizes.ts
+index be4c026..7ba55d1 100644
+--- a/src/lib/label/label-sizes.ts
++++ b/src/lib/label/label-sizes.ts
+@@ -93,3 +93,44 @@ export function saveLabelSize(id: LabelSizeId): void {
+     // Private mode: the choice just isn't remembered
+   }
+ }
++
++// Portrait prints the label as designed; landscape turns it a quarter turn clockwise
++export type LabelOrientation = "portrait" | "landscape";
++
++export const LABEL_ORIENTATIONS: { id: LabelOrientation; name: string }[] = [
++  { id: "portrait", name: "Portrait" },
++  { id: "landscape", name: "Landscape" },
++];
++
++// The 40x60 roll feeds sideways on the HPRT, so it starts on landscape
++export const DEFAULT_ORIENTATION: Record<LabelSizeId, LabelOrientation> = {
++  "40x60": "landscape",
++  "52x110": "portrait",
++};
++
++export function isLabelOrientation(value: unknown): value is LabelOrientation {
++  return value === "portrait" || value === "landscape";
++}
++
++const orientationKey = (id: LabelSizeId) => `acp-label-orientation-${id}`;
++
++// Remembered per size on this device
++export function loadLabelOrientation(id: LabelSizeId): LabelOrientation {
++  try {
++    const saved = localStorage.getItem(orientationKey(id));
++    return isLabelOrientation(saved) ? saved : DEFAULT_ORIENTATION[id];
++  } catch {
++    return DEFAULT_ORIENTATION[id];
++  }
++}
++
++export function saveLabelOrientation(
++  id: LabelSizeId,
++  orientation: LabelOrientation,
++): void {
++  try {
++    localStorage.setItem(orientationKey(id), orientation);
++  } catch {
++    // Private mode: the choice just isn't remembered
++  }
++}
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 458e93b..4978474 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -12,10 +12,13 @@ import {
+   initialsOf,
+ } from "./label-data.ts";
+ import {
++  isLabelOrientation,
+   isLabelSizeId,
+   LABEL_SIZES,
+   labelDots,
+   labelScale,
++  loadLabelOrientation,
++  saveLabelOrientation,
+ } from "./label-sizes.ts";
+ 
+ describe("label text", () => {
+@@ -67,6 +70,20 @@ describe("label sizes", () => {
+     expect(isLabelSizeId("99x99")).toBe(false);
+     expect(isLabelSizeId(null)).toBe(false);
+   });
++
++  it("starts 40x60 on landscape and 52x110 on portrait, remembering each size", () => {
++    localStorage.clear();
++    expect(loadLabelOrientation("40x60")).toBe("landscape");
++    expect(loadLabelOrientation("52x110")).toBe("portrait");
++    saveLabelOrientation("40x60", "portrait");
++    expect(loadLabelOrientation("40x60")).toBe("portrait");
++    expect(loadLabelOrientation("52x110")).toBe("portrait");
++    localStorage.setItem("acp-label-orientation-52x110", "sideways");
++    expect(loadLabelOrientation("52x110")).toBe("portrait");
++    expect(isLabelOrientation("landscape")).toBe(true);
++    expect(isLabelOrientation("upside")).toBe(false);
++    localStorage.clear();
++  });
+ });
+ 
+ describe("printer image", () => {
+diff --git a/src/lib/label/print-label.ts b/src/lib/label/print-label.ts
+index 9713b8b..6b1473d 100644
+--- a/src/lib/label/print-label.ts
++++ b/src/lib/label/print-label.ts
+@@ -1,6 +1,24 @@
+ import { buildCpclJob, ditherToMono, toGray } from "./bitmap.ts";
+ import { sendToPrinter } from "./bluetooth-printer.ts";
+-import type { LabelSize } from "./label-sizes.ts";
++import { DOTS_PER_MM, type LabelOrientation } from "./label-sizes.ts";
++
++// Returns the label turned for the chosen direction. Landscape turns it a quarter
++// turn clockwise; portrait returns the drawing unchanged.
++export function orientCanvas(
++  canvas: HTMLCanvasElement,
++  orientation: LabelOrientation,
++): HTMLCanvasElement {
++  if (orientation === "portrait") return canvas;
++  const out = document.createElement("canvas");
++  out.width = canvas.height;
++  out.height = canvas.width;
++  const ctx = out.getContext("2d");
++  if (!ctx) throw new Error("This browser cannot draw labels");
++  ctx.translate(out.width, 0);
++  ctx.rotate(Math.PI / 2);
++  ctx.drawImage(canvas, 0, 0);
++  return out;
++}
+ 
+ // Sends a drawn label to the Bluetooth printer
+ export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
+@@ -11,11 +29,8 @@ export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
+   await sendToPrinter(buildCpclJob(mono, canvas.width, canvas.height));
+ }
+ 
+-// Fallback: the normal print window, sized to one label of the chosen size
+-export function printCanvasWindow(
+-  canvas: HTMLCanvasElement,
+-  size: LabelSize,
+-): void {
++// Fallback: the normal print window, with the page sized to the (turned) label
++export function printCanvasWindow(canvas: HTMLCanvasElement): void {
+   const frame = document.createElement("iframe");
+   frame.style.position = "fixed";
+   frame.style.width = "0";
+@@ -28,8 +43,8 @@ export function printCanvasWindow(
+     frame.remove();
+     throw new Error("Could not open the print window");
+   }
+-  const mmW = size.widthMm;
+-  const mmH = size.heightMm;
++  const mmW = canvas.width / DOTS_PER_MM;
++  const mmH = canvas.height / DOTS_PER_MM;
+   doc.open();
+   doc.write(
+     `<!doctype html><html><head><style>@page{size:${mmW}mm ${mmH}mm;margin:0}html,body{margin:0;padding:0}img{display:block;width:${mmW}mm;height:${mmH}mm;image-rendering:pixelated}</style></head><body><img src="${canvas.toDataURL("image/png")}"></body></html>`,
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index a5c35aa..46886ef 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v67");
++    expect(CHANGE_ENTRIES[0].version).toBe("v68");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,

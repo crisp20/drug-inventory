@@ -21,6 +21,7 @@ import {
   getPackages,
   type PackageInput,
 } from "./lib/drugs";
+import { clearLookAlikes, getLookAlikes } from "./lib/lasa";
 import { baseUnit } from "./schema/drugs";
 
 const importPackageArg = v.object({
@@ -40,11 +41,16 @@ const importDrugArg = v.object({
   // Undefined = leave the saved text alone
   specifications: v.optional(v.string()),
   remarks: v.optional(v.string()),
+  // Undefined = leave the saved Look Alike, Sound Alike mark alone
+  lasa: v.optional(v.boolean()),
+  // Undefined = leave the saved Dangerous Drug (DDA) mark alone
+  dda: v.optional(v.boolean()),
   row: v.number(),
   packages: v.array(importPackageArg),
 });
 
-// create: new drug. update: bring details in line with the file. notes: only Specifications/Remarks.
+// create: new drug. update: bring details in line with the file.
+// notes: only Specifications/Remarks and the Look Alike, Sound Alike mark.
 const importAction = v.union(v.literal("create"), v.literal("update"), v.literal("notes"));
 type ImportAction = "create" | "update" | "notes";
 
@@ -61,7 +67,17 @@ async function findDrug(ctx: QueryCtx, drugId: string) {
     .first();
 }
 
-type BarcodeClash = { barcode: string; otherDrugId: string; otherName: string };
+type BarcodeClash = {
+  barcode: string;
+  otherDrugId: string;
+  otherName: string;
+  otherBrand: string;
+  otherManufacturer: string;
+  otherPieceName: string;
+  // The other drug's package form that owns this barcode, and its stock
+  otherPackage: { qtyPerUnit: number; baseUnit: Doc<"drugPackages">["baseUnit"]; unitCount: number; stock: number };
+  otherImageId: Id<"_storage"> | null;
+};
 
 // Barcodes in the file that are already saved on a different drug
 async function findClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<"drugs"> | undefined) {
@@ -74,9 +90,29 @@ async function findClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<
       .first();
     if (!other || other.drugRef === ownRef) continue;
     const otherDrug = await ctx.db.get("drugs", other.drugRef);
-    clashes.push({ barcode: p.barcode, otherDrugId: otherDrug?.drugId ?? "?", otherName: otherDrug?.name ?? "Unknown" });
+    clashes.push({
+      barcode: p.barcode,
+      otherDrugId: otherDrug?.drugId ?? "?",
+      otherName: otherDrug?.name ?? "Unknown",
+      otherBrand: otherDrug?.brandName ?? "",
+      otherManufacturer: otherDrug?.manufacturer ?? "",
+      otherPieceName: otherDrug?.pieceName ?? "units",
+      otherPackage: { qtyPerUnit: other.qtyPerUnit, baseUnit: other.baseUnit, unitCount: other.unitCount, stock: other.stock },
+      otherImageId: otherDrug?.imageId ?? null,
+    });
   }
   return clashes;
+}
+
+// Clashes as shown on the review screen, with the other drug's picture
+async function describeClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<"drugs"> | undefined) {
+  const clashes = await findClashes(ctx, packages, ownRef);
+  return await Promise.all(
+    clashes.map(async ({ otherImageId, ...c }) => ({
+      ...c,
+      otherImageUrl: otherImageId ? await ctx.storage.getUrl(otherImageId) : null,
+    })),
+  );
 }
 
 function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
@@ -87,6 +123,8 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
     pieceName: drug.pieceName,
     specifications: drug.specifications,
     remarks: drug.remarks,
+    lasa: drug.lasa,
+    dda: drug.dda,
     packages: packages.map((p) => ({
       barcode: p.barcode,
       qtyPerUnit: p.qtyPerUnit,
@@ -105,7 +143,7 @@ export const checkBatch = query({
     return await Promise.all(
       args.drugs.map(async (d) => {
         const existing = await findDrug(ctx, d.drugId);
-        const clashes = await findClashes(ctx, d.packages, existing?._id);
+        const clashes = await describeClashes(ctx, d.packages, existing?._id);
         if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null, imageUrl: null };
         const [packages, imageUrl] = await Promise.all([
           getPackages(ctx, existing._id),
@@ -118,6 +156,18 @@ export const checkBatch = query({
         return { drugId: d.drugId, status, clashes, diff, imageUrl };
       }),
     );
+  },
+});
+
+// Checks a replacement barcode typed during the import review: who already has it, if anyone
+export const barcodeOwner = query({
+  args: { barcode: v.string(), drugId: v.string() },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx);
+    if (!args.barcode.trim()) return null;
+    const own = await findDrug(ctx, args.drugId);
+    const [clash] = await findClashes(ctx, [{ barcode: args.barcode, qtyPerUnit: 1, baseUnit: "Box", unitCount: 1 }], own?._id);
+    return clash ? { drugId: clash.otherDrugId, name: clash.otherName } : null;
   },
 });
 
@@ -145,6 +195,38 @@ export const listForImport = query({
   },
 });
 
+// Every saved drug with its package forms, one page at a time, for the spreadsheet export
+// (same columns the import reads, so the file can be edited and imported back)
+export const listForExport = query({
+  args: { paginationOpts: paginationOptsValidator },
+  handler: async (ctx, args) => {
+    await requireAdmin(ctx);
+    const result = await ctx.db.query("drugs").withIndex("by_drugId").paginate(args.paginationOpts);
+    return {
+      ...result,
+      page: await Promise.all(
+        result.page.map(async (d) => ({
+          drugId: d.drugId,
+          name: d.name,
+          brandName: d.brandName,
+          manufacturer: d.manufacturer,
+          pieceName: d.pieceName,
+          specifications: d.specifications ?? "",
+          remarks: d.remarks ?? "",
+          lasa: !!d.lasa,
+          dda: !!d.dda,
+          packages: (await getPackages(ctx, d._id)).map((p) => ({
+            barcode: p.barcode,
+            qtyPerUnit: p.qtyPerUnit,
+            baseUnit: p.baseUnit,
+            unitCount: p.unitCount,
+          })),
+        })),
+      ),
+    };
+  },
+});
+
 type ApplyResult = { failure: string | null; skippedBarcodes: string[] };
 
 function failureMessage(error: unknown): string {
@@ -152,7 +234,20 @@ function failureMessage(error: unknown): string {
   return "Could not be saved";
 }
 
-// Only Specifications/Remarks from the file (undefined ones are kept). Everything else is untouched.
+// Unmarking a drug also removes its look-alike links; returns them for the activity log
+async function unlinkIfUnmarked(ctx: MutationCtx, existing: Doc<"drugs"> | null, lasa: boolean | undefined) {
+  if (!existing?.lasa || lasa !== false) return undefined;
+  const before = (await getLookAlikes(ctx, existing._id)).map((d) => `${d.name} (${d.drugId})`);
+  await clearLookAlikes(ctx, existing._id);
+  return { before, after: [] };
+}
+
+// A mark to save: the file's value when given, otherwise the saved one. false is stored as "not set".
+function lasaToSave(fromFile: boolean | undefined, saved: boolean | undefined) {
+  return (fromFile ?? saved) || undefined;
+}
+
+// Only Specifications/Remarks and the mark from the file (undefined ones are kept). Everything else is untouched.
 async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promise<ApplyResult> {
   const existing = await findDrug(ctx, d.drugId);
   if (!existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
@@ -160,8 +255,11 @@ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promis
     const notes = {
       specifications: cleanNote(d.specifications ?? existing.specifications, "Specifications"),
       remarks: cleanNote(d.remarks ?? existing.remarks, "Remarks"),
+      lasa: lasaToSave(d.lasa, existing.lasa),
+      dda: lasaToSave(d.dda, existing.dda),
     };
     await ctx.db.patch("drugs", existing._id, { ...notes, updatedAt: new Date().toISOString() });
+    const lookAlikes = await unlinkIfUnmarked(ctx, existing, d.lasa);
     const packages = await getPackages(ctx, existing._id);
     await logDrugImport(ctx, actor, {
       drug: existing,
@@ -169,6 +267,7 @@ async function applyNotes(ctx: MutationCtx, d: ImportDrug, actor: Actor): Promis
       beforePackages: packages,
       after: { ...existing, ...notes },
       afterPackages: packages.map((p) => ({ ...p, packageId: p._id })),
+      lookAlikes,
     });
     return { failure: null, skippedBarcodes: [] };
   } catch (error) {
@@ -189,8 +288,9 @@ async function applyDrug(
   if (action === "create" && existing) return { failure: "Drug ID already exists", skippedBarcodes: [] };
   if (action === "update" && !existing) return { failure: "Drug no longer exists", skippedBarcodes: [] };
 
+  // A barcode that belongs to another drug is dropped, but its package form is still added without a barcode
   const clashes = new Set((await findClashes(ctx, d.packages, existing?._id)).map((c) => c.barcode));
-  const usable = d.packages.filter((p) => !clashes.has(p.barcode));
+  const usable = d.packages.map((p) => (clashes.has(p.barcode) ? { ...p, barcode: "" } : p));
   const current = existing ? await getPackages(ctx, existing._id) : [];
   const currentByKey = new Map(current.map((p) => [packageMatchKey(p), p]));
 
@@ -208,8 +308,12 @@ async function applyDrug(
       imageIds: p.imageIds,
     };
   });
+  // Two clashing barcodes with the same form become one form without a barcode
+  const added = new Set(currentByKey.keys());
   for (const p of usable) {
-    if (currentByKey.has(packageMatchKey(p)) || merged.length >= MAX_PACKAGES_PER_DRUG) continue;
+    const key = packageMatchKey(p);
+    if (added.has(key) || merged.length >= MAX_PACKAGES_PER_DRUG) continue;
+    added.add(key);
     merged.push({ ...p, stock: 0, imageIds: [] });
   }
 
@@ -223,6 +327,8 @@ async function applyDrug(
       imageId: existing?.imageId,
       specifications: d.specifications ?? existing?.specifications,
       remarks: d.remarks ?? existing?.remarks,
+      lasa: lasaToSave(d.lasa, existing?.lasa),
+      dda: lasaToSave(d.dda, existing?.dda),
       packages: merged,
     }, { allowNoPackages: true });
     const fields = {
@@ -233,11 +339,14 @@ async function applyDrug(
       pieceName: input.pieceName,
       specifications: input.specifications,
       remarks: input.remarks,
+      lasa: input.lasa,
+      dda: input.dda,
       searchText: buildSearchText(input),
       updatedAt: new Date().toISOString(),
     };
     const drugRef = existing ? existing._id : await ctx.db.insert("drugs", fields);
     if (existing) await ctx.db.patch("drugs", existing._id, fields);
+    const lookAlikes = await unlinkIfUnmarked(ctx, existing, d.lasa);
     const saved: PackageInput[] = [];
     for (const p of input.packages) {
       const form = { qtyPerUnit: p.qtyPerUnit, baseUnit: p.baseUnit, unitCount: p.unitCount };
@@ -262,6 +371,7 @@ async function applyDrug(
       beforePackages: current,
       after: input,
       afterPackages: saved,
+      lookAlikes,
     });
     return { failure: null, skippedBarcodes: [...clashes] };
   } catch (error) {

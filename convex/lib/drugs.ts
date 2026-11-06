@@ -2,6 +2,7 @@ import { ConvexError } from "convex/values";
 import type { MutationCtx, QueryCtx } from "../_generated/server";
 import type { Doc, Id } from "../_generated/dataModel";
 import { normalizeBarcode, type BaseUnit } from "./barcode";
+import { clearLookAlikes, getLookAlikes } from "./lasa";
 
 export const MAX_PACKAGING_IMAGES = 10;
 export const MAX_PACKAGES_PER_DRUG = 20;
@@ -26,6 +27,8 @@ export type DrugInput = {
   // Free text; undefined or blank means none
   specifications?: string;
   remarks?: string;
+  lasa?: boolean;
+  dda?: boolean;
   packages: PackageInput[];
 };
 
@@ -151,16 +154,18 @@ async function resolveImages(ctx: QueryCtx, ids: Id<"_storage">[]) {
   return await Promise.all(ids.map(async (id) => ({ id, url: await ctx.storage.getUrl(id) })));
 }
 
-// Adds image URLs and package forms (each with its packaging pictures) for display
-export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
-  const [imageUrl, rawPackages] = await Promise.all([
+// Adds image URLs, package forms (each with its packaging pictures) and look-alike drugs for display
+// Pass includeLookAlikes=false when the caller already knows the links (saves reads)
+export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">, includeLookAlikes = true) {
+  const [imageUrl, rawPackages, lookAlikes] = await Promise.all([
     drug.imageId ? ctx.storage.getUrl(drug.imageId) : Promise.resolve(null),
     getPackages(ctx, drug._id),
+    drug.lasa && includeLookAlikes ? getLookAlikes(ctx, drug._id) : Promise.resolve([]),
   ]);
   const packages = await Promise.all(
     rawPackages.map(async (p) => ({ ...p, images: await resolveImages(ctx, p.imageIds) })),
   );
-  return { ...drug, imageUrl, packages };
+  return { ...drug, imageUrl, packages, lookAlikes };
 }
 
 // Puts drugs that have package forms first; the original order is kept within each group
@@ -172,6 +177,7 @@ export function packagesFirst<T extends { packages: unknown[] }>(drugs: T[]): T[
 export async function deleteDrug(ctx: MutationCtx, drug: Doc<"drugs">) {
   const packages = await getPackages(ctx, drug._id);
   for (const p of packages) await ctx.db.delete("drugPackages", p._id);
+  await clearLookAlikes(ctx, drug._id);
   await deleteFiles(ctx, filesOf(drug, packages));
   await ctx.db.delete("drugs", drug._id);
 }

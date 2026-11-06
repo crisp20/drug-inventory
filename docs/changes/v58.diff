@@ -1,0 +1,127 @@
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 978882c..9cdf6a1 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v57");
++    expect(CHANGE_ENTRIES[0].version).toBe("v58");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/look-alike-picker.tsx b/src/pages/inventory/_components/look-alike-picker.tsx
+index 2aafb8d..bca269d 100644
+--- a/src/pages/inventory/_components/look-alike-picker.tsx
++++ b/src/pages/inventory/_components/look-alike-picker.tsx
+@@ -1,11 +1,13 @@
+-import { useState } from "react";
++import { useRef, useState, type KeyboardEvent } from "react";
+ import { useQuery } from "convex/react";
+ import { Plus, X } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import DrugImage from "@/components/drug-image.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
++import { cn } from "@/lib/utils.ts";
+ 
+ export type LookAlikeOption = { _id: Id<"drugs">; drugId: string; name: string; brandName: string };
+ 
+@@ -26,9 +28,44 @@ export default function LookAlikePicker({ selfId, value, onChange }: Props) {
+   const chosen = new Set(value.map((d) => d._id));
+   const options = (results ?? []).filter((d) => d._id !== selfId && !chosen.has(d._id)).slice(0, 8);
+ 
++  const [active, setActive] = useState(0);
++  const listRef = useRef<HTMLDivElement>(null);
++  // Keep the highlight inside the list when results shrink
++  const activeIndex = Math.min(active, Math.max(options.length - 1, 0));
++
+   const add = (d: LookAlikeOption) => {
+     onChange([...value, { _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName }]);
+     setSearch("");
++    setActive(0);
++  };
++
++  const moveTo = (index: number) => {
++    setActive(index);
++    listRef.current?.querySelector(`[data-index="${index}"]`)?.scrollIntoView({ block: "nearest" });
++  };
++
++  // Arrow keys move the highlight, Enter adds it (and never submits the drug form)
++  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
++    if (e.nativeEvent.isComposing) return;
++    if (e.key === "Enter") {
++      e.preventDefault();
++      if (term && options.length > 0) add(options[activeIndex]);
++      return;
++    }
++    if (e.key === "Escape" && search) {
++      e.preventDefault();
++      e.stopPropagation();
++      setSearch("");
++      return;
++    }
++    if (!term || options.length === 0) return;
++    if (e.key === "ArrowDown") {
++      e.preventDefault();
++      moveTo((activeIndex + 1) % options.length);
++    } else if (e.key === "ArrowUp") {
++      e.preventDefault();
++      moveTo((activeIndex - 1 + options.length) % options.length);
++    }
+   };
+ 
+   return (
+@@ -57,12 +94,16 @@ export default function LookAlikePicker({ selfId, value, onChange }: Props) {
+       {value.length < MAX_LINKS && (
+         <Input
+           value={search}
+-          onChange={(e) => setSearch(e.target.value)}
++          onChange={(e) => {
++            setSearch(e.target.value);
++            setActive(0);
++          }}
++          onKeyDown={handleKeyDown}
+           placeholder="Search a similar drug by name, brand or Drug ID"
+         />
+       )}
+       {term && (
+-        <div className="max-h-56 overflow-y-auto rounded-lg border">
++        <div ref={listRef} className="max-h-72 overflow-y-auto rounded-lg border">
+           {results === undefined ? (
+             <div className="flex justify-center p-3">
+               <Spinner />
+@@ -70,17 +111,25 @@ export default function LookAlikePicker({ selfId, value, onChange }: Props) {
+           ) : options.length === 0 ? (
+             <p className="p-3 text-sm text-muted-foreground">No other drugs match “{term}”.</p>
+           ) : (
+-            options.map((d) => (
++            options.map((d, i) => (
+               <button
+                 key={d._id}
+                 type="button"
++                data-index={i}
+                 onClick={() => add(d)}
+-                className="flex w-full cursor-pointer items-center gap-2 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted"
++                onMouseMove={() => setActive(i)}
++                className={cn(
++                  "flex w-full cursor-pointer items-center gap-3 border-b px-3 py-2 text-left text-sm last:border-b-0",
++                  i === activeIndex && "bg-muted",
++                )}
+               >
+                 <Plus className="size-4 shrink-0 text-primary" />
+-                <span className="min-w-0 flex-1 truncate">
+-                  <span className="font-medium">{d.name}</span>
+-                  {d.brandName && <span className="text-muted-foreground"> · {d.brandName}</span>}
++                <DrugImage url={d.imageUrl} alt={d.name} className="size-12 shrink-0" />
++                <span className="min-w-0 flex-1">
++                  <span className="block truncate font-medium">{d.name}</span>
++                  {d.brandName && (
++                    <span className="block truncate text-xs text-muted-foreground">{d.brandName}</span>
++                  )}
+                 </span>
+                 <span className="font-mono text-xs text-muted-foreground">{d.drugId}</span>
+               </button>

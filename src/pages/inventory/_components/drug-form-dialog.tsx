@@ -35,6 +35,8 @@ import {
   type DrugFormValues,
 } from "../_lib/drug-form-schema.ts";
 import ImagePicker, { type PickedImage } from "./image-picker.tsx";
+import LasaFields from "./lasa-fields.tsx";
+import DdaField from "./dda-field.tsx";
 import PackageRowsEditor from "./package-rows-editor.tsx";
 
 type Props = {
@@ -53,6 +55,9 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
       pieceName: DEFAULT_PIECE_NAME,
       specifications: "",
       remarks: "",
+      lasa: false,
+      lookAlikes: [],
+      dda: false,
       packages: [],
     };
   }
@@ -64,6 +69,9 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
     pieceName: drug.pieceName,
     specifications: drug.specifications ?? "",
     remarks: drug.remarks ?? "",
+    lasa: !!drug.lasa,
+    lookAlikes: drug.lookAlikes,
+    dda: !!drug.dda,
     packages: drug.packages.map((p) => ({
       packageId: p._id,
       barcode: p.barcode,
@@ -89,9 +97,10 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
   const imageChanged = (mainImage[0]?.id ?? null) !== (drug?.imageId ?? null);
   useUnsavedChanges(form.formState.isDirty || imageChanged);
 
-  const onSubmit = async (values: DrugFormValues) => {
+  const onSubmit = async ({ lookAlikes, ...values }: DrugFormValues) => {
     const payload = {
       ...values,
+      lookAlikeIds: values.lasa ? lookAlikes.map((d) => d._id) : [],
       imageId: mainImage[0]?.id,
       packages: values.packages.map(({ images, ...p }) => ({ ...p, imageIds: images.map((i) => i.id) })),
     };
@@ -181,6 +190,8 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
           {noteField("specifications", "Specifications", "e.g. White round tablet, scored")}
           {noteField("remarks", "Remarks", "e.g. Store below 25°C")}
         </div>
+        <LasaFields control={form.control} selfId={drug?._id} />
+        <DdaField control={form.control} />
         <div className="space-y-2">
           <div className="text-sm font-medium">Drug picture</div>
           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>

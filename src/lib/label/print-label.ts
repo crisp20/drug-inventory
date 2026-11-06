@@ -1,6 +1,24 @@
 import { buildCpclJob, ditherToMono, toGray } from "./bitmap.ts";
 import { sendToPrinter } from "./bluetooth-printer.ts";
-import { LABEL_HEIGHT, LABEL_WIDTH } from "./render-label.ts";
+import { DOTS_PER_MM, type LabelOrientation } from "./label-sizes.ts";
+
+// Returns the label turned for the chosen direction. Landscape turns it a quarter
+// turn clockwise; portrait returns the drawing unchanged.
+export function orientCanvas(
+  canvas: HTMLCanvasElement,
+  orientation: LabelOrientation,
+): HTMLCanvasElement {
+  if (orientation === "portrait") return canvas;
+  const out = document.createElement("canvas");
+  out.width = canvas.height;
+  out.height = canvas.width;
+  const ctx = out.getContext("2d");
+  if (!ctx) throw new Error("This browser cannot draw labels");
+  ctx.translate(out.width, 0);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(canvas, 0, 0);
+  return out;
+}
 
 // Sends a drawn label to the Bluetooth printer
 export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
@@ -11,7 +29,7 @@ export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
   await sendToPrinter(buildCpclJob(mono, canvas.width, canvas.height));
 }
 
-// Fallback: the normal print window, sized to one 40mm x 60mm label
+// Fallback: the normal print window, with the page sized to the (turned) label
 export function printCanvasWindow(canvas: HTMLCanvasElement): void {
   const frame = document.createElement("iframe");
   frame.style.position = "fixed";
@@ -25,8 +43,8 @@ export function printCanvasWindow(canvas: HTMLCanvasElement): void {
     frame.remove();
     throw new Error("Could not open the print window");
   }
-  const mmW = LABEL_WIDTH / 8;
-  const mmH = LABEL_HEIGHT / 8;
+  const mmW = canvas.width / DOTS_PER_MM;
+  const mmH = canvas.height / DOTS_PER_MM;
   doc.open();
   doc.write(
     `<!doctype html><html><head><style>@page{size:${mmW}mm ${mmH}mm;margin:0}html,body{margin:0;padding:0}img{display:block;width:${mmW}mm;height:${mmH}mm;image-rendering:pixelated}</style></head><body><img src="${canvas.toDataURL("image/png")}"></body></html>`,

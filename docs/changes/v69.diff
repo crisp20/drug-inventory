@@ -1,0 +1,286 @@
+diff --git a/src/components/stock/label-print-dialog.tsx b/src/components/stock/label-print-dialog.tsx
+index d2a91a4..cb1101e 100644
+--- a/src/components/stock/label-print-dialog.tsx
++++ b/src/components/stock/label-print-dialog.tsx
+@@ -62,24 +62,45 @@ type Status =
+   | { state: "printed" }
+   | { state: "failed"; message: string };
+ 
+-type Props = {
++type Options = {
++  title?: string;
++  // Print as soon as the label is drawn if a Bluetooth printer is still connected
++  autoPrint?: boolean;
++};
++
++type Props = Options & {
+   data: LabelData | null;
+   onClose: () => void;
+ };
+ 
+-// Shown after a canister Stock Out is recorded: previews the label and prints it.
+-// Prints straight away when a Bluetooth printer is already connected.
+-export default function LabelPrintDialog({ data, onClose }: Props) {
++// Shown after a canister Stock Out is recorded (or for a reprint): previews the label and prints it.
++export default function LabelPrintDialog({
++  data,
++  onClose,
++  title = "Stock Out recorded. Print the label",
++  autoPrint = true,
++}: Props) {
+   return (
+     <Dialog open={data !== null} onOpenChange={(open) => !open && onClose()}>
+       <DialogContent className="sm:max-w-md">
+-        {data && <LabelPrinter key={JSON.stringify(data)} data={data} />}
++        {data && (
++          <LabelPrinter
++            key={JSON.stringify(data)}
++            data={data}
++            title={title}
++            autoPrint={autoPrint}
++          />
++        )}
+       </DialogContent>
+     </Dialog>
+   );
+ }
+ 
+-function LabelPrinter({ data }: { data: LabelData }) {
++function LabelPrinter({
++  data,
++  title,
++  autoPrint,
++}: Required<Options> & { data: LabelData }) {
+   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const [preview, setPreview] = useState<string | null>(null);
+   const [status, setStatus] = useState<Status>({ state: "drawing" });
+@@ -88,7 +109,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+     loadLabelOrientation(sizeId),
+   );
+   // Only the first drawing prints by itself; switching size or direction just redraws the preview
+-  const autoPrinted = useRef(false);
++  const autoPrinted = useRef(!autoPrint);
+   const size = LABEL_SIZES[sizeId];
+   const canBluetooth = bluetoothSupported();
+ 
+@@ -179,7 +200,7 @@ function LabelPrinter({ data }: { data: LabelData }) {
+   return (
+     <>
+       <DialogHeader>
+-        <DialogTitle>Stock Out recorded. Print the label</DialogTitle>
++        <DialogTitle>{title}</DialogTitle>
+         <DialogDescription>
+           {status.state === "printed"
+             ? `Label printed${name ? ` on ${name}` : ""}.`
+@@ -251,8 +272,9 @@ function LabelPrinter({ data }: { data: LabelData }) {
+ 
+       {status.state === "failed" && (
+         <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+-          {status.message} The Stock Out is saved. Try again or use the print
+-          window.
++          {status.message}
++          {autoPrint ? " The Stock Out is saved." : ""} Try again or use the
++          print window.
+         </p>
+       )}
+ 
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index ab1a1b1..46153df 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -1,7 +1,7 @@
+ import { useState } from "react";
+ import { usePaginatedQuery } from "convex/react";
+ import { format } from "date-fns";
+-import { History, Undo2 } from "lucide-react";
++import { History, Printer, Undo2 } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
+ import type { MovementKind } from "@/convex/lib/stock.ts";
+@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { cn } from "@/lib/utils.ts";
+ import UndoMovementDialog from "./undo-movement-dialog.tsx";
++import ReprintLabelDialog from "./reprint-label-dialog.tsx";
+ 
+ const PAGE_SIZE = 25;
+ 
+@@ -67,6 +68,9 @@ export default function MovementLog({
+   const isAdmin =
+     currentUser?.role === "admin" && currentUser.status === "active";
+   const [undoing, setUndoing] = useState<Doc<"stockMovements"> | null>(null);
++  const [reprinting, setReprinting] = useState<Doc<"stockMovements"> | null>(
++    null,
++  );
+   const mixed = kind === undefined;
+   const label = kind ? KIND_LABEL[kind] : "Stock In or Stock Out";
+ 
+@@ -197,6 +201,17 @@ export default function MovementLog({
+               <div className="font-medium text-foreground">{m.userName}</div>
+               <div>{format(new Date(m.occurredAt), "d MMM yyyy")}</div>
+               <div>{format(new Date(m.occurredAt), "h:mm a")}</div>
++              {m.canister && !m.undo && (
++                <Button
++                  variant="ghost"
++                  size="sm"
++                  className="h-7 gap-1 px-2 text-xs text-primary hover:text-primary"
++                  onClick={() => setReprinting(m)}
++                >
++                  <Printer className="size-3.5" />
++                  Reprint label
++                </Button>
++              )}
+               {isAdmin && !m.undo && (
+                 <Button
+                   variant="ghost"
+@@ -222,6 +237,10 @@ export default function MovementLog({
+         </Button>
+       )}
+       <UndoMovementDialog movement={undoing} onClose={() => setUndoing(null)} />
++      <ReprintLabelDialog
++        movement={reprinting}
++        onClose={() => setReprinting(null)}
++      />
+     </div>
+   );
+ }
+diff --git a/src/lib/label/label-data.ts b/src/lib/label/label-data.ts
+index 4f58fd9..2bef257 100644
+--- a/src/lib/label/label-data.ts
++++ b/src/lib/label/label-data.ts
+@@ -42,6 +42,36 @@ export function initialsOf(name: string | undefined): string {
+   return letters.toUpperCase();
+ }
+ 
++// The saved parts of a canister Stock Out that a reprinted label needs
++export type ReprintSource = {
++  drugCode: string;
++  brandName: string;
++  drugName: string;
++  userName: string;
++  // ISO time of the original Stock Out
++  occurredAt: string;
++  canister: { batch: string; expiry: string; type: number };
++};
++
++// Rebuilds the label of an earlier fill: initials and fill date are the original ones
++export function labelFromMovement(
++  m: ReprintSource,
++  imageUrl: string | null,
++): LabelData {
++  return {
++    drugId: m.drugCode,
++    brandName: m.brandName,
++    name: m.drugName,
++    batch: m.canister.batch,
++    expiry: m.canister.expiry,
++    canisterType: m.canister.type,
++    filledBy: initialsOf(m.userName),
++    fillDate: fillDateCode(new Date(m.occurredAt)),
++    qrText: m.drugCode,
++    imageUrl,
++  };
++}
++
+ // "2028-09-09" -> "2028/09/09"
+ export function formatLabelDate(day: string): string {
+   return day.replaceAll("-", "/");
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 4978474..3ef54fc 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -10,6 +10,7 @@ import {
+   fillDateCode,
+   formatLabelDate,
+   initialsOf,
++  labelFromMovement,
+ } from "./label-data.ts";
+ import {
+   isLabelOrientation,
+@@ -41,6 +42,33 @@ describe("label text", () => {
+     expect(canisterTypeLabel(0.25)).toBe("Quarter");
+     expect(formatLabelDate("2028-09-09")).toBe("2028/09/09");
+   });
++
++  it("rebuilds a reprint from the saved fill, keeping the original initials and date", () => {
++    const occurredAt = new Date(2026, 10, 3, 14, 30).toISOString();
++    const label = labelFromMovement(
++      {
++        drugCode: "32",
++        brandName: "Abilify",
++        drugName: "Aripiprazole 5mg",
++        userName: "Hubert Suen",
++        occurredAt,
++        canister: { batch: "PW5322", expiry: "2028-09-09", type: 0.5 },
++      },
++      null,
++    );
++    expect(label).toEqual({
++      drugId: "32",
++      brandName: "Abilify",
++      name: "Aripiprazole 5mg",
++      batch: "PW5322",
++      expiry: "2028-09-09",
++      canisterType: 0.5,
++      filledBy: "HS",
++      fillDate: "261103",
++      qrText: "32",
++      imageUrl: null,
++    });
++  });
+ });
+ 
+ describe("label sizes", () => {
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 46886ef..85f9f60 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v68");
++    expect(CHANGE_ENTRIES[0].version).toBe("v69");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/src/components/stock/reprint-label-dialog.tsx b/src/components/stock/reprint-label-dialog.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/stock/reprint-label-dialog.tsx
+@@ -0,0 +1,34 @@
++import { useQuery } from "convex/react";
++import { api } from "@/convex/_generated/api.js";
++import type { Doc } from "@/convex/_generated/dataModel.d.ts";
++import { labelFromMovement } from "@/lib/label/label-data.ts";
++import LabelPrintDialog from "./label-print-dialog.tsx";
++
++type Props = {
++  movement: Doc<"stockMovements"> | null;
++  onClose: () => void;
++};
++
++// Reprints the label of an earlier canister Stock Out. Never prints by itself,
++// so the size and direction can be checked first.
++export default function ReprintLabelDialog({ movement, onClose }: Props) {
++  // The picture isn't saved on the entry, so look up the drug (skipped while closed)
++  const drug = useQuery(
++    api.drugs.get,
++    movement?.canister ? { id: movement.drugRef } : "skip",
++  );
++  const canister = movement?.canister;
++  const data =
++    movement && canister && drug !== undefined
++      ? labelFromMovement({ ...movement, canister }, drug?.imageUrl ?? null)
++      : null;
++
++  return (
++    <LabelPrintDialog
++      data={data}
++      onClose={onClose}
++      title="Reprint label"
++      autoPrint={false}
++    />
++  );
++}

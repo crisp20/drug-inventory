@@ -60,8 +60,15 @@ export const checkPhotos = query({
           .withIndex("by_drugId", (q) => q.eq("drugId", drugId.trim()))
           .first();
         return drug
-          ? { drugId, found: true as const, name: drug.name, hasPhoto: !!drug.imageId }
-          : { drugId, found: false as const, name: "", hasPhoto: false };
+          ? {
+              drugId,
+              found: true as const,
+              name: drug.name,
+              hasPhoto: !!drug.imageId,
+              // Current picture, so the admin can compare it with the new one
+              photoUrl: drug.imageId ? await ctx.storage.getUrl(drug.imageId) : null,
+            }
+          : { drugId, found: false as const, name: "", hasPhoto: false, photoUrl: null };
       }),
     );
   },

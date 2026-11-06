@@ -45,6 +45,9 @@ describe("drug photos", () => {
 
     const first = await store();
     await owner.mutation(api.drugPhotos.setPhotos, { items: [{ drugId: "32", storageId: first }] });
+    const [withPhoto] = await owner.query(api.drugPhotos.checkPhotos, { drugIds: ["32"] });
+    expect(withPhoto.hasPhoto).toBe(true);
+    expect(withPhoto.photoUrl).toEqual(expect.any(String));
     const second = await store();
     const orphan = await store();
     const res = await owner.mutation(api.drugPhotos.setPhotos, {

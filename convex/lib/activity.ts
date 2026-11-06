@@ -101,6 +101,31 @@ export function diffDrugFields(
   return changes;
 }
 
+export type LookAlikeChange = { before: string[]; after: string[] };
+
+// The Look Alike, Sound Alike mark and its linked drugs, as activity changes
+export function diffLasa(
+  beforeMark: boolean | undefined,
+  afterMark: boolean | undefined,
+  links: LookAlikeChange,
+): Change[] {
+  const changes: Change[] = [];
+  const yesNo = (b: boolean | undefined) => (b ? "Yes" : "No");
+  if (!!beforeMark !== !!afterMark) {
+    changes.push({ field: "Look Alike, Sound Alike", before: yesNo(beforeMark), after: yesNo(afterMark) });
+  }
+  const old = links.before.join("; ");
+  const now = links.after.join("; ");
+  if (old !== now) changes.push({ field: "Look-alike drugs", before: old, after: now });
+  return changes;
+}
+
+// The Dangerous Drug (DDA) mark, as an activity change
+export function diffDda(beforeMark: boolean | undefined, afterMark: boolean | undefined): Change[] {
+  if (!!beforeMark === !!afterMark) return [];
+  return [{ field: "Dangerous Drug (DDA)", before: beforeMark ? "Yes" : "No", after: afterMark ? "Yes" : "No" }];
+}
+
 type PackageLike = Pick<
   PackageInput,
   "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount"
@@ -165,15 +190,21 @@ function pictureDetail(added: number, removed: number) {
 
 type DrugSave = {
   drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
-  before: (DrugFields & { imageId?: Id<"_storage"> }) | null;
+  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean }) | null;
   beforePackages: SavedPackage[];
-  after: DrugFields & { imageId?: Id<"_storage"> };
+  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean };
   afterPackages: PackageInput[];
+  // The import only sends this when unmarking removed links
+  lookAlikes?: LookAlikeChange;
 };
 
 // Activity entries for a medicine saved from the Inventory form
 export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
   const { drug, before, after } = s;
+  const lasaChanges = [
+    ...(s.lookAlikes ? diffLasa(before?.lasa, after.lasa, s.lookAlikes) : []),
+    ...diffDda(before?.dda, after.dda),
+  ];
   if (!before) {
     await logActivity(ctx, actor, {
       category: "medicine",
@@ -183,12 +214,12 @@ export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
       detail: `${plural(s.afterPackages.length, "package form")}: ${s.afterPackages
         .map((p) => `${packageLabel(p)} (stock ${p.stock})`)
         .join("; ")}`,
-      changes: diffDrugFields(null, after),
+      changes: [...diffDrugFields(null, after), ...lasaChanges],
     });
     return;
   }
 
-  const fieldChanges = diffDrugFields(before, after);
+  const fieldChanges = [...diffDrugFields(before, after), ...lasaChanges];
   if (fieldChanges.length > 0) {
     await logActivity(ctx, actor, {
       category: "medicine",
@@ -274,7 +305,11 @@ export async function logDrugImport(
   s: DrugSave,
 ) {
   const { drug, before, after } = s;
-  const changes = diffDrugFields(before, after);
+  const changes = [
+    ...diffDrugFields(before, after),
+    ...diffLasa(before?.lasa, after.lasa, s.lookAlikes ?? { before: [], after: [] }),
+    ...diffDda(before?.dda, after.dda),
+  ];
   const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
   for (const p of s.afterPackages) {
     const old = p.packageId ? byId.get(p.packageId) : undefined;

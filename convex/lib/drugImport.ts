@@ -24,6 +24,10 @@ export type ImportDrug = {
   // (column not in the file, or the admin chose to keep the saved text).
   specifications?: string;
   remarks?: string;
+  // Look Alike, Sound Alike mark from the file. Undefined = leave the saved mark alone.
+  lasa?: boolean;
+  // Dangerous Drug (DDA) mark from the file. Undefined = leave the saved mark alone.
+  dda?: boolean;
   // First spreadsheet row of this drug (1 = header row)
   row: number;
   packages: ImportPackage[];
@@ -34,6 +38,20 @@ export type NoteKey = "specifications" | "remarks";
 export const NOTE_FIELDS: ReadonlyArray<{ key: NoteKey; label: string; aliases: string[] }> = [
   { key: "specifications", label: "Specifications", aliases: ["specifications", "specification", "specs", "spec"] },
   { key: "remarks", label: "Remarks", aliases: ["remarks", "remark", "notes", "note", "comments", "comment"] },
+];
+
+// Optional Yes/No column for the Look Alike, Sound Alike mark
+export const LASA_COLUMN = "lasa";
+const LASA_ALIASES = ["lasa", "lookalikesoundalike", "lookalike", "soundalike", "lookalikesoundalikelasa"];
+
+// Optional Yes/No column for the Dangerous Drug (DDA) mark
+export const DDA_COLUMN = "dda";
+const DDA_ALIASES = ["dda", "dangerousdrug", "dangerousdrugs", "dangerousdrugdda"];
+
+const OPTIONAL_COLUMNS: ReadonlyArray<{ key: string; aliases: string[] }> = [
+  ...NOTE_FIELDS,
+  { key: LASA_COLUMN, aliases: LASA_ALIASES },
+  { key: DDA_COLUMN, aliases: DDA_ALIASES },
 ];
 
 export type ImportProblem = { row: number; drugId: string; name: string; message: string };
@@ -55,8 +73,9 @@ export const COLUMNS = {
 
 const REQUIRED = Object.values(COLUMNS);
 
+// Drops spaces and punctuation so "Look Alike, Sound Alike" and "look_alike" both match
 export function normalizeHeader(header: string): string {
-  return header.trim().toLowerCase().replace(/[\s_-]+/g, "");
+  return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function cellText(cell: unknown): string {
@@ -73,10 +92,10 @@ export function sheetToRecords(rows: unknown[][]): { records: SheetRecord[]; mis
     const key = normalizeHeader(cellText(h));
     if (key && !columnIndex.has(key)) columnIndex.set(key, i);
   });
-  // Optional note columns: accept common header variations, stored under the canonical key
-  for (const note of NOTE_FIELDS) {
-    const found = note.aliases.find((a) => columnIndex.has(a));
-    if (found !== undefined && !columnIndex.has(note.key)) columnIndex.set(note.key, columnIndex.get(found) ?? 0);
+  // Optional columns: accept common header variations, stored under the canonical key
+  for (const col of OPTIONAL_COLUMNS) {
+    const found = col.aliases.find((a) => columnIndex.has(a));
+    if (found !== undefined && !columnIndex.has(col.key)) columnIndex.set(col.key, columnIndex.get(found) ?? 0);
   }
   const missingColumns = REQUIRED.filter((c) => !columnIndex.has(c));
   const records: SheetRecord[] = [];
@@ -137,6 +156,31 @@ function cleanManufacturer(raw: string) {
 function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
   if (!(key in rows[0].values)) return undefined;
   return rows.map((r) => r.values[key] ?? "").find((v) => v !== "") ?? "";
+}
+
+// "Yes"/"No" and common variations. null = not readable.
+export function parseYesNo(raw: string): boolean | null {
+  const v = raw.trim().toLowerCase();
+  if (["yes", "y", "true", "1", "x"].includes(v)) return true;
+  if (["no", "n", "false", "0"].includes(v)) return false;
+  return null;
+}
+
+// First non-blank Yes/No cell of a mark column across a drug's rows. Blank or absent = leave alone.
+function markOf(
+  rows: SheetRecord[],
+  column: string,
+  label: string,
+  report: (row: number, message: string) => void,
+): boolean | undefined {
+  const r = rows.find((x) => (x.values[column] ?? "") !== "");
+  if (!r) return undefined;
+  const value = parseYesNo(r.values[column]);
+  if (value === null) {
+    report(r.row, `${label} value "${r.values[column]}" is not Yes or No, mark left unchanged`);
+    return undefined;
+  }
+  return value;
 }
 
 // Which drugs to import: with at least one barcode/package form, without any, or both
@@ -219,6 +263,8 @@ export function buildImportDrugs(records: SheetRecord[], forms: string[], filter
       dosageForm: dosageFormOf(first),
       specifications: noteOf(rows, "specifications"),
       remarks: noteOf(rows, "remarks"),
+      lasa: markOf(rows, LASA_COLUMN, "Look Alike, Sound Alike", report),
+      dda: markOf(rows, DDA_COLUMN, "Dangerous Drug (DDA)", report),
       row: first.row,
       packages: [...packages.values()],
     });
@@ -240,6 +286,8 @@ export type ExistingDrug = {
   pieceName: string;
   specifications?: string;
   remarks?: string;
+  lasa?: boolean;
+  dda?: boolean;
   packages: ImportPackage[];
 };
 
@@ -268,6 +316,24 @@ function diffNotes(file: ImportDrug, current: ExistingDrug): NoteChange[] {
   return changes;
 }
 
+// A Look Alike, Sound Alike difference. Marking (file says Yes) only adds a safety warning, so it is
+// applied without asking (`auto`). Unmarking also removes the drug's look-alike links, so it is asked.
+export type LasaChange = { current: boolean; file: boolean; auto: boolean };
+
+function diffLasaMark(file: ImportDrug, current: ExistingDrug): LasaChange | null {
+  if (file.lasa === undefined || file.lasa === !!current.lasa) return null;
+  return { current: !!current.lasa, file: file.lasa, auto: file.lasa };
+}
+
+// A Dangerous Drug (DDA) difference. Marking is applied without asking; unmarking is asked,
+// because it takes the DDA warning off the drug.
+export type DdaChange = LasaChange;
+
+function diffDdaMark(file: ImportDrug, current: ExistingDrug): DdaChange | null {
+  if (file.dda === undefined || file.dda === !!current.dda) return null;
+  return { current: !!current.dda, file: file.dda, auto: file.dda };
+}
+
 // What "Use file" would change. Package forms only in the app are always kept.
 export function diffDrug(file: ImportDrug, current: ExistingDrug) {
   const fields: FieldChange[] = DIFF_FIELDS.filter(
@@ -283,15 +349,20 @@ export function diffDrug(file: ImportDrug, current: ExistingDrug) {
     else if (!sameForm(match, p)) changed.push({ current: match, file: p });
   }
   const detailChanges = fields.length + added.length + changed.length > 0;
+  const lasa = diffLasaMark(file, current);
+  const dda = diffDdaMark(file, current);
+  const askMark = (m: LasaChange | null) => m !== null && !m.auto;
   return {
     fields,
     added,
     changed,
     notes,
+    lasa,
+    dda,
     // Name/brand/manufacturer/pieces or package forms differ (decided with "Keep current"/"Use file")
     detailChanges,
-    // Anything the admin must decide on; auto-filled notes need no decision
-    needsReview: detailChanges || notes.some((n) => !n.auto),
-    hasChanges: detailChanges || notes.length > 0,
+    // Anything the admin must decide on; auto-filled notes and new marks need no decision
+    needsReview: detailChanges || notes.some((n) => !n.auto) || askMark(lasa) || askMark(dda),
+    hasChanges: detailChanges || notes.length > 0 || lasa !== null || dda !== null,
   };
 }

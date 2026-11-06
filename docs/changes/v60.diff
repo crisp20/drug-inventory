@@ -1,0 +1,417 @@
+diff --git a/convex/drugs.test.ts b/convex/drugs.test.ts
+index b3ff1cc..c120783 100644
+--- a/convex/drugs.test.ts
++++ b/convex/drugs.test.ts
+@@ -156,4 +156,15 @@ describe("look alike, sound alike", () => {
+     });
+     expect((await owner.query(api.drugs.get, { id: a }))?.lookAlikes).toEqual([]);
+   });
++
++  it("returns the drug and its look-alikes in full for the warning", async () => {
++    const { owner } = await setup();
++    const b = await owner.mutation(api.drugs.create, other);
++    const a = await owner.mutation(api.drugs.create, { ...drug, lasa: true, lookAlikeIds: [b] });
++    const got = await owner.query(api.drugs.lasaCompare, { id: a });
++    expect(got?.selected.drugId).toBe("PCM500");
++    expect(got?.lookAlikes.map((d) => d.drugId)).toEqual(["PCM650"]);
++    expect(got?.lookAlikes[0].packages).toHaveLength(1);
++    expect(await owner.query(api.drugs.lasaCompare, { id: "bad-id" })).toBeNull();
++  });
+ });
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index e942073..6da2b76 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -21,7 +21,7 @@ import {
+   type PackageInput,
+ } from "./lib/drugs";
+ import { baseUnit } from "./schema/drugs";
+-import { setLookAlikes } from "./lib/lasa";
++import { getLookAlikes, setLookAlikes } from "./lib/lasa";
+ 
+ const MAX_SEARCH_WORDS = 5;
+ const SEARCH_POOL = 150;
+@@ -164,6 +164,24 @@ export const get = query({
+   },
+ });
+ 
++// A Look Alike, Sound Alike drug and its linked drugs in full (pictures, package forms, notes)
++// so staff can compare them side by side before continuing
++export const lasaCompare = query({
++  args: { id: v.string() },
++  handler: async (ctx, args) => {
++    await requireActiveUser(ctx);
++    const id = ctx.db.normalizeId("drugs", args.id);
++    const drug = id ? await ctx.db.get("drugs", id) : null;
++    if (!drug) return null;
++    const links = drug.lasa ? await getLookAlikes(ctx, drug._id) : [];
++    const others = await Promise.all(links.map((l) => ctx.db.get("drugs", l._id)));
++    const [selected, ...lookAlikes] = await Promise.all(
++      [drug, ...others.filter((d): d is Doc<"drugs"> => d !== null)].map((d) => withDetails(ctx, d, false)),
++    );
++    return { selected, lookAlikes };
++  },
++});
++
+ export const create = mutation({
+   args: drugArgs,
+   handler: async (ctx, args) => {
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index 69028e2..1b0c679 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -154,11 +154,12 @@ async function resolveImages(ctx: QueryCtx, ids: Id<"_storage">[]) {
+ }
+ 
+ // Adds image URLs, package forms (each with its packaging pictures) and look-alike drugs for display
+-export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
++// Pass includeLookAlikes=false when the caller already knows the links (saves reads)
++export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">, includeLookAlikes = true) {
+   const [imageUrl, rawPackages, lookAlikes] = await Promise.all([
+     drug.imageId ? ctx.storage.getUrl(drug.imageId) : Promise.resolve(null),
+     getPackages(ctx, drug._id),
+-    drug.lasa ? getLookAlikes(ctx, drug._id) : Promise.resolve([]),
++    drug.lasa && includeLookAlikes ? getLookAlikes(ctx, drug._id) : Promise.resolve([]),
+   ]);
+   const packages = await Promise.all(
+     rawPackages.map(async (p) => ({ ...p, images: await resolveImages(ctx, p.imageIds) })),
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index 802e236..abd832f 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -12,6 +12,7 @@ import {
+ } from "@/components/ui/empty.tsx";
+ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import DrugSearchInput from "@/components/drug-search-input.tsx";
++import LasaWarningDialog from "@/components/lasa/lasa-warning-dialog.tsx";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
+ import { useConfirmDiscard } from "@/hooks/use-unsaved-changes.ts";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+@@ -81,6 +82,11 @@ export default function StockDrugFinder({ children }: Props) {
+   const selection: StockSelection | null =
+     pickedSelection ?? (showAll ? null : match);
+ 
++  // Look Alike, Sound Alike drugs stay locked until staff confirm they checked the pictures
++  const [confirmedDrug, setConfirmedDrug] = useState<string | null>(null);
++  const needsWarning = !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
++  const usable = needsWarning ? null : selection;
++
+   const confirmDiscard = useConfirmDiscard();
+ 
+   // Bumped after each record/cancel so the cursor goes straight back to the search box
+@@ -90,6 +96,7 @@ export default function StockDrugFinder({ children }: Props) {
+     setSearch("");
+     setPicked(null);
+     setShowAll(false);
++    setConfirmedDrug(null);
+     setFocusSignal((n) => n + 1);
+   };
+   // Switching drug or package form throws away a half-filled form, so ask first
+@@ -98,6 +105,7 @@ export default function StockDrugFinder({ children }: Props) {
+     setSearch(value);
+     setPicked(null);
+     setShowAll(false);
++    setConfirmedDrug(null);
+   };
+   const handlePick = async (pkgId: string) => {
+     if (pkgId === selection?.pkg._id || !(await confirmDiscard())) return;
+@@ -160,11 +168,19 @@ export default function StockDrugFinder({ children }: Props) {
+         </div>
+       )}
+       {children({
+-        selection,
+-        barcodeMatched: !!match && selection?.pkg._id === match.pkg._id,
++        selection: usable,
++        barcodeMatched: !!match && usable?.pkg._id === match.pkg._id,
+         term,
+         reset,
+       })}
++      <LasaWarningDialog
++        drugId={needsWarning && selection ? selection.drug._id : null}
++        highlightPackageId={selection?.pkg._id}
++        confirmLabel="Continue with this drug"
++        onConfirm={() => selection && setConfirmedDrug(selection.drug._id)}
++        // Backing out clears the pick so the wrong drug cannot be used by accident
++        onCancel={reset}
++      />
+     </div>
+   );
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 6a25624..dd25ccf 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v59");
++    expect(CHANGE_ENTRIES[0].version).toBe("v60");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/page.tsx b/src/pages/inventory/page.tsx
+index eeafe0a..a97b83f 100644
+--- a/src/pages/inventory/page.tsx
++++ b/src/pages/inventory/page.tsx
+@@ -19,6 +19,7 @@ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
+ import type { DrugWithDetails } from "@/lib/drug-types.ts";
+ import DrugDetailSheet from "./_components/drug-detail-sheet.tsx";
++import LasaWarningDialog from "@/components/lasa/lasa-warning-dialog.tsx";
+ import DrugFormDialog from "./_components/drug-form-dialog.tsx";
+ import DrugRow from "./_components/drug-row.tsx";
+ import ImportDialog from "./_components/import-dialog.tsx";
+@@ -152,6 +153,9 @@ export default function InventoryPage() {
+   const [importOpen, setImportOpen] = useState(false);
+   const [photosOpen, setPhotosOpen] = useState(false);
+   const [lasaOnly, setLasaOnly] = useState(false);
++  // A marked drug waits here until staff tick the warning, then its details open
++  const [pendingLasa, setPendingLasa] = useState<DrugWithDetails | null>(null);
++  const openDrug = (d: DrugWithDetails) => (d.lasa ? setPendingLasa(d) : setSelected(d));
+ 
+   // Keep the open detail panel in sync with live data
+   const live = useQuery(api.drugs.get, selected ? { id: selected._id } : "skip");
+@@ -194,11 +198,20 @@ export default function InventoryPage() {
+           <TriangleAlert /> Look Alike, Sound Alike only
+         </Toggle>
+         {term ? (
+-          <SearchResults term={term} lasaOnly={lasaOnly} onSelect={setSelected} />
++          <SearchResults term={term} lasaOnly={lasaOnly} onSelect={openDrug} />
+         ) : (
+-          <AllDrugs isAdmin={isAdmin} lasaOnly={lasaOnly} onAdd={openAdd} onSelect={setSelected} />
++          <AllDrugs isAdmin={isAdmin} lasaOnly={lasaOnly} onAdd={openAdd} onSelect={openDrug} />
+         )}
+       </div>
++      <LasaWarningDialog
++        drugId={pendingLasa?._id ?? null}
++        confirmLabel="Open drug details"
++        onConfirm={() => {
++          setSelected(pendingLasa);
++          setPendingLasa(null);
++        }}
++        onCancel={() => setPendingLasa(null)}
++      />
+       <DrugDetailSheet
+         drug={shown}
+         isAdmin={isAdmin}
+
+diff --git a/src/components/lasa/lasa-drug-card.tsx b/src/components/lasa/lasa-drug-card.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/lasa/lasa-drug-card.tsx
+@@ -0,0 +1,103 @@
++import type { FunctionReturnType } from "convex/server";
++import type { api } from "@/convex/_generated/api.js";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import DrugNotes from "@/components/drug-notes.tsx";
++import ZoomableDrugImage, { type GallerySlide } from "@/components/zoomable-drug-image.tsx";
++import { cn } from "@/lib/utils.ts";
++
++export type LasaCompareDrug = NonNullable<FunctionReturnType<typeof api.drugs.lasaCompare>>["selected"];
++
++type Props = {
++  drug: LasaCompareDrug;
++  // The chosen drug is outlined; look-alikes are not
++  selected?: boolean;
++  // Package form picked in Stock In / Stock Out, highlighted on the chosen drug
++  highlightPackageId?: string;
++};
++
++// One drug in the look-alike comparison: picture, package form pictures, specifications and remarks
++export default function LasaDrugCard({ drug, selected = false, highlightPackageId }: Props) {
++  // Every picture of this drug, so an enlarged view can swipe through them all
++  const slides: GallerySlide[] = [
++    ...(drug.imageUrl ? [{ url: drug.imageUrl, caption: `${drug.name} · drug picture` }] : []),
++    ...drug.packages.flatMap((p) =>
++      p.images.flatMap((img) => (img.url ? [{ url: img.url, caption: `${drug.name} · ${formatPackageForm(p)}` }] : [])),
++    ),
++  ];
++  const indexOf = (url: string | null) => Math.max(0, slides.findIndex((s) => s.url === url));
++
++  return (
++    <div
++      className={cn(
++        "flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-3",
++        selected && "border-primary ring-2 ring-primary/30",
++      )}
++    >
++      <div
++        className={cn(
++          "text-[11px] font-semibold uppercase tracking-wide",
++          selected ? "text-primary" : "text-destructive",
++        )}
++      >
++        {selected ? "You selected" : "Looks or sounds like"}
++      </div>
++      <ZoomableDrugImage
++        url={drug.imageUrl}
++        alt={drug.name}
++        slides={slides.length ? slides : undefined}
++        startIndex={indexOf(drug.imageUrl)}
++        className="aspect-square w-full"
++      />
++      <div className="min-w-0">
++        <div className="break-words text-base font-bold leading-tight">{drug.name}</div>
++        <div className="break-words text-sm text-muted-foreground">
++          {drug.brandName || "No brand"} · <span className="font-mono">{drug.drugId}</span>
++        </div>
++        {drug.manufacturer && <div className="break-words text-xs text-muted-foreground">{drug.manufacturer}</div>}
++      </div>
++
++      {drug.packages.length > 0 && (
++        <div className="space-y-2">
++          <div className="text-xs font-semibold">Package forms</div>
++          {drug.packages.map((p) => (
++            <div
++              key={p._id}
++              className={cn(
++                "space-y-2 rounded-lg border p-2",
++                p._id === highlightPackageId && "border-primary bg-primary/5",
++              )}
++            >
++              <div className="text-xs">
++                <span className="font-medium">{formatPackageForm(p)}</span>
++                <span className="block truncate font-mono text-muted-foreground">{p.barcode || "No barcode"}</span>
++              </div>
++              {p.images.some((img) => img.url) ? (
++                <div className="flex flex-wrap gap-2">
++                  {p.images.map((img) =>
++                    img.url ? (
++                      <ZoomableDrugImage
++                        key={img.id}
++                        url={img.url}
++                        alt={`${drug.name} packaging`}
++                        slides={slides}
++                        startIndex={indexOf(img.url)}
++                        className="size-20 border"
++                      />
++                    ) : null,
++                  )}
++                </div>
++              ) : (
++                <p className="text-xs italic text-muted-foreground">No package picture</p>
++              )}
++            </div>
++          ))}
++        </div>
++      )}
++
++      <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
++      {!drug.specifications && !drug.remarks && (
++        <p className="text-xs italic text-muted-foreground">No specifications or remarks</p>
++      )}
++    </div>
++  );
++}
+diff --git a/src/components/lasa/lasa-warning-dialog.tsx b/src/components/lasa/lasa-warning-dialog.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/lasa/lasa-warning-dialog.tsx
+@@ -0,0 +1,106 @@
++import { useState } from "react";
++import { useQuery } from "convex/react";
++import { TriangleAlert } from "lucide-react";
++import { api } from "@/convex/_generated/api.js";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import { Button } from "@/components/ui/button.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.tsx";
++import { Skeleton } from "@/components/ui/skeleton.tsx";
++import LasaDrugCard from "./lasa-drug-card.tsx";
++
++type Props = {
++  // The marked drug to warn about; null keeps the dialog closed
++  drugId: Id<"drugs"> | null;
++  highlightPackageId?: string;
++  confirmLabel?: string;
++  onConfirm: () => void;
++  onCancel: () => void;
++};
++
++// Firm Look Alike, Sound Alike warning: staff must tick that they checked the pictures to continue
++export default function LasaWarningDialog(props: Props) {
++  return (
++    <Dialog open={!!props.drugId} onOpenChange={(o) => !o && props.onCancel()}>
++      <DialogContent className="max-h-[92vh] max-w-[calc(100vw-1.5rem)] gap-4 overflow-y-auto p-4 sm:max-w-5xl sm:p-6">
++        {/* Keyed so the tick box starts empty for every drug */}
++        {props.drugId && <WarningBody key={props.drugId} {...props} drugId={props.drugId} />}
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++function WarningBody({
++  drugId,
++  highlightPackageId,
++  confirmLabel = "Continue",
++  onConfirm,
++  onCancel,
++}: Props & { drugId: Id<"drugs"> }) {
++  const [checked, setChecked] = useState(false);
++  const data = useQuery(api.drugs.lasaCompare, { id: drugId });
++
++  return (
++    <>
++      <DialogHeader className="text-left">
++        <DialogTitle className="flex items-center gap-2 text-lg text-destructive">
++          <TriangleAlert className="size-5 shrink-0" /> Look Alike, Sound Alike medicine
++        </DialogTitle>
++        <DialogDescription>
++          This drug is easily confused with others. Compare the drug picture, package form pictures,
++          specifications and remarks before you continue.
++        </DialogDescription>
++      </DialogHeader>
++
++      {data === undefined ? (
++        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++          {Array.from({ length: 3 }).map((_, i) => (
++            <Skeleton key={i} className="h-96 w-full rounded-xl" />
++          ))}
++        </div>
++      ) : data === null ? (
++        <p className="text-sm text-muted-foreground">This drug could not be found. It may have been deleted.</p>
++      ) : (
++        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
++          <LasaDrugCard drug={data.selected} selected highlightPackageId={highlightPackageId} />
++          {data.lookAlikes.map((d) => (
++            <LasaDrugCard key={d._id} drug={d} />
++          ))}
++          {data.lookAlikes.length === 0 && (
++            <div className="flex items-center justify-center rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">
++              No similar drugs are linked yet. Check the pictures carefully anyway.
++            </div>
++          )}
++        </div>
++      )}
++
++      <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3">
++        <Checkbox
++          checked={checked}
++          onCheckedChange={(v) => setChecked(v === true)}
++          className="mt-0.5 size-5"
++          disabled={!data}
++        />
++        <span className="text-sm font-medium">
++          I have checked the drug picture, package form pictures, specifications and remarks.
++        </span>
++      </label>
++
++      <DialogFooter className="gap-2">
++        <Button variant="ghost" onClick={onCancel}>
++          Cancel
++        </Button>
++        <Button onClick={onConfirm} disabled={!checked || !data}>
++          {confirmLabel}
++        </Button>
++      </DialogFooter>
++    </>
++  );
++}

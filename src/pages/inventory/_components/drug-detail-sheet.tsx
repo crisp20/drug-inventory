@@ -24,6 +24,8 @@ import {
 } from "@/components/ui/sheet.tsx";
 import DrugImage from "@/components/drug-image.tsx";
 import DrugNotes from "@/components/drug-notes.tsx";
+import LasaBadge from "@/components/lasa-badge.tsx";
+import DdaBadge from "@/components/dda-badge.tsx";
 import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
 import PackageHistoryDialog from "./package-history-dialog.tsx";
 import { errorMessage } from "@/lib/errors.ts";
@@ -64,6 +66,31 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
               </SheetDescription>
             </SheetHeader>
             <div className="space-y-6 px-4 pb-6">
+              {drug.dda && (
+                <section className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-sm dark:bg-amber-400/10">
+                  <DdaBadge />
+                  <span className="text-muted-foreground">Dangerous Drug</span>
+                </section>
+              )}
+              {drug.lasa && (
+                <section className="space-y-2 rounded-xl border border-destructive/25 bg-destructive/5 p-3">
+                  <LasaBadge />
+                  {drug.lookAlikes.length > 0 ? (
+                    <div className="text-sm">
+                      <span className="text-muted-foreground">Looks or sounds like: </span>
+                      {drug.lookAlikes.map((d, i) => (
+                        <span key={d._id}>
+                          {i > 0 && ", "}
+                          <span className="font-medium">{d.name}</span>{" "}
+                          <span className="font-mono text-xs text-muted-foreground">{d.drugId}</span>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No similar drugs linked yet.</p>
+                  )}
+                </section>
+              )}
               <DrugImage url={drug.imageUrl} alt={drug.name} className="aspect-square w-full max-w-xs" />
 
               <section className="space-y-2">

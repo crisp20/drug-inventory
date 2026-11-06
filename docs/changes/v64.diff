@@ -1,0 +1,140 @@
+diff --git a/convex/drugImport.test.ts b/convex/drugImport.test.ts
+index c7dcca8..8a05344 100644
+--- a/convex/drugImport.test.ts
++++ b/convex/drugImport.test.ts
+@@ -108,6 +108,13 @@ describe("drug import", () => {
+     const other = { ...fileDrug, drugId: "33", packages: [...fileDrug.packages, { ...fileDrug.packages[0], barcode: "", qtyPerUnit: 10, baseUnit: "Strip" as const }] };
+     const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [other] });
+     expect(check.clashes).toHaveLength(1);
++    expect(check.clashes[0]).toMatchObject({
++      otherDrugId: "32",
++      otherBrand: "PK-Merz",
++      otherManufacturer: "JACOBSON",
++      otherPackage: { qtyPerUnit: 100, baseUnit: "Box", unitCount: 1, stock: 0 },
++      otherImageUrl: null,
++    });
+     const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: other, action: "create" }] });
+     expect(res.skipped).toEqual([{ drugId: "33", name: other.name, barcodes: ["4046222740115"] }]);
+     const [created] = await owner.query(api.drugs.search, { term: "33" });
+diff --git a/convex/drugImport.ts b/convex/drugImport.ts
+index 5c1e149..97a7750 100644
+--- a/convex/drugImport.ts
++++ b/convex/drugImport.ts
+@@ -65,7 +65,17 @@ async function findDrug(ctx: QueryCtx, drugId: string) {
+     .first();
+ }
+ 
+-type BarcodeClash = { barcode: string; otherDrugId: string; otherName: string };
++type BarcodeClash = {
++  barcode: string;
++  otherDrugId: string;
++  otherName: string;
++  otherBrand: string;
++  otherManufacturer: string;
++  otherPieceName: string;
++  // The other drug's package form that owns this barcode, and its stock
++  otherPackage: { qtyPerUnit: number; baseUnit: Doc<"drugPackages">["baseUnit"]; unitCount: number; stock: number };
++  otherImageId: Id<"_storage"> | null;
++};
+ 
+ // Barcodes in the file that are already saved on a different drug
+ async function findClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<"drugs"> | undefined) {
+@@ -78,11 +88,31 @@ async function findClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<
+       .first();
+     if (!other || other.drugRef === ownRef) continue;
+     const otherDrug = await ctx.db.get("drugs", other.drugRef);
+-    clashes.push({ barcode: p.barcode, otherDrugId: otherDrug?.drugId ?? "?", otherName: otherDrug?.name ?? "Unknown" });
++    clashes.push({
++      barcode: p.barcode,
++      otherDrugId: otherDrug?.drugId ?? "?",
++      otherName: otherDrug?.name ?? "Unknown",
++      otherBrand: otherDrug?.brandName ?? "",
++      otherManufacturer: otherDrug?.manufacturer ?? "",
++      otherPieceName: otherDrug?.pieceName ?? "units",
++      otherPackage: { qtyPerUnit: other.qtyPerUnit, baseUnit: other.baseUnit, unitCount: other.unitCount, stock: other.stock },
++      otherImageId: otherDrug?.imageId ?? null,
++    });
+   }
+   return clashes;
+ }
+ 
++// Clashes as shown on the review screen, with the other drug's picture
++async function describeClashes(ctx: QueryCtx, packages: ImportPackage[], ownRef: Id<"drugs"> | undefined) {
++  const clashes = await findClashes(ctx, packages, ownRef);
++  return await Promise.all(
++    clashes.map(async ({ otherImageId, ...c }) => ({
++      ...c,
++      otherImageUrl: otherImageId ? await ctx.storage.getUrl(otherImageId) : null,
++    })),
++  );
++}
++
+ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
+   return {
+     name: drug.name,
+@@ -110,7 +140,7 @@ export const checkBatch = query({
+     return await Promise.all(
+       args.drugs.map(async (d) => {
+         const existing = await findDrug(ctx, d.drugId);
+-        const clashes = await findClashes(ctx, d.packages, existing?._id);
++        const clashes = await describeClashes(ctx, d.packages, existing?._id);
+         if (!existing) return { drugId: d.drugId, status: "new" as const, clashes, diff: null, imageUrl: null };
+         const [packages, imageUrl] = await Promise.all([
+           getPackages(ctx, existing._id),
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 6911c47..4c50c75 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v63");
++    expect(CHANGE_ENTRIES[0].version).toBe("v64");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/barcode-clash-fix.tsx b/src/pages/inventory/_components/barcode-clash-fix.tsx
+index f2ae425..4b5dc29 100644
+--- a/src/pages/inventory/_components/barcode-clash-fix.tsx
++++ b/src/pages/inventory/_components/barcode-clash-fix.tsx
+@@ -1,5 +1,8 @@
+ import { useQuery } from "convex/react";
+ import { api } from "@/convex/_generated/api.js";
++import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import ManufacturerLine from "@/components/manufacturer-line.tsx";
++import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
+ import { Input } from "@/components/ui/input.tsx";
+ import { Spinner } from "@/components/ui/spinner.tsx";
+ import { useDebounce } from "@/hooks/use-debounce.ts";
+@@ -54,9 +57,27 @@ function ClashRow({
+   const changing = fix !== undefined;
+   return (
+     <div className="space-y-2 rounded-md bg-destructive/10 p-2">
+-      <p className="text-xs text-destructive">
+-        Barcode {clash.barcode} already belongs to {clash.otherName} ({clash.otherDrugId}).
+-      </p>
++      <div className="flex items-start gap-3">
++        {/* Hidden when the other drug has no picture */}
++        {clash.otherImageUrl && (
++          <ZoomableDrugImage url={clash.otherImageUrl} alt={clash.otherName} className="size-14" hoverPreview />
++        )}
++        <div className="min-w-0 space-y-0.5 text-xs">
++          <p className="text-destructive">
++            Barcode {clash.barcode} already belongs to{" "}
++            <span className="font-semibold">
++              {clash.otherName} ({clash.otherDrugId})
++            </span>
++            .
++          </p>
++          {clash.otherBrand && <p className="truncate text-foreground">{clash.otherBrand}</p>}
++          <ManufacturerLine manufacturer={clash.otherManufacturer} />
++          <p className="text-muted-foreground">
++            {formatPackageForm(clash.otherPackage)} · {clash.otherPackage.stock.toLocaleString()}{" "}
++            {clash.otherPieceName} in stock
++          </p>
++        </div>
++      </div>
+       <div className="flex flex-wrap gap-1">
+         <ModeButton active={!changing} onClick={() => onFix(undefined)}>
+           Add without barcode

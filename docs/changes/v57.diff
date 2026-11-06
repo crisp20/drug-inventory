@@ -1,0 +1,864 @@
+diff --git a/convex/drugs.test.ts b/convex/drugs.test.ts
+index cf32440..b3ff1cc 100644
+--- a/convex/drugs.test.ts
++++ b/convex/drugs.test.ts
+@@ -104,3 +104,56 @@ describe("search", () => {
+     expect(await names("Abilify")).toEqual(["68", "69"]);
+   });
+ });
++
++describe("look alike, sound alike", () => {
++  const other = { ...drug, drugId: "PCM650", name: "Paracetamol 650mg", packages: [{ ...drug.packages[0], barcode: "" }] };
++
++  it("links both ways, marks the other drug, and filters the list", async () => {
++    const { owner } = await setup();
++    const b = await owner.mutation(api.drugs.create, other);
++    const a = await owner.mutation(api.drugs.create, { ...drug, lasa: true, lookAlikeIds: [b] });
++
++    const gotA = await owner.query(api.drugs.get, { id: a });
++    const gotB = await owner.query(api.drugs.get, { id: b });
++    expect(gotA?.lookAlikes.map((d) => d.drugId)).toEqual(["PCM650"]);
++    expect(gotB?.lasa).toBe(true);
++    expect(gotB?.lookAlikes.map((d) => d.drugId)).toEqual(["PCM500"]);
++
++    const list = await owner.query(api.drugs.listLasa, { paginationOpts: { numItems: 10, cursor: null } });
++    expect(list.page.map((d) => d.drugId).sort()).toEqual(["PCM500", "PCM650"]);
++  });
++
++  it("unmarking clears links, and deleting a drug removes its links", async () => {
++    const { owner } = await setup();
++    const b = await owner.mutation(api.drugs.create, other);
++    const a = await owner.mutation(api.drugs.create, { ...drug, lasa: true, lookAlikeIds: [b] });
++    const saved = await owner.query(api.drugs.get, { id: a });
++    if (!saved) throw new Error("missing");
++    const pkg = saved.packages[0];
++    const packages = [{ packageId: pkg._id, barcode: pkg.barcode, qtyPerUnit: 10, baseUnit: "Strip" as const, unitCount: 10, stock: 3, imageIds: [] }];
++
++    await owner.mutation(api.drugs.update, { id: a, ...drug, packages, lasa: false, lookAlikeIds: [b] });
++    expect((await owner.query(api.drugs.get, { id: a }))?.lasa).toBeUndefined();
++    expect((await owner.query(api.drugs.get, { id: b }))?.lookAlikes).toEqual([]);
++
++    await owner.mutation(api.drugs.update, { id: a, ...drug, packages, lasa: true, lookAlikeIds: [b] });
++    await owner.mutation(api.drugs.remove, { id: a });
++    expect((await owner.query(api.drugs.get, { id: b }))?.lookAlikes).toEqual([]);
++  });
++
++  it("does not link a drug to itself", async () => {
++    const { owner } = await setup();
++    const a = await owner.mutation(api.drugs.create, { ...drug, lasa: true });
++    const saved = await owner.query(api.drugs.get, { id: a });
++    if (!saved) throw new Error("missing");
++    const pkg = saved.packages[0];
++    await owner.mutation(api.drugs.update, {
++      id: a,
++      ...drug,
++      lasa: true,
++      lookAlikeIds: [a],
++      packages: [{ packageId: pkg._id, barcode: pkg.barcode, qtyPerUnit: 10, baseUnit: "Strip", unitCount: 10, stock: 3, imageIds: [] }],
++    });
++    expect((await owner.query(api.drugs.get, { id: a }))?.lookAlikes).toEqual([]);
++  });
++});
+diff --git a/convex/drugs.ts b/convex/drugs.ts
+index 07bc747..e942073 100644
+--- a/convex/drugs.ts
++++ b/convex/drugs.ts
+@@ -21,6 +21,7 @@ import {
+   type PackageInput,
+ } from "./lib/drugs";
+ import { baseUnit } from "./schema/drugs";
++import { setLookAlikes } from "./lib/lasa";
+ 
+ const MAX_SEARCH_WORDS = 5;
+ const SEARCH_POOL = 150;
+@@ -45,6 +46,9 @@ const drugArgs = {
+   imageId: v.optional(v.id("_storage")),
+   specifications: v.optional(v.string()),
+   remarks: v.optional(v.string()),
++  lasa: v.optional(v.boolean()),
++  // Drugs this one looks or sounds like; ignored when lasa is off
++  lookAlikeIds: v.optional(v.array(v.id("drugs"))),
+   packages: v.array(packageArg),
+ };
+ 
+@@ -84,6 +88,23 @@ export const list = query({
+   },
+ });
+ 
++// Only drugs marked Look Alike, Sound Alike, by name
++export const listLasa = query({
++  args: { paginationOpts: paginationOptsValidator },
++  handler: async (ctx, args) => {
++    await requireActiveUser(ctx);
++    const result = await ctx.db
++      .query("drugs")
++      .withIndex("by_lasa_and_name", (q) => q.eq("lasa", true))
++      .order("asc")
++      .paginate(args.paginationOpts);
++    return {
++      ...result,
++      page: await Promise.all(result.page.map((d) => withDetails(ctx, d))),
++    };
++  },
++});
++
+ // Finds drugs by barcode/GS1 code (exact) or by Drug ID, name, or brand (text)
+ export const search = query({
+   args: { term: v.string() },
+@@ -160,18 +181,21 @@ export const create = mutation({
+       imageId: input.imageId,
+       specifications: input.specifications,
+       remarks: input.remarks,
++      lasa: input.lasa || undefined,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
+     for (const p of input.packages) {
+       await ctx.db.insert("drugPackages", { drugRef, ...packageFields(p) });
+     }
++    const lookAlikes = await setLookAlikes(ctx, drugRef, input.lasa ? (args.lookAlikeIds ?? []) : []);
+     await logDrugSave(ctx, actorOf(admin), {
+       drug: { _id: drugRef, drugId: input.drugId, name: input.name },
+       before: null,
+       beforePackages: [],
+       after: input,
+       afterPackages: input.packages.map((p) => ({ ...p, barcode: toStoredBarcode(p.barcode) })),
++      lookAlikes,
+     });
+     return drugRef;
+   },
+@@ -179,7 +203,7 @@ export const create = mutation({
+ 
+ export const update = mutation({
+   args: { id: v.id("drugs"), ...drugArgs },
+-  handler: async (ctx, { id, ...rest }) => {
++  handler: async (ctx, { id, lookAlikeIds, ...rest }) => {
+     const admin = await requireAdmin(ctx);
+     const drug = await ctx.db.get("drugs", id);
+     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
+@@ -202,9 +226,11 @@ export const update = mutation({
+       // undefined clears the field
+       specifications: input.specifications,
+       remarks: input.remarks,
++      lasa: input.lasa || undefined,
+       searchText: buildSearchText(input),
+       updatedAt: new Date().toISOString(),
+     });
++    const lookAlikes = await setLookAlikes(ctx, id, input.lasa ? (lookAlikeIds ?? []) : []);
+ 
+     const incomingIds = new Set(input.packages.map((p) => p.packageId).filter(Boolean));
+     for (const old of existing) {
+@@ -223,6 +249,7 @@ export const update = mutation({
+       after: input,
+       // Normalized barcodes so a re-saved package isn't reported as changed
+       afterPackages: input.packages.map((p) => ({ ...p, barcode: toStoredBarcode(p.barcode) })),
++      lookAlikes,
+     });
+     return null;
+   },
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index 4c98837..19b165a 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -101,6 +101,25 @@ export function diffDrugFields(
+   return changes;
+ }
+ 
++export type LookAlikeChange = { before: string[]; after: string[] };
++
++// The Look Alike, Sound Alike mark and its linked drugs, as activity changes
++export function diffLasa(
++  beforeMark: boolean | undefined,
++  afterMark: boolean | undefined,
++  links: LookAlikeChange,
++): Change[] {
++  const changes: Change[] = [];
++  const yesNo = (b: boolean | undefined) => (b ? "Yes" : "No");
++  if (!!beforeMark !== !!afterMark) {
++    changes.push({ field: "Look Alike, Sound Alike", before: yesNo(beforeMark), after: yesNo(afterMark) });
++  }
++  const old = links.before.join("; ");
++  const now = links.after.join("; ");
++  if (old !== now) changes.push({ field: "Look-alike drugs", before: old, after: now });
++  return changes;
++}
++
+ type PackageLike = Pick<
+   PackageInput,
+   "barcode" | "qtyPerUnit" | "baseUnit" | "unitCount"
+@@ -165,15 +184,18 @@ function pictureDetail(added: number, removed: number) {
+ 
+ type DrugSave = {
+   drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
+-  before: (DrugFields & { imageId?: Id<"_storage"> }) | null;
++  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean }) | null;
+   beforePackages: SavedPackage[];
+-  after: DrugFields & { imageId?: Id<"_storage"> };
++  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean };
+   afterPackages: PackageInput[];
++  // Left out by the import, which never changes the mark
++  lookAlikes?: LookAlikeChange;
+ };
+ 
+ // Activity entries for a medicine saved from the Inventory form
+ export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
+   const { drug, before, after } = s;
++  const lasaChanges = s.lookAlikes ? diffLasa(before?.lasa, after.lasa, s.lookAlikes) : [];
+   if (!before) {
+     await logActivity(ctx, actor, {
+       category: "medicine",
+@@ -183,12 +205,12 @@ export async function logDrugSave(ctx: MutationCtx, actor: Actor, s: DrugSave) {
+       detail: `${plural(s.afterPackages.length, "package form")}: ${s.afterPackages
+         .map((p) => `${packageLabel(p)} (stock ${p.stock})`)
+         .join("; ")}`,
+-      changes: diffDrugFields(null, after),
++      changes: [...diffDrugFields(null, after), ...lasaChanges],
+     });
+     return;
+   }
+ 
+-  const fieldChanges = diffDrugFields(before, after);
++  const fieldChanges = [...diffDrugFields(before, after), ...lasaChanges];
+   if (fieldChanges.length > 0) {
+     await logActivity(ctx, actor, {
+       category: "medicine",
+diff --git a/convex/lib/drugs.ts b/convex/lib/drugs.ts
+index c149706..69028e2 100644
+--- a/convex/lib/drugs.ts
++++ b/convex/lib/drugs.ts
+@@ -2,6 +2,7 @@ import { ConvexError } from "convex/values";
+ import type { MutationCtx, QueryCtx } from "../_generated/server";
+ import type { Doc, Id } from "../_generated/dataModel";
+ import { normalizeBarcode, type BaseUnit } from "./barcode";
++import { clearLookAlikes, getLookAlikes } from "./lasa";
+ 
+ export const MAX_PACKAGING_IMAGES = 10;
+ export const MAX_PACKAGES_PER_DRUG = 20;
+@@ -26,6 +27,7 @@ export type DrugInput = {
+   // Free text; undefined or blank means none
+   specifications?: string;
+   remarks?: string;
++  lasa?: boolean;
+   packages: PackageInput[];
+ };
+ 
+@@ -151,16 +153,17 @@ async function resolveImages(ctx: QueryCtx, ids: Id<"_storage">[]) {
+   return await Promise.all(ids.map(async (id) => ({ id, url: await ctx.storage.getUrl(id) })));
+ }
+ 
+-// Adds image URLs and package forms (each with its packaging pictures) for display
++// Adds image URLs, package forms (each with its packaging pictures) and look-alike drugs for display
+ export async function withDetails(ctx: QueryCtx, drug: Doc<"drugs">) {
+-  const [imageUrl, rawPackages] = await Promise.all([
++  const [imageUrl, rawPackages, lookAlikes] = await Promise.all([
+     drug.imageId ? ctx.storage.getUrl(drug.imageId) : Promise.resolve(null),
+     getPackages(ctx, drug._id),
++    drug.lasa ? getLookAlikes(ctx, drug._id) : Promise.resolve([]),
+   ]);
+   const packages = await Promise.all(
+     rawPackages.map(async (p) => ({ ...p, images: await resolveImages(ctx, p.imageIds) })),
+   );
+-  return { ...drug, imageUrl, packages };
++  return { ...drug, imageUrl, packages, lookAlikes };
+ }
+ 
+ // Puts drugs that have package forms first; the original order is kept within each group
+@@ -172,6 +175,7 @@ export function packagesFirst<T extends { packages: unknown[] }>(drugs: T[]): T[
+ export async function deleteDrug(ctx: MutationCtx, drug: Doc<"drugs">) {
+   const packages = await getPackages(ctx, drug._id);
+   for (const p of packages) await ctx.db.delete("drugPackages", p._id);
++  await clearLookAlikes(ctx, drug._id);
+   await deleteFiles(ctx, filesOf(drug, packages));
+   await ctx.db.delete("drugs", drug._id);
+ }
+diff --git a/convex/schema.ts b/convex/schema.ts
+index 46f753d..af68a56 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -1,7 +1,7 @@
+ import { defineSchema } from "convex/server";
+ import { activityLogTable } from "./schema/activity";
+ import { usersTable } from "./schema/users";
+-import { drugPackagesTable, drugsTable } from "./schema/drugs";
++import { drugPackagesTable, drugsTable, lasaLinksTable } from "./schema/drugs";
+ import { settingsTable } from "./schema/settings";
+ import { stockMovementsTable } from "./schema/stock";
+ 
+@@ -9,6 +9,7 @@ export default defineSchema({
+   users: usersTable,
+   drugs: drugsTable,
+   drugPackages: drugPackagesTable,
++  lasaLinks: lasaLinksTable,
+   stockMovements: stockMovementsTable,
+   settings: settingsTable,
+   activityLog: activityLogTable,
+diff --git a/convex/schema/drugs.ts b/convex/schema/drugs.ts
+index d4963ee..2343fca 100644
+--- a/convex/schema/drugs.ts
++++ b/convex/schema/drugs.ts
+@@ -21,14 +21,24 @@ export const drugsTable = defineTable({
+   // Free text shown on drug cards; missing means blank
+   specifications: v.optional(v.string()),
+   remarks: v.optional(v.string()),
++  // Marked "Look Alike, Sound Alike" by an admin; missing means not marked
++  lasa: v.optional(v.boolean()),
+   // Denormalized text for the search index (Drug ID, names)
+   searchText: v.string(),
+   updatedAt: v.string(),
+ })
+   .index("by_drugId", ["drugId"])
+   .index("by_name", ["name"])
++  .index("by_lasa_and_name", ["lasa", "name"])
+   .searchIndex("search_text", { searchField: "searchText" });
+ 
++// Which drugs look or sound like which. Stored both ways (A→B and B→A) so either side reads its own list.
++export const lasaLinksTable = defineTable({
++  drugRef: v.id("drugs"),
++  otherRef: v.id("drugs"),
++})
++  .index("by_drugRef_and_otherRef", ["drugRef", "otherRef"]);
++
+ // One row per barcode. Each barcode has its own package form and stock amount.
+ export const drugPackagesTable = defineTable({
+   drugRef: v.id("drugs"),
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index 10119c8..111e724 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -1,5 +1,6 @@
+ import { Barcode, Check } from "lucide-react";
+ import { formatPackageForm } from "@/convex/lib/barcode.ts";
++import LasaBadge from "@/components/lasa-badge.tsx";
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import ZoomableDrugImage, {
+@@ -41,6 +42,7 @@ export default function DrugPackagePicker({
+           className="size-32 sm:size-40"
+         />
+         <div className="min-w-0">
++          {drug.lasa && <LasaBadge className="mb-1" />}
+           <div className="truncate text-lg font-semibold">{drug.name}</div>
+           <div className="truncate text-sm text-muted-foreground">
+             {drug.brandName || "No brand"} ·{" "}
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 276aec4..978882c 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v56");
++    expect(CHANGE_ENTRIES[0].version).toBe("v57");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/drug-detail-sheet.tsx b/src/pages/inventory/_components/drug-detail-sheet.tsx
+index b6f896c..da0c9da 100644
+--- a/src/pages/inventory/_components/drug-detail-sheet.tsx
++++ b/src/pages/inventory/_components/drug-detail-sheet.tsx
+@@ -24,6 +24,7 @@ import {
+ } from "@/components/ui/sheet.tsx";
+ import DrugImage from "@/components/drug-image.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
++import LasaBadge from "@/components/lasa-badge.tsx";
+ import type { DrugPackage, DrugWithDetails } from "@/lib/drug-types.ts";
+ import PackageHistoryDialog from "./package-history-dialog.tsx";
+ import { errorMessage } from "@/lib/errors.ts";
+@@ -64,6 +65,25 @@ export default function DrugDetailSheet({ drug, isAdmin, onClose, onEdit }: Prop
+               </SheetDescription>
+             </SheetHeader>
+             <div className="space-y-6 px-4 pb-6">
++              {drug.lasa && (
++                <section className="space-y-2 rounded-xl border border-destructive/25 bg-destructive/5 p-3">
++                  <LasaBadge />
++                  {drug.lookAlikes.length > 0 ? (
++                    <div className="text-sm">
++                      <span className="text-muted-foreground">Looks or sounds like: </span>
++                      {drug.lookAlikes.map((d, i) => (
++                        <span key={d._id}>
++                          {i > 0 && ", "}
++                          <span className="font-medium">{d.name}</span>{" "}
++                          <span className="font-mono text-xs text-muted-foreground">{d.drugId}</span>
++                        </span>
++                      ))}
++                    </div>
++                  ) : (
++                    <p className="text-sm text-muted-foreground">No similar drugs linked yet.</p>
++                  )}
++                </section>
++              )}
+               <DrugImage url={drug.imageUrl} alt={drug.name} className="aspect-square w-full max-w-xs" />
+ 
+               <section className="space-y-2">
+diff --git a/src/pages/inventory/_components/drug-form-dialog.tsx b/src/pages/inventory/_components/drug-form-dialog.tsx
+index 7141803..57e95ed 100644
+--- a/src/pages/inventory/_components/drug-form-dialog.tsx
++++ b/src/pages/inventory/_components/drug-form-dialog.tsx
+@@ -35,6 +35,7 @@ import {
+   type DrugFormValues,
+ } from "../_lib/drug-form-schema.ts";
+ import ImagePicker, { type PickedImage } from "./image-picker.tsx";
++import LasaFields from "./lasa-fields.tsx";
+ import PackageRowsEditor from "./package-rows-editor.tsx";
+ 
+ type Props = {
+@@ -53,6 +54,8 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+       pieceName: DEFAULT_PIECE_NAME,
+       specifications: "",
+       remarks: "",
++      lasa: false,
++      lookAlikes: [],
+       packages: [],
+     };
+   }
+@@ -64,6 +67,8 @@ function defaultsFor(drug?: DrugWithDetails): DrugFormInput {
+     pieceName: drug.pieceName,
+     specifications: drug.specifications ?? "",
+     remarks: drug.remarks ?? "",
++    lasa: !!drug.lasa,
++    lookAlikes: drug.lookAlikes,
+     packages: drug.packages.map((p) => ({
+       packageId: p._id,
+       barcode: p.barcode,
+@@ -89,9 +94,10 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+   const imageChanged = (mainImage[0]?.id ?? null) !== (drug?.imageId ?? null);
+   useUnsavedChanges(form.formState.isDirty || imageChanged);
+ 
+-  const onSubmit = async (values: DrugFormValues) => {
++  const onSubmit = async ({ lookAlikes, ...values }: DrugFormValues) => {
+     const payload = {
+       ...values,
++      lookAlikeIds: values.lasa ? lookAlikes.map((d) => d._id) : [],
+       imageId: mainImage[0]?.id,
+       packages: values.packages.map(({ images, ...p }) => ({ ...p, imageIds: images.map((i) => i.id) })),
+     };
+@@ -181,6 +187,7 @@ function DrugForm({ drug, onSaved, onCancel }: { drug?: DrugWithDetails; onSaved
+           {noteField("specifications", "Specifications", "e.g. White round tablet, scored")}
+           {noteField("remarks", "Remarks", "e.g. Store below 25°C")}
+         </div>
++        <LasaFields control={form.control} selfId={drug?._id} />
+         <div className="space-y-2">
+           <div className="text-sm font-medium">Drug picture</div>
+           <p className="text-xs text-muted-foreground">One picture of the drug itself, shared by every package form.</p>
+diff --git a/src/pages/inventory/_components/drug-row.tsx b/src/pages/inventory/_components/drug-row.tsx
+index 2551a2a..14b0a15 100644
+--- a/src/pages/inventory/_components/drug-row.tsx
++++ b/src/pages/inventory/_components/drug-row.tsx
+@@ -1,3 +1,4 @@
++import LasaBadge from "@/components/lasa-badge.tsx";
+ import ManufacturerLine from "@/components/manufacturer-line.tsx";
+ import DrugNotes from "@/components/drug-notes.tsx";
+ import { Badge } from "@/components/ui/badge.tsx";
+@@ -26,6 +27,7 @@ export default function DrugRow({
+           {drug.brandName && <span className="truncate text-sm text-muted-foreground">{drug.brandName}</span>}
+           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
+         </div>
++        {drug.lasa && <LasaBadge />}
+         <ManufacturerLine manufacturer={drug.manufacturer} />
+         <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
+         <div className="flex flex-wrap gap-2">
+diff --git a/src/pages/inventory/_lib/drug-form-schema.ts b/src/pages/inventory/_lib/drug-form-schema.ts
+index 5edaa40..6ac97d2 100644
+--- a/src/pages/inventory/_lib/drug-form-schema.ts
++++ b/src/pages/inventory/_lib/drug-form-schema.ts
+@@ -25,6 +25,11 @@ export const drugFormSchema = z.object({
+   pieceName: z.string().trim().min(1, "Choose what the pieces are called"),
+   specifications: z.string().trim().max(2000, "Keep it under 2000 characters"),
+   remarks: z.string().trim().max(2000, "Keep it under 2000 characters"),
++  // Look Alike, Sound Alike mark and the drugs it is confused with
++  lasa: z.boolean(),
++  lookAlikes: z.array(
++    z.object({ _id: z.custom<Id<"drugs">>(), drugId: z.string(), name: z.string(), brandName: z.string() }),
++  ),
+   packages: z.array(packageSchema).min(1, "Add at least one package form"),
+ });
+ 
+diff --git a/src/pages/inventory/page.tsx b/src/pages/inventory/page.tsx
+index 3300c2f..eeafe0a 100644
+--- a/src/pages/inventory/page.tsx
++++ b/src/pages/inventory/page.tsx
+@@ -1,8 +1,9 @@
+ import { useState } from "react";
+ import { usePaginatedQuery, useQuery } from "convex/react";
+-import { ImageUp, PackageSearch, Plus, Upload } from "lucide-react";
++import { ImageUp, PackageSearch, Plus, TriangleAlert, Upload } from "lucide-react";
+ import { api } from "@/convex/_generated/api.js";
+ import { Button } from "@/components/ui/button.tsx";
++import { Toggle } from "@/components/ui/toggle.tsx";
+ import {
+   Empty,
+   EmptyContent,
+@@ -43,9 +44,38 @@ function DrugList({ drugs, onSelect }: { drugs: DrugWithDetails[]; onSelect: (d:
+   );
+ }
+ 
+-function AllDrugs({ isAdmin, onAdd, onSelect }: { isAdmin: boolean; onAdd: () => void; onSelect: (d: DrugWithDetails) => void }) {
+-  const { results, status, loadMore } = usePaginatedQuery(api.drugs.list, {}, { initialNumItems: 30 });
++function AllDrugs({
++  isAdmin,
++  lasaOnly,
++  onAdd,
++  onSelect,
++}: {
++  isAdmin: boolean;
++  lasaOnly: boolean;
++  onAdd: () => void;
++  onSelect: (d: DrugWithDetails) => void;
++}) {
++  const { results, status, loadMore } = usePaginatedQuery(
++    lasaOnly ? api.drugs.listLasa : api.drugs.list,
++    {},
++    { initialNumItems: 30 },
++  );
+   if (status === "LoadingFirstPage") return <ListSkeleton />;
++  if (status === "Exhausted" && results.length === 0 && lasaOnly) {
++    return (
++      <Empty className="border">
++        <EmptyHeader>
++          <EmptyMedia variant="icon">
++            <TriangleAlert />
++          </EmptyMedia>
++          <EmptyTitle>No Look Alike, Sound Alike drugs</EmptyTitle>
++          <EmptyDescription>
++            {isAdmin ? "Edit a drug and switch on Look Alike, Sound Alike to mark it." : "An admin has not marked any drugs yet."}
++          </EmptyDescription>
++        </EmptyHeader>
++      </Empty>
++    );
++  }
+   if (status === "Exhausted" && results.length === 0) {
+     return (
+       <Empty className="border">
+@@ -80,9 +110,19 @@ function AllDrugs({ isAdmin, onAdd, onSelect }: { isAdmin: boolean; onAdd: () =>
+   );
+ }
+ 
+-function SearchResults({ term, onSelect }: { term: string; onSelect: (d: DrugWithDetails) => void }) {
+-  const results = useQuery(api.drugs.search, { term });
+-  if (results === undefined) return <ListSkeleton />;
++function SearchResults({
++  term,
++  lasaOnly,
++  onSelect,
++}: {
++  term: string;
++  lasaOnly: boolean;
++  onSelect: (d: DrugWithDetails) => void;
++}) {
++  const found = useQuery(api.drugs.search, { term });
++  if (found === undefined) return <ListSkeleton />;
++  // Search returns a small capped list, so narrowing it here is safe
++  const results = lasaOnly ? found.filter((d) => d.lasa) : found;
+   if (results.length === 0) {
+     return (
+       <Empty className="border">
+@@ -90,7 +130,9 @@ function SearchResults({ term, onSelect }: { term: string; onSelect: (d: DrugWit
+           <EmptyMedia variant="icon">
+             <PackageSearch />
+           </EmptyMedia>
+-          <EmptyTitle>No match for “{term}”</EmptyTitle>
++          <EmptyTitle>
++            No {lasaOnly ? "Look Alike, Sound Alike " : ""}match for “{term}”
++          </EmptyTitle>
+           <EmptyDescription>Try another barcode, name, brand or Drug ID.</EmptyDescription>
+         </EmptyHeader>
+       </Empty>
+@@ -109,6 +151,7 @@ export default function InventoryPage() {
+   const [editing, setEditing] = useState<DrugWithDetails | undefined>();
+   const [importOpen, setImportOpen] = useState(false);
+   const [photosOpen, setPhotosOpen] = useState(false);
++  const [lasaOnly, setLasaOnly] = useState(false);
+ 
+   // Keep the open detail panel in sync with live data
+   const live = useQuery(api.drugs.get, selected ? { id: selected._id } : "skip");
+@@ -142,10 +185,18 @@ export default function InventoryPage() {
+       />
+       <div className="space-y-6">
+         <DrugSearchInput value={search} onChange={setSearch} autoFocus />
++        <Toggle
++          pressed={lasaOnly}
++          onPressedChange={setLasaOnly}
++          variant="outline"
++          className="cursor-pointer data-[state=on]:border-destructive/40 data-[state=on]:bg-destructive/10 data-[state=on]:text-destructive"
++        >
++          <TriangleAlert /> Look Alike, Sound Alike only
++        </Toggle>
+         {term ? (
+-          <SearchResults term={term} onSelect={setSelected} />
++          <SearchResults term={term} lasaOnly={lasaOnly} onSelect={setSelected} />
+         ) : (
+-          <AllDrugs isAdmin={isAdmin} onAdd={openAdd} onSelect={setSelected} />
++          <AllDrugs isAdmin={isAdmin} lasaOnly={lasaOnly} onAdd={openAdd} onSelect={setSelected} />
+         )}
+       </div>
+       <DrugDetailSheet
+
+diff --git a/convex/lib/lasa.ts b/convex/lib/lasa.ts
+new file mode 100644
+--- /dev/null
++++ b/convex/lib/lasa.ts
+@@ -0,0 +1,81 @@
++import { ConvexError } from "convex/values";
++import type { MutationCtx, QueryCtx } from "../_generated/server";
++import type { Doc, Id } from "../_generated/dataModel";
++
++// "Look Alike, Sound Alike" links between drugs. Each link is stored both ways.
++export const MAX_LASA_LINKS = 20;
++
++export type LookAlike = Pick<Doc<"drugs">, "_id" | "drugId" | "name" | "brandName">;
++
++async function linkRows(ctx: QueryCtx, drugRef: Id<"drugs">) {
++  return await ctx.db
++    .query("lasaLinks")
++    .withIndex("by_drugRef_and_otherRef", (q) => q.eq("drugRef", drugRef))
++    .take(MAX_LASA_LINKS * 2);
++}
++
++// The drugs linked to this one, with just enough to name them
++export async function getLookAlikes(ctx: QueryCtx, drugRef: Id<"drugs">): Promise<LookAlike[]> {
++  const rows = await linkRows(ctx, drugRef);
++  const drugs = await Promise.all(rows.map((r) => ctx.db.get("drugs", r.otherRef)));
++  return drugs
++    .filter((d): d is Doc<"drugs"> => d !== null)
++    .map((d) => ({ _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName }))
++    .sort((a, b) => a.name.localeCompare(b.name));
++}
++
++async function findLink(ctx: QueryCtx, drugRef: Id<"drugs">, otherRef: Id<"drugs">) {
++  return await ctx.db
++    .query("lasaLinks")
++    .withIndex("by_drugRef_and_otherRef", (q) => q.eq("drugRef", drugRef).eq("otherRef", otherRef))
++    .first();
++}
++
++async function unlink(ctx: MutationCtx, a: Id<"drugs">, b: Id<"drugs">) {
++  for (const [x, y] of [[a, b], [b, a]] as const) {
++    const row = await findLink(ctx, x, y);
++    if (row) await ctx.db.delete("lasaLinks", row._id);
++  }
++}
++
++async function link(ctx: MutationCtx, a: Id<"drugs">, b: Id<"drugs">) {
++  for (const [x, y] of [[a, b], [b, a]] as const) {
++    if (!(await findLink(ctx, x, y))) await ctx.db.insert("lasaLinks", { drugRef: x, otherRef: y });
++  }
++  // A drug that something looks like is itself a look-alike
++  const other = await ctx.db.get("drugs", b);
++  if (other && !other.lasa) await ctx.db.patch("drugs", b, { lasa: true });
++}
++
++// Replaces this drug's links. Returns the names added and removed (for the activity log).
++export async function setLookAlikes(
++  ctx: MutationCtx,
++  drugRef: Id<"drugs">,
++  wanted: Id<"drugs">[],
++): Promise<{ before: string[]; after: string[] }> {
++  const unique = [...new Set(wanted)].filter((id) => id !== drugRef);
++  if (unique.length > MAX_LASA_LINKS) {
++    throw new ConvexError({ code: "BAD_REQUEST", message: `Link up to ${MAX_LASA_LINKS} look-alike drugs` });
++  }
++  for (const id of unique) {
++    if (!(await ctx.db.get("drugs", id))) {
++      throw new ConvexError({ code: "NOT_FOUND", message: "A linked look-alike drug no longer exists" });
++    }
++  }
++  const current = await getLookAlikes(ctx, drugRef);
++  const currentIds = new Set(current.map((d) => d._id));
++  const wantedIds = new Set(unique);
++  for (const d of current) if (!wantedIds.has(d._id)) await unlink(ctx, drugRef, d._id);
++  for (const id of unique) if (!currentIds.has(id)) await link(ctx, drugRef, id);
++  const after = await getLookAlikes(ctx, drugRef);
++  return { before: current.map(label), after: after.map(label) };
++}
++
++function label(d: LookAlike) {
++  return `${d.name} (${d.drugId})`;
++}
++
++// Drops every link to and from a drug (when it is unmarked or deleted)
++export async function clearLookAlikes(ctx: MutationCtx, drugRef: Id<"drugs">) {
++  for (const row of await linkRows(ctx, drugRef)) await unlink(ctx, drugRef, row.otherRef);
++}
+diff --git a/src/components/lasa-badge.tsx b/src/components/lasa-badge.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/lasa-badge.tsx
+@@ -0,0 +1,19 @@
++import { TriangleAlert } from "lucide-react";
++import { Badge } from "@/components/ui/badge.tsx";
++import { cn } from "@/lib/utils.ts";
++
++// Warning tag for drugs marked "Look Alike, Sound Alike"
++export default function LasaBadge({ className }: { className?: string }) {
++  return (
++    <Badge
++      className={cn(
++        "gap-1 border-destructive/30 bg-destructive/10 font-semibold text-destructive dark:bg-destructive/20",
++        className,
++      )}
++      variant="outline"
++    >
++      <TriangleAlert className="size-3" />
++      Look Alike, Sound Alike
++    </Badge>
++  );
++}
+diff --git a/src/pages/inventory/_components/lasa-fields.tsx b/src/pages/inventory/_components/lasa-fields.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/lasa-fields.tsx
+@@ -0,0 +1,55 @@
++import { useWatch, type Control } from "react-hook-form";
++import { TriangleAlert } from "lucide-react";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import { FormControl, FormField, FormItem, FormLabel } from "@/components/ui/form.tsx";
++import { Switch } from "@/components/ui/switch.tsx";
++import type { DrugFormInput, DrugFormValues } from "../_lib/drug-form-schema.ts";
++import LookAlikePicker from "./look-alike-picker.tsx";
++
++type Props = {
++  control: Control<DrugFormInput, unknown, DrugFormValues>;
++  selfId?: Id<"drugs">;
++};
++
++// Look Alike, Sound Alike switch, and the linked similar drugs once switched on
++export default function LasaFields({ control, selfId }: Props) {
++  const lasa = useWatch({ control, name: "lasa" });
++  return (
++    <div className="space-y-3 rounded-xl border border-destructive/25 bg-destructive/5 p-4">
++      <FormField
++        control={control}
++        name="lasa"
++        render={({ field }) => (
++          <FormItem className="flex items-start justify-between gap-4">
++            <div className="space-y-1">
++              <FormLabel className="flex items-center gap-2">
++                <TriangleAlert className="size-4 text-destructive" /> Look Alike, Sound Alike
++              </FormLabel>
++              <p className="text-xs text-muted-foreground">
++                Staff are warned to double-check the pictures whenever this drug is chosen.
++              </p>
++            </div>
++            <FormControl>
++              <Switch checked={field.value} onCheckedChange={field.onChange} className="cursor-pointer" />
++            </FormControl>
++          </FormItem>
++        )}
++      />
++      {lasa && (
++        <FormField
++          control={control}
++          name="lookAlikes"
++          render={({ field }) => (
++            <FormItem>
++              <FormLabel>Looks or sounds like</FormLabel>
++              <p className="text-xs text-muted-foreground">
++                Linked drugs are marked too and show each other in the warning.
++              </p>
++              <LookAlikePicker selfId={selfId} value={field.value} onChange={field.onChange} />
++            </FormItem>
++          )}
++        />
++      )}
++    </div>
++  );
++}
+diff --git a/src/pages/inventory/_components/look-alike-picker.tsx b/src/pages/inventory/_components/look-alike-picker.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/look-alike-picker.tsx
+@@ -0,0 +1,93 @@
++import { useState } from "react";
++import { useQuery } from "convex/react";
++import { Plus, X } from "lucide-react";
++import { api } from "@/convex/_generated/api.js";
++import type { Id } from "@/convex/_generated/dataModel.d.ts";
++import { Input } from "@/components/ui/input.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { useDebounce } from "@/hooks/use-debounce.ts";
++
++export type LookAlikeOption = { _id: Id<"drugs">; drugId: string; name: string; brandName: string };
++
++type Props = {
++  // The drug being edited (left out of the results); undefined when adding a new drug
++  selfId?: Id<"drugs">;
++  value: LookAlikeOption[];
++  onChange: (value: LookAlikeOption[]) => void;
++};
++
++const MAX_LINKS = 20;
++
++// Search and link the drugs this one looks or sounds like
++export default function LookAlikePicker({ selfId, value, onChange }: Props) {
++  const [search, setSearch] = useState("");
++  const [term] = useDebounce(search.trim(), 250);
++  const results = useQuery(api.drugs.search, term ? { term } : "skip");
++  const chosen = new Set(value.map((d) => d._id));
++  const options = (results ?? []).filter((d) => d._id !== selfId && !chosen.has(d._id)).slice(0, 8);
++
++  const add = (d: LookAlikeOption) => {
++    onChange([...value, { _id: d._id, drugId: d.drugId, name: d.name, brandName: d.brandName }]);
++    setSearch("");
++  };
++
++  return (
++    <div className="space-y-2">
++      {value.length > 0 && (
++        <div className="flex flex-wrap gap-2">
++          {value.map((d) => (
++            <span
++              key={d._id}
++              className="inline-flex max-w-full items-center gap-1 rounded-full border bg-secondary py-1 pl-3 pr-1 text-xs"
++            >
++              <span className="truncate font-medium">{d.name}</span>
++              <span className="font-mono text-muted-foreground">{d.drugId}</span>
++              <button
++                type="button"
++                onClick={() => onChange(value.filter((x) => x._id !== d._id))}
++                className="cursor-pointer rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
++                aria-label={`Remove ${d.name}`}
++              >
++                <X className="size-3.5" />
++              </button>
++            </span>
++          ))}
++        </div>
++      )}
++      {value.length < MAX_LINKS && (
++        <Input
++          value={search}
++          onChange={(e) => setSearch(e.target.value)}
++          placeholder="Search a similar drug by name, brand or Drug ID"
++        />
++      )}
++      {term && (
++        <div className="max-h-56 overflow-y-auto rounded-lg border">
++          {results === undefined ? (
++            <div className="flex justify-center p-3">
++              <Spinner />
++            </div>
++          ) : options.length === 0 ? (
++            <p className="p-3 text-sm text-muted-foreground">No other drugs match “{term}”.</p>
++          ) : (
++            options.map((d) => (
++              <button
++                key={d._id}
++                type="button"
++                onClick={() => add(d)}
++                className="flex w-full cursor-pointer items-center gap-2 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted"
++              >
++                <Plus className="size-4 shrink-0 text-primary" />
++                <span className="min-w-0 flex-1 truncate">
++                  <span className="font-medium">{d.name}</span>
++                  {d.brandName && <span className="text-muted-foreground"> · {d.brandName}</span>}
++                </span>
++                <span className="font-mono text-xs text-muted-foreground">{d.drugId}</span>
++              </button>
++            ))
++          )}
++        </div>
++      )}
++    </div>
++  );
++}

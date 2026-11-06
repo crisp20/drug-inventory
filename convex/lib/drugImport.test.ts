@@ -121,3 +121,62 @@ describe("note columns", () => {
     expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].remarks).toBeUndefined();
   });
 });
+
+describe("Look Alike, Sound Alike column", () => {
+  const read = (header: string, cells: string[]) =>
+    buildImportDrugs(
+      sheetToRecords([
+        [...HEADER, header],
+        ...cells.map((c, i) => ["32", "A", "B", "M", "TABLET", String(i), "32", `11${i}`, "Box", i + 1, 1, c]),
+      ]).records,
+      ["TABLET"],
+    );
+
+  it("reads Yes/No under common header names, blank means leave alone", () => {
+    expect(read("LASA", ["Yes"]).drugs[0].lasa).toBe(true);
+    expect(read("Look Alike, Sound Alike", ["", "n"]).drugs[0].lasa).toBe(false);
+    expect(read("look_alike", [""]).drugs[0].lasa).toBeUndefined();
+    expect(buildImportDrugs(sheet([["1", "A", "B", "M", "TABLET", "1", "1", "3", "Box", 1, 1]]), ["TABLET"]).drugs[0].lasa).toBeUndefined();
+  });
+
+  it("reports values that are not Yes or No and leaves the mark alone", () => {
+    const { drugs, problems } = read("LASA", ["maybe"]);
+    expect(drugs[0].lasa).toBeUndefined();
+    expect(problems[0].message).toContain("not Yes or No");
+  });
+
+  it("marks without asking but asks before unmarking", () => {
+    const base = { name: "A", brandName: "B", manufacturer: "M", pieceName: "TABLET", packages: [] };
+    const file = { ...read("LASA", ["Yes"]).drugs[0], packages: [] };
+    expect(diffDrug(file, base)).toMatchObject({ lasa: { current: false, file: true, auto: true }, needsReview: false, hasChanges: true });
+    expect(diffDrug(file, { ...base, lasa: true }).lasa).toBeNull();
+    const unmark = diffDrug({ ...file, lasa: false }, { ...base, lasa: true });
+    expect(unmark).toMatchObject({ lasa: { auto: false }, needsReview: true });
+  });
+});
+
+describe("Dangerous Drug (DDA) column", () => {
+  const read = (header: string, cells: string[]) =>
+    buildImportDrugs(
+      sheetToRecords([
+        [...HEADER, header],
+        ...cells.map((c, i) => ["32", "A", "B", "M", "TABLET", String(i), "32", `11${i}`, "Box", i + 1, 1, c]),
+      ]).records,
+      ["TABLET"],
+    );
+
+  it("reads Yes/No under DDA or Dangerous Drug headers", () => {
+    expect(read("DDA", ["Yes"]).drugs[0].dda).toBe(true);
+    expect(read("Dangerous Drug", ["no"]).drugs[0].dda).toBe(false);
+    expect(read("DDA", [""]).drugs[0].dda).toBeUndefined();
+    expect(read("DDA", ["maybe"]).problems[0].message).toContain("Dangerous Drug (DDA)");
+  });
+
+  it("marks without asking but asks before unmarking", () => {
+    const base = { name: "A", brandName: "B", manufacturer: "M", pieceName: "TABLET", packages: [] };
+    const file = { ...read("DDA", ["Yes"]).drugs[0], packages: [] };
+    expect(diffDrug(file, base)).toMatchObject({ dda: { file: true, auto: true }, needsReview: false, hasChanges: true });
+    expect(diffDrug(file, { ...base, dda: true }).dda).toBeNull();
+    expect(diffDrug({ ...file, dda: false }, { ...base, dda: true })).toMatchObject({ dda: { auto: false }, needsReview: true });
+  });
+});

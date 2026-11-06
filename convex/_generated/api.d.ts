@@ -23,6 +23,7 @@ import type * as lib_drugPhotos from "../lib/drugPhotos.js";
 import type * as lib_drugs from "../lib/drugs.js";
 import type * as lib_expiry from "../lib/expiry.js";
 import type * as lib_gs1 from "../lib/gs1.js";
+import type * as lib_lasa from "../lib/lasa.js";
 import type * as lib_period from "../lib/period.js";
 import type * as lib_settings from "../lib/settings.js";
 import type * as lib_stock from "../lib/stock.js";
@@ -58,6 +59,7 @@ declare const fullApi: ApiFromModules<{
   "lib/drugs": typeof lib_drugs;
   "lib/expiry": typeof lib_expiry;
   "lib/gs1": typeof lib_gs1;
+  "lib/lasa": typeof lib_lasa;
   "lib/period": typeof lib_period;
   "lib/settings": typeof lib_settings;
   "lib/stock": typeof lib_stock;

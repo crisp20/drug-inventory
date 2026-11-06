@@ -1,3 +1,5 @@
+import LasaBadge from "@/components/lasa-badge.tsx";
+import DdaBadge from "@/components/dda-badge.tsx";
 import ManufacturerLine from "@/components/manufacturer-line.tsx";
 import DrugNotes from "@/components/drug-notes.tsx";
 import { Badge } from "@/components/ui/badge.tsx";
@@ -26,6 +28,12 @@ export default function DrugRow({
           {drug.brandName && <span className="truncate text-sm text-muted-foreground">{drug.brandName}</span>}
           <span className="ml-auto font-mono text-xs text-muted-foreground">{drug.drugId}</span>
         </div>
+        {(drug.lasa || drug.dda) && (
+          <div className="flex flex-wrap gap-2">
+            {drug.lasa && <LasaBadge />}
+            {drug.dda && <DdaBadge />}
+          </div>
+        )}
         <ManufacturerLine manufacturer={drug.manufacturer} />
         <DrugNotes specifications={drug.specifications} remarks={drug.remarks} />
         <div className="flex flex-wrap gap-2">

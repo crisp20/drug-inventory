@@ -1,0 +1,967 @@
+diff --git a/src/components/stock/label-print-dialog.tsx b/src/components/stock/label-print-dialog.tsx
+index cb1101e..6389fcb 100644
+--- a/src/components/stock/label-print-dialog.tsx
++++ b/src/components/stock/label-print-dialog.tsx
+@@ -38,6 +38,13 @@ import {
+   type LabelSizeId,
+ } from "@/lib/label/label-sizes.ts";
+ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group.tsx";
++import {
++  isLabelDesignId,
++  LABEL_DESIGNS,
++  loadLabelDesign,
++  saveLabelDesign,
++  type LabelDesignId,
++} from "@/lib/label/label-designs.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
+ // Preview boxes keep each label's shape (40x60 and 52x110) in either direction
+@@ -108,6 +115,9 @@ function LabelPrinter({
+   const [orientation, setOrientation] = useState<LabelOrientation>(() =>
+     loadLabelOrientation(sizeId),
+   );
++  const [design, setDesign] = useState<LabelDesignId>(() =>
++    loadLabelDesign(sizeId),
++  );
+   // Only the first drawing prints by itself; switching size or direction just redraws the preview
+   const autoPrinted = useRef(!autoPrint);
+   const size = LABEL_SIZES[sizeId];
+@@ -123,8 +133,16 @@ function LabelPrinter({
+     saveLabelSize(value);
+     redraw();
+     setSizeId(value);
+-    // Each size keeps its own direction
++    // Each size keeps its own direction and design
+     setOrientation(loadLabelOrientation(value));
++    setDesign(loadLabelDesign(value));
++  };
++
++  const changeDesign = (value: string) => {
++    if (!isLabelDesignId(value) || value === design) return;
++    saveLabelDesign(sizeId, value);
++    redraw();
++    setDesign(value);
+   };
+ 
+   const changeOrientation = (value: string) => {
+@@ -167,7 +185,7 @@ function LabelPrinter({
+   // Draw the label, and on first draw print right away if the printer is still connected
+   useEffect(() => {
+     let cancelled = false;
+-    void renderLabel(data, LABEL_SIZES[sizeId]).then(async (drawn) => {
++    void renderLabel(data, LABEL_SIZES[sizeId], design).then(async (drawn) => {
+       if (cancelled) return;
+       const canvas = orientCanvas(drawn, orientation);
+       canvasRef.current = canvas;
+@@ -192,7 +210,7 @@ function LabelPrinter({
+     return () => {
+       cancelled = true;
+     };
+-  }, [data, sizeId, orientation]);
++  }, [data, sizeId, orientation, design]);
+ 
+   const busy = status.state === "drawing" || status.state === "printing";
+   const name = printerName();
+@@ -233,6 +251,27 @@ function LabelPrinter({
+         </ToggleGroup>
+       </div>
+ 
++      <div className="flex items-center justify-between gap-3">
++        <span className="text-sm font-medium">Design</span>
++        <ToggleGroup
++          type="single"
++          variant="outline"
++          value={design}
++          onValueChange={changeDesign}
++          disabled={status.state === "printing"}
++        >
++          {LABEL_DESIGNS.map((d) => (
++            <ToggleGroupItem
++              key={d.id}
++              value={d.id}
++              className={TOGGLE_ITEM_CLASS}
++            >
++              {d.name}
++            </ToggleGroupItem>
++          ))}
++        </ToggleGroup>
++      </div>
++
+       <div className="flex items-center justify-between gap-3">
+         <span className="text-sm font-medium">Direction</span>
+         <ToggleGroup
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index d107bea..24e36c7 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -262,6 +262,7 @@ export default function MovementForm({
+           batch: canister.batch,
+           expiry: canister.expiry,
+           canisterType: canister.type,
++          canisterQty: canister.quantity,
+           filledBy: initialsOf(currentUser?.name ?? currentUser?.email),
+           fillDate: fillDateCode(new Date()),
+           qrText: drug.drugId,
+diff --git a/src/lib/label/label-data.ts b/src/lib/label/label-data.ts
+index 2bef257..a06a40e 100644
+--- a/src/lib/label/label-data.ts
++++ b/src/lib/label/label-data.ts
+@@ -7,6 +7,12 @@ export type LabelData = {
+   // YYYY-MM-DD
+   expiry: string;
+   canisterType: number;
++  // Tablets/capsules put in the canister
++  canisterQty: number;
++  // Not collected yet; the Canister QR label leaves room and prints them when given
++  residentName?: string;
++  ownStock?: boolean;
++  dangerousDrug?: boolean;
+   // Initials of the person filling, e.g. "HS"
+   filledBy: string;
+   // YYMMDD, e.g. "261103"
+@@ -50,7 +56,7 @@ export type ReprintSource = {
+   userName: string;
+   // ISO time of the original Stock Out
+   occurredAt: string;
+-  canister: { batch: string; expiry: string; type: number };
++  canister: { batch: string; expiry: string; quantity: number; type: number };
+ };
+ 
+ // Rebuilds the label of an earlier fill: initials and fill date are the original ones
+@@ -65,6 +71,7 @@ export function labelFromMovement(
+     batch: m.canister.batch,
+     expiry: m.canister.expiry,
+     canisterType: m.canister.type,
++    canisterQty: m.canister.quantity,
+     filledBy: initialsOf(m.userName),
+     fillDate: fillDateCode(new Date(m.occurredAt)),
+     qrText: m.drugCode,
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 3ef54fc..a887276 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -21,6 +21,13 @@ import {
+   loadLabelOrientation,
+   saveLabelOrientation,
+ } from "./label-sizes.ts";
++import {
++  canisterQrText,
++  isLabelDesignId,
++  loadLabelDesign,
++  saveLabelDesign,
++} from "./label-designs.ts";
++import { markerSweep } from "./render-compact.ts";
+ 
+ describe("label text", () => {
+   it("turns names into initials", () => {
+@@ -52,7 +59,12 @@ describe("label text", () => {
+         drugName: "Aripiprazole 5mg",
+         userName: "Hubert Suen",
+         occurredAt,
+-        canister: { batch: "PW5322", expiry: "2028-09-09", type: 0.5 },
++        canister: {
++          batch: "PW5322",
++          expiry: "2028-09-09",
++          quantity: 100,
++          type: 0.5,
++        },
+       },
+       null,
+     );
+@@ -63,6 +75,7 @@ describe("label text", () => {
+       batch: "PW5322",
+       expiry: "2028-09-09",
+       canisterType: 0.5,
++      canisterQty: 100,
+       filledBy: "HS",
+       fillDate: "261103",
+       qrText: "32",
+@@ -71,6 +84,51 @@ describe("label text", () => {
+   });
+ });
+ 
++describe("Canister QR design", () => {
++  it("writes the QR text exactly like the ACP samples", () => {
++    const base = { batch: "345397", expiry: "2027-11-30" };
++    expect(
++      canisterQrText({
++        ...base,
++        drugId: "8223",
++        canisterQty: 720,
++        canisterType: 1,
++      }),
++    ).toBe(";8223;345397;2027/11/30;720;1");
++    expect(
++      canisterQrText({
++        drugId: "620",
++        batch: "43979",
++        expiry: "2027-11-30",
++        canisterQty: 40,
++        canisterType: 0.5,
++      }),
++    ).toBe(";620;43979;2027/11/30;40;0.5");
++  });
++
++  it("draws a full circle for type 1 and a matching slice for the others", () => {
++    const turn = Math.PI * 2;
++    expect(markerSweep(1)).toBeCloseTo(turn);
++    expect(markerSweep(0.5)).toBeCloseTo(turn / 2);
++    expect(markerSweep(0.33)).toBeCloseTo(turn / 3);
++    expect(markerSweep(0.25)).toBeCloseTo(turn / 4);
++    expect(markerSweep(0.125)).toBeCloseTo(turn / 8);
++  });
++
++  it("starts 40x60 on Canister QR and 52x110 on the full label, remembering each size", () => {
++    localStorage.clear();
++    expect(loadLabelDesign("40x60")).toBe("compact");
++    expect(loadLabelDesign("52x110")).toBe("full");
++    saveLabelDesign("52x110", "compact");
++    expect(loadLabelDesign("52x110")).toBe("compact");
++    expect(loadLabelDesign("40x60")).toBe("compact");
++    localStorage.setItem("acp-label-design-40x60", "fancy");
++    expect(loadLabelDesign("40x60")).toBe("compact");
++    expect(isLabelDesignId("full")).toBe(true);
++    localStorage.clear();
++  });
++});
++
+ describe("label sizes", () => {
+   it("prints each size at 8 dots per mm, scaled from the 40mm design", () => {
+     expect(labelDots(LABEL_SIZES["40x60"])).toEqual({
+diff --git a/src/lib/label/render-label.ts b/src/lib/label/render-label.ts
+index 186c1f5..48b131c 100644
+--- a/src/lib/label/render-label.ts
++++ b/src/lib/label/render-label.ts
+@@ -1,10 +1,19 @@
+-import QRCode from "qrcode";
+ import {
+   canisterTypeLabel,
+   formatLabelDate,
+   type LabelData,
+ } from "./label-data.ts";
+-import { boostContrast, ditherToMono, toGray } from "./bitmap.ts";
++import {
++  boxedText,
++  drawPhotoInBox,
++  drawQr,
++  fitText,
++  loadPhoto,
++  toPrintedDots,
++  type Ctx,
++} from "./draw.ts";
++import { renderCompactLabel } from "./render-compact.ts";
++import type { LabelDesignId } from "./label-designs.ts";
+ import {
+   BASE_WIDTH,
+   labelDots,
+@@ -12,13 +21,10 @@ import {
+   type LabelSize,
+ } from "./label-sizes.ts";
+ 
+-// Everything is laid out in base units (the 40mm label is 320 wide) and scaled up
++// The full design is laid out in base units (the 40mm label is 320 wide) and scaled up
+ // for bigger labels, so both sizes share one design.
+-const FONT = "Arial, Helvetica, sans-serif";
+ const MARGIN = 14;
+ 
+-type Ctx = CanvasRenderingContext2D;
+-
+ type Layout = {
+   size: LabelSize;
+   scale: number;
+@@ -26,151 +32,6 @@ type Layout = {
+   length: number;
+ };
+ 
+-// Loads the photo as a local copy, so the canvas can still be read for printing.
+-// A photo that can't be loaded is left off rather than stopping the label.
+-async function loadImage(url: string): Promise<HTMLImageElement | null> {
+-  try {
+-    const res = await fetch(url);
+-    if (!res.ok) return null;
+-    const objectUrl = URL.createObjectURL(await res.blob());
+-    return await new Promise((resolve) => {
+-      const img = new Image();
+-      img.onload = () => resolve(img);
+-      img.onerror = () => resolve(null);
+-      img.src = objectUrl;
+-    });
+-  } catch {
+-    return null;
+-  }
+-}
+-
+-// Largest photo side kept before drawing; the label prints it far smaller anyway
+-const PHOTO_MAX = 400;
+-
+-// Grey, high-contrast copy of the tablet photo, so a pale tablet on a pale
+-// background still prints as a visible shape instead of fading to white
+-async function loadPhoto(url: string): Promise<HTMLCanvasElement | null> {
+-  const img = await loadImage(url);
+-  if (!img) return null;
+-  const s = Math.min(1, PHOTO_MAX / Math.max(img.width, img.height));
+-  const w = Math.max(1, Math.round(img.width * s));
+-  const h = Math.max(1, Math.round(img.height * s));
+-  const canvas = document.createElement("canvas");
+-  canvas.width = w;
+-  canvas.height = h;
+-  const ctx = canvas.getContext("2d");
+-  if (!ctx) return null;
+-  ctx.fillStyle = "#fff";
+-  ctx.fillRect(0, 0, w, h);
+-  ctx.drawImage(img, 0, 0, w, h);
+-  const pixels = ctx.getImageData(0, 0, w, h);
+-  const gray = boostContrast(toGray(pixels.data));
+-  for (let i = 0; i < gray.length; i++) {
+-    pixels.data[i * 4] = gray[i];
+-    pixels.data[i * 4 + 1] = gray[i];
+-    pixels.data[i * 4 + 2] = gray[i];
+-    pixels.data[i * 4 + 3] = 255;
+-  }
+-  ctx.putImageData(pixels, 0, 0);
+-  return canvas;
+-}
+-
+-// Turns the finished label into pure black and white dots. Label printers can't
+-// print grey, and the computer's print window rounds light grey to white, which
+-// lost the canister dot and the photo. Doing it here makes every print path,
+-// and the preview, show exactly the dots that will print.
+-function toPrintedDots(ctx: Ctx, width: number, height: number) {
+-  const pixels = ctx.getImageData(0, 0, width, height);
+-  const mono = ditherToMono(toGray(pixels.data), width, height);
+-  for (let i = 0; i < mono.length; i++) {
+-    const v = mono[i] ? 0 : 255;
+-    pixels.data[i * 4] = v;
+-    pixels.data[i * 4 + 1] = v;
+-    pixels.data[i * 4 + 2] = v;
+-    pixels.data[i * 4 + 3] = 255;
+-  }
+-  ctx.putImageData(pixels, 0, 0);
+-}
+-
+-// Drawn in printer dots (not base units) so each QR module is a whole number of dots
+-function drawQr(
+-  ctx: Ctx,
+-  layout: Layout,
+-  text: string,
+-  x: number,
+-  y: number,
+-  size: number,
+-) {
+-  const qr = QRCode.create(text || " ", { errorCorrectionLevel: "M" });
+-  const count = qr.modules.size;
+-  const dx = Math.round(x * layout.scale);
+-  const dy = Math.round(y * layout.scale);
+-  const dSize = Math.floor(size * layout.scale);
+-  const cell = Math.max(1, Math.floor(dSize / count));
+-  const offset = Math.floor((dSize - cell * count) / 2);
+-  ctx.save();
+-  ctx.setTransform(1, 0, 0, 1, 0, 0);
+-  ctx.fillStyle = "#000";
+-  for (let r = 0; r < count; r++) {
+-    for (let c = 0; c < count; c++) {
+-      if (qr.modules.get(r, c)) {
+-        ctx.fillRect(
+-          dx + offset + c * cell,
+-          dy + offset + r * cell,
+-          cell,
+-          cell,
+-        );
+-      }
+-    }
+-  }
+-  ctx.restore();
+-}
+-
+-// Writes text, shrinking the font until it fits the width (never below minSize)
+-function fitText(
+-  ctx: Ctx,
+-  text: string,
+-  x: number,
+-  y: number,
+-  maxWidth: number,
+-  size: number,
+-  bold = false,
+-  minSize = 12,
+-) {
+-  let s = size;
+-  ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
+-  while (s > minSize && ctx.measureText(text).width > maxWidth) {
+-    s -= 1;
+-    ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
+-  }
+-  let shown = text;
+-  while (shown.length > 1 && ctx.measureText(shown).width > maxWidth) {
+-    shown = shown.slice(0, -2) + "…";
+-  }
+-  ctx.fillStyle = "#000";
+-  ctx.textBaseline = "middle";
+-  ctx.fillText(shown, x, y);
+-}
+-
+-function boxedText(
+-  ctx: Ctx,
+-  text: string,
+-  x: number,
+-  y: number,
+-  h: number,
+-  size: number,
+-) {
+-  ctx.font = `bold ${size}px ${FONT}`;
+-  const w = ctx.measureText(text).width + 12;
+-  ctx.lineWidth = 2;
+-  ctx.strokeStyle = "#000";
+-  ctx.strokeRect(x, y - h / 2, w, h);
+-  ctx.fillStyle = "#000";
+-  ctx.textBaseline = "middle";
+-  ctx.fillText(text, x + 6, y + 1);
+-  return w;
+-}
+-
+ // Draws a section turned a quarter turn, so its text runs up the label.
+ // Inside `draw`, (0,0) is the reading top-left and the area is `length` wide.
+ function rotatedSection(
+@@ -233,7 +94,7 @@ function drawFillRecord(ctx: Ctx, layout: Layout, data: LabelData) {
+     cell("Chk", cols[0], cols[1], 1);
+   });
+   const qr = Math.min(120, topEnd - 30);
+-  drawQr(ctx, layout, data.qrText, 296 - qr, (topEnd - qr) / 2, qr);
++  drawQr(ctx, layout.scale, data.qrText, 296 - qr, (topEnd - qr) / 2, qr);
+ }
+ 
+ function drawCanisterFace(
+@@ -249,15 +110,13 @@ function drawCanisterFace(
+     const width = length - 16;
+     // Photo at the far end; the QR code is drawn upright after this section
+     if (photo) {
+-      const scale = Math.min(photoW / photo.width, photoH / photo.height);
+-      const w = photo.width * scale;
+-      const h = photo.height * scale;
+-      ctx.drawImage(
++      drawPhotoInBox(
++        ctx,
+         photo,
+-        length - 8 - photoW + (photoW - w) / 2,
+-        photoAcross + (photoH - h) / 2,
+-        w,
+-        h,
++        length - 8 - photoW,
++        photoAcross,
++        photoW,
++        photoH,
+       );
+     }
+     fitText(ctx, data.brandName || data.name, left, 160, width, 22, true);
+@@ -288,7 +147,14 @@ function drawCanisterFace(
+       true,
+     );
+   });
+-  drawQr(ctx, layout, data.qrText, photoAcross, middleEnd - faceQr - 4, faceQr);
++  drawQr(
++    ctx,
++    layout.scale,
++    data.qrText,
++    photoAcross,
++    middleEnd - faceQr - 4,
++    faceQr,
++  );
+ }
+ 
+ function drawTag(ctx: Ctx, layout: Layout, data: LabelData) {
+@@ -308,7 +174,7 @@ function drawTag(ctx: Ctx, layout: Layout, data: LabelData) {
+     true,
+     11,
+   );
+-  drawQr(ctx, layout, data.qrText, qrX, mid - tagQr / 2, tagQr);
++  drawQr(ctx, layout.scale, data.qrText, qrX, mid - tagQr / 2, tagQr);
+ }
+ 
+ function divider(ctx: Ctx, y: number) {
+@@ -316,8 +182,8 @@ function divider(ctx: Ctx, y: number) {
+   ctx.fillRect(MARGIN, y - 1, BASE_WIDTH - MARGIN * 2, 2);
+ }
+ 
+-// Draws the full label at printer resolution, matching the ACP canister label layout
+-export async function renderLabel(
++// The full ACP canister label: fill record, canister face and tag
++async function renderFullLabel(
+   data: LabelData,
+   size: LabelSize,
+ ): Promise<HTMLCanvasElement> {
+@@ -340,3 +206,15 @@ export async function renderLabel(
+   toPrintedDots(ctx, dots.width, dots.height);
+   return canvas;
+ }
++
++// Draws the label at printer resolution in its upright (portrait) form;
++// orientCanvas turns it for landscape printing
++export async function renderLabel(
++  data: LabelData,
++  size: LabelSize,
++  design: LabelDesignId = "full",
++): Promise<HTMLCanvasElement> {
++  return design === "compact"
++    ? renderCompactLabel(data, size)
++    : renderFullLabel(data, size);
++}
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 85f9f60..442a12e 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v69");
++    expect(CHANGE_ENTRIES[0].version).toBe("v70");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/src/lib/label/draw.ts b/src/lib/label/draw.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/draw.ts
+@@ -0,0 +1,215 @@
++import QRCode from "qrcode";
++import { boostContrast, ditherToMono, toGray } from "./bitmap.ts";
++
++// Drawing tools shared by every label design
++export const FONT = "Arial, Helvetica, sans-serif";
++
++export type Ctx = CanvasRenderingContext2D;
++
++// Loads the photo as a local copy, so the canvas can still be read for printing.
++// A photo that can't be loaded is left off rather than stopping the label.
++async function loadImage(url: string): Promise<HTMLImageElement | null> {
++  try {
++    const res = await fetch(url);
++    if (!res.ok) return null;
++    const objectUrl = URL.createObjectURL(await res.blob());
++    return await new Promise((resolve) => {
++      const img = new Image();
++      img.onload = () => resolve(img);
++      img.onerror = () => resolve(null);
++      img.src = objectUrl;
++    });
++  } catch {
++    return null;
++  }
++}
++
++// Largest photo side kept before drawing; the label prints it far smaller anyway
++const PHOTO_MAX = 400;
++
++// Grey, high-contrast copy of the tablet photo, so a pale tablet on a pale
++// background still prints as a visible shape instead of fading to white
++export async function loadPhoto(
++  url: string,
++): Promise<HTMLCanvasElement | null> {
++  const img = await loadImage(url);
++  if (!img) return null;
++  const s = Math.min(1, PHOTO_MAX / Math.max(img.width, img.height));
++  const w = Math.max(1, Math.round(img.width * s));
++  const h = Math.max(1, Math.round(img.height * s));
++  const canvas = document.createElement("canvas");
++  canvas.width = w;
++  canvas.height = h;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) return null;
++  ctx.fillStyle = "#fff";
++  ctx.fillRect(0, 0, w, h);
++  ctx.drawImage(img, 0, 0, w, h);
++  const pixels = ctx.getImageData(0, 0, w, h);
++  const gray = boostContrast(toGray(pixels.data));
++  for (let i = 0; i < gray.length; i++) {
++    pixels.data[i * 4] = gray[i];
++    pixels.data[i * 4 + 1] = gray[i];
++    pixels.data[i * 4 + 2] = gray[i];
++    pixels.data[i * 4 + 3] = 255;
++  }
++  ctx.putImageData(pixels, 0, 0);
++  return canvas;
++}
++
++// Draws the photo as large as fits inside the box, centred
++export function drawPhotoInBox(
++  ctx: Ctx,
++  photo: HTMLCanvasElement,
++  x: number,
++  y: number,
++  w: number,
++  h: number,
++) {
++  const scale = Math.min(w / photo.width, h / photo.height);
++  const pw = photo.width * scale;
++  const ph = photo.height * scale;
++  ctx.drawImage(photo, x + (w - pw) / 2, y + (h - ph) / 2, pw, ph);
++}
++
++// Turns the finished label into pure black and white dots. Label printers can't
++// print grey, and the computer's print window rounds light grey to white, which
++// lost the canister dot and the photo. Doing it here makes every print path,
++// and the preview, show exactly the dots that will print.
++export function toPrintedDots(ctx: Ctx, width: number, height: number) {
++  ctx.setTransform(1, 0, 0, 1, 0, 0);
++  const pixels = ctx.getImageData(0, 0, width, height);
++  const mono = ditherToMono(toGray(pixels.data), width, height);
++  for (let i = 0; i < mono.length; i++) {
++    const v = mono[i] ? 0 : 255;
++    pixels.data[i * 4] = v;
++    pixels.data[i * 4 + 1] = v;
++    pixels.data[i * 4 + 2] = v;
++    pixels.data[i * 4 + 3] = 255;
++  }
++  ctx.putImageData(pixels, 0, 0);
++}
++
++// Writes text, shrinking the font until it fits the width (never below minSize)
++export function fitText(
++  ctx: Ctx,
++  text: string,
++  x: number,
++  y: number,
++  maxWidth: number,
++  size: number,
++  bold = false,
++  minSize = 12,
++) {
++  let s = size;
++  ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
++  while (s > minSize && ctx.measureText(text).width > maxWidth) {
++    s -= 1;
++    ctx.font = `${bold ? "bold " : ""}${s}px ${FONT}`;
++  }
++  let shown = text;
++  while (shown.length > 1 && ctx.measureText(shown).width > maxWidth) {
++    shown = shown.slice(0, -2) + "…";
++  }
++  ctx.fillStyle = "#000";
++  ctx.textBaseline = "middle";
++  ctx.fillText(shown, x, y);
++}
++
++// Splits text into at most `maxLines` lines that fit the width (the last line may be shortened)
++export function wrapLines(
++  ctx: Ctx,
++  text: string,
++  maxWidth: number,
++  maxLines: number,
++): string[] {
++  const words = text.split(/\s+/).filter(Boolean);
++  const lines: string[] = [];
++  let line = "";
++  for (let i = 0; i < words.length; i++) {
++    const next = line ? `${line} ${words[i]}` : words[i];
++    if (!line || ctx.measureText(next).width <= maxWidth) {
++      line = next;
++      continue;
++    }
++    if (lines.length === maxLines - 1) {
++      // Out of lines: keep the rest together and let fitText shrink or shorten it
++      line = [line, ...words.slice(i)].join(" ");
++      break;
++    }
++    lines.push(line);
++    line = words[i];
++  }
++  if (line) lines.push(line);
++  return lines;
++}
++
++// Drawn in printer dots (not base units) so each QR module is a whole number of dots
++export function drawQr(
++  ctx: Ctx,
++  scale: number,
++  text: string,
++  x: number,
++  y: number,
++  size: number,
++) {
++  const qr = QRCode.create(text || " ", { errorCorrectionLevel: "M" });
++  const count = qr.modules.size;
++  const t = ctx.getTransform();
++  const dx = Math.round(t.e + x * scale);
++  const dy = Math.round(t.f + y * scale);
++  const dSize = Math.floor(size * scale);
++  const cell = Math.max(1, Math.floor(dSize / count));
++  const offset = Math.floor((dSize - cell * count) / 2);
++  ctx.save();
++  ctx.setTransform(1, 0, 0, 1, 0, 0);
++  ctx.fillStyle = "#000";
++  for (let r = 0; r < count; r++) {
++    for (let c = 0; c < count; c++) {
++      if (qr.modules.get(r, c)) {
++        ctx.fillRect(
++          dx + offset + c * cell,
++          dy + offset + r * cell,
++          cell,
++          cell,
++        );
++      }
++    }
++  }
++  ctx.restore();
++}
++
++// Turns a landscape drawing a quarter turn anticlockwise into the label's
++// upright (portrait) form, so the Direction switch treats every design alike
++export function rotateAnticlockwise(
++  canvas: HTMLCanvasElement,
++): HTMLCanvasElement {
++  const out = document.createElement("canvas");
++  out.width = canvas.height;
++  out.height = canvas.width;
++  const ctx = out.getContext("2d");
++  if (!ctx) throw new Error("This browser cannot draw labels");
++  ctx.translate(0, out.height);
++  ctx.rotate(-Math.PI / 2);
++  ctx.drawImage(canvas, 0, 0);
++  return out;
++}
++
++export function boxedText(
++  ctx: Ctx,
++  text: string,
++  x: number,
++  y: number,
++  h: number,
++  size: number,
++) {
++  ctx.font = `bold ${size}px ${FONT}`;
++  const w = ctx.measureText(text).width + 12;
++  ctx.lineWidth = 2;
++  ctx.strokeStyle = "#000";
++  ctx.strokeRect(x, y - h / 2, w, h);
++  ctx.fillStyle = "#000";
++  ctx.textBaseline = "middle";
++  ctx.fillText(text, x + 6, y + 1);
++  return w;
++}
+diff --git a/src/lib/label/label-designs.ts b/src/lib/label/label-designs.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/label-designs.ts
+@@ -0,0 +1,58 @@
++import type { LabelData } from "./label-data.ts";
++import type { LabelSizeId } from "./label-sizes.ts";
++
++// "full": fill record, canister face and tag (the original ACP label)
++// "compact": one panel with the canister QR code (Drug ID, batch, expiry, quantity, type)
++export type LabelDesignId = "full" | "compact";
++
++export const LABEL_DESIGNS: { id: LabelDesignId; name: string }[] = [
++  { id: "compact", name: "Canister QR" },
++  { id: "full", name: "Full label" },
++];
++
++export const DEFAULT_DESIGN: Record<LabelSizeId, LabelDesignId> = {
++  "40x60": "compact",
++  "52x110": "full",
++};
++
++export function isLabelDesignId(value: unknown): value is LabelDesignId {
++  return value === "full" || value === "compact";
++}
++
++const designKey = (id: LabelSizeId) => `acp-label-design-${id}`;
++
++// Remembered per size on this device
++export function loadLabelDesign(id: LabelSizeId): LabelDesignId {
++  try {
++    const saved = localStorage.getItem(designKey(id));
++    return isLabelDesignId(saved) ? saved : DEFAULT_DESIGN[id];
++  } catch {
++    return DEFAULT_DESIGN[id];
++  }
++}
++
++export function saveLabelDesign(id: LabelSizeId, design: LabelDesignId): void {
++  try {
++    localStorage.setItem(designKey(id), design);
++  } catch {
++    // Private mode: the choice just isn't remembered
++  }
++}
++
++// Canister machine QR text, matching the ACP samples:
++// ";<Drug ID>;<Batch>;<Expiry YYYY/MM/DD>;<Quantity>;<Type>", e.g. ";8223;345397;2027/11/30;720;1"
++export function canisterQrText(
++  data: Pick<
++    LabelData,
++    "drugId" | "batch" | "expiry" | "canisterQty" | "canisterType"
++  >,
++): string {
++  return [
++    "",
++    data.drugId,
++    data.batch,
++    data.expiry.replaceAll("-", "/"),
++    String(data.canisterQty),
++    String(data.canisterType),
++  ].join(";");
++}
+diff --git a/src/lib/label/render-compact.ts b/src/lib/label/render-compact.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/render-compact.ts
+@@ -0,0 +1,159 @@
++import { formatLabelDate, type LabelData } from "./label-data.ts";
++import { canisterQrText } from "./label-designs.ts";
++import {
++  drawPhotoInBox,
++  drawQr,
++  fitText,
++  FONT,
++  loadPhoto,
++  rotateAnticlockwise,
++  toPrintedDots,
++  wrapLines,
++  type Ctx,
++} from "./draw.ts";
++import { labelDots, type LabelSize } from "./label-sizes.ts";
++
++// The Canister QR design is drawn landscape on a 480 x 320 grid (a 60 x 40 mm
++// label at 8 dots per mm), matching the ACP samples, then scaled to fit bigger labels.
++const W = 480;
++const H = 320;
++const LEFT = 10;
++
++// Light grey so the type marker dithers to a dotted shape like the sample's blue
++const MARKER_GREY = "#9a9a9a";
++
++// Full circle for type 1, a matching slice for halves, thirds, quarters and eighths
++export function markerSweep(type: number): number {
++  // 0.33 is stored for a third; draw an exact third
++  const fraction = Math.abs(type - 0.33) < 0.005 ? 1 / 3 : type;
++  return Math.min(1, Math.max(0, fraction)) * Math.PI * 2;
++}
++
++function drawTypeMarker(
++  ctx: Ctx,
++  x: number,
++  y: number,
++  r: number,
++  type: number,
++) {
++  const sweep = markerSweep(type);
++  ctx.fillStyle = MARKER_GREY;
++  ctx.beginPath();
++  if (sweep >= Math.PI * 2) {
++    ctx.arc(x, y, r, 0, Math.PI * 2);
++  } else {
++    // Starts at the top and goes clockwise, so a half is the right half (like the sample)
++    ctx.moveTo(x, y);
++    ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + sweep);
++    ctx.closePath();
++  }
++  ctx.fill();
++}
++
++// A thin box with centred bold text
++function tagBox(
++  ctx: Ctx,
++  text: string,
++  x: number,
++  y: number,
++  w: number,
++  h: number,
++  size: number,
++) {
++  ctx.lineWidth = 2;
++  ctx.strokeStyle = "#000";
++  ctx.strokeRect(x, y, w, h);
++  ctx.font = `bold ${size}px ${FONT}`;
++  let s = size;
++  while (s > 10 && ctx.measureText(text).width > w - 8) {
++    s -= 1;
++    ctx.font = `bold ${s}px ${FONT}`;
++  }
++  ctx.fillStyle = "#000";
++  ctx.textAlign = "center";
++  ctx.textBaseline = "middle";
++  ctx.fillText(text, x + w / 2, y + h / 2 + 1);
++  ctx.textAlign = "left";
++}
++
++function drawCompact(
++  ctx: Ctx,
++  scale: number,
++  data: LabelData,
++  photo: HTMLCanvasElement | null,
++) {
++  const textW = W - LEFT * 2;
++  // Brand name over up to two lines, then the drug name in bold
++  ctx.font = `24px ${FONT}`;
++  const brand = wrapLines(ctx, data.brandName || data.name, textW, 2);
++  brand.forEach((line, i) =>
++    fitText(ctx, line, LEFT, 30 + i * 32, textW, 24, false, 14),
++  );
++  const nameY = brand.length > 1 ? 104 : 72;
++  fitText(ctx, data.name, LEFT, nameY, textW, 24, true, 14);
++
++  // Space for the resident's name (printed when given)
++  if (data.residentName) {
++    fitText(ctx, data.residentName, LEFT + 4, 166, 300, 24, true, 14);
++  }
++
++  // Type marker and canister quantity, above the QR code
++  drawTypeMarker(ctx, 350, 160, 24, data.canisterType);
++  fitText(ctx, String(data.canisterQty), 382, 166, W - 382 - 6, 26, true, 14);
++
++  // Tablet photo, batch and expiry
++  const photoBox = { x: 12, y: 196, w: 108, h: 70 };
++  if (photo) {
++    drawPhotoInBox(ctx, photo, photoBox.x, photoBox.y, photoBox.w, photoBox.h);
++  }
++  fitText(ctx, `B:${data.batch}`, 128, 210, 126, 20, true, 11);
++  fitText(
++    ctx,
++    `E:${formatLabelDate(data.expiry)}`,
++    128,
++    255,
++    126,
++    20,
++    true,
++    11,
++  );
++
++  // Drug ID box under the photo
++  tagBox(ctx, data.drugId, 12, 274, 108, 40, 26);
++
++  // OS and DDA boxes (space kept; printed when set)
++  const tags = [data.ownStock && "OS", data.dangerousDrug && "DDA"].filter(
++    (t): t is string => Boolean(t),
++  );
++  tags.forEach((t, i) => tagBox(ctx, t, 258, 198 + i * 40, 56, 32, 18));
++
++  // Canister QR code
++  drawQr(ctx, scale, canisterQrText(data), 322, 196, 116);
++}
++
++// Draws the Canister QR label and returns it upright (portrait), like every design
++export async function renderCompactLabel(
++  data: LabelData,
++  size: LabelSize,
++): Promise<HTMLCanvasElement> {
++  const dots = labelDots(size);
++  // Landscape drawing: the label's length runs across
++  const canvas = document.createElement("canvas");
++  canvas.width = dots.height;
++  canvas.height = dots.width;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) throw new Error("This browser cannot draw labels");
++  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
++  ctx.fillStyle = "#fff";
++  ctx.fillRect(0, 0, canvas.width, canvas.height);
++  // Bigger labels: scale the 60 x 40 design to fit and centre it
++  const scale = Math.min(canvas.width / W, canvas.height / H);
++  ctx.translate(
++    Math.round((canvas.width - W * scale) / 2),
++    Math.round((canvas.height - H * scale) / 2),
++  );
++  ctx.scale(scale, scale);
++  drawCompact(ctx, scale, data, photo);
++  toPrintedDots(ctx, canvas.width, canvas.height);
++  return rotateAnticlockwise(canvas);
++}

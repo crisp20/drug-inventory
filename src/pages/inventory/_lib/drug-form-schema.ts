@@ -25,6 +25,19 @@ export const drugFormSchema = z.object({
   pieceName: z.string().trim().min(1, "Choose what the pieces are called"),
   specifications: z.string().trim().max(2000, "Keep it under 2000 characters"),
   remarks: z.string().trim().max(2000, "Keep it under 2000 characters"),
+  // Look Alike, Sound Alike mark and the drugs it is confused with
+  lasa: z.boolean(),
+  lookAlikes: z.array(
+    z.object({
+      _id: z.custom<Id<"drugs">>(),
+      drugId: z.string(),
+      name: z.string(),
+      brandName: z.string(),
+      imageUrl: z.string().nullable(),
+    }),
+  ),
+  // Dangerous Drug (DDA)
+  dda: z.boolean(),
   packages: z.array(packageSchema).min(1, "Add at least one package form"),
 });
 

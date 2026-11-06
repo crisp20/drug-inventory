@@ -1,0 +1,409 @@
+diff --git a/convex/drugPhotos.test.ts b/convex/drugPhotos.test.ts
+index 750dbfb..14a0e77 100644
+--- a/convex/drugPhotos.test.ts
++++ b/convex/drugPhotos.test.ts
+@@ -50,6 +50,9 @@ describe("drug photos", () => {
+ 
+     const first = await store();
+     await owner.mutation(api.drugPhotos.setPhotos, { items: [{ drugId: "32", storageId: first }] });
++    const [withPhoto] = await owner.query(api.drugPhotos.checkPhotos, { drugIds: ["32"] });
++    expect(withPhoto.hasPhoto).toBe(true);
++    expect(withPhoto.photoUrl).toEqual(expect.any(String));
+     const second = await store();
+     const orphan = await store();
+     const res = await owner.mutation(api.drugPhotos.setPhotos, {
+diff --git a/convex/drugPhotos.ts b/convex/drugPhotos.ts
+index 383f9c5..09206e6 100644
+--- a/convex/drugPhotos.ts
++++ b/convex/drugPhotos.ts
+@@ -60,8 +60,15 @@ export const checkPhotos = query({
+           .withIndex("by_drugId", (q) => q.eq("drugId", drugId.trim()))
+           .first();
+         return drug
+-          ? { drugId, found: true as const, name: drug.name, hasPhoto: !!drug.imageId }
+-          : { drugId, found: false as const, name: "", hasPhoto: false };
++          ? {
++              drugId,
++              found: true as const,
++              name: drug.name,
++              hasPhoto: !!drug.imageId,
++              // Current picture, so the admin can compare it with the new one
++              photoUrl: drug.imageId ? await ctx.storage.getUrl(drug.imageId) : null,
++            }
++          : { drugId, found: false as const, name: "", hasPhoto: false, photoUrl: null };
+       }),
+     );
+   },
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 4c50c75..95bf6ac 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v64");
++    expect(CHANGE_ENTRIES[0].version).toBe("v65");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/inventory/_components/import-conflict-card.tsx b/src/pages/inventory/_components/import-conflict-card.tsx
+index daeac76..007fe60 100644
+--- a/src/pages/inventory/_components/import-conflict-card.tsx
++++ b/src/pages/inventory/_components/import-conflict-card.tsx
+@@ -27,7 +27,7 @@ function ChoiceButton({ active, onClick, children }: { active: boolean; onClick:
+   );
+ }
+ 
+-function ChoicePair({ choice, onChoose }: { choice: Choice; onChoose: (c: Choice) => void }) {
++export function ChoicePair({ choice, onChoose }: { choice: Choice; onChoose: (c: Choice) => void }) {
+   return (
+     <div className="flex shrink-0 gap-1">
+       <ChoiceButton active={choice === "keep"} onClick={() => onChoose("keep")}>
+diff --git a/src/pages/inventory/_components/photo-import-dialog.tsx b/src/pages/inventory/_components/photo-import-dialog.tsx
+index a6b985d..788b500 100644
+--- a/src/pages/inventory/_components/photo-import-dialog.tsx
++++ b/src/pages/inventory/_components/photo-import-dialog.tsx
+@@ -18,6 +18,10 @@ import { errorMessage } from "@/lib/errors.ts";
+ import { cn } from "@/lib/utils.ts";
+ import { readPhotoFiles } from "../_lib/read-photo-files.ts";
+ import { usePhotoImport, type PhotoReport, type PhotoReview } from "../_hooks/use-photo-import.ts";
++import type { Choice } from "../_lib/import-choices.ts";
++import { applyKeepChoice, photosToUpload, splitMatches } from "../_lib/photo-choices.ts";
++import ImportConflictsBar from "./import-conflicts-bar.tsx";
++import { AddPhotoRow, ReplacePhotoRow } from "./photo-review-rows.tsx";
+ 
+ const PAGE = 60;
+ 
+@@ -42,8 +46,8 @@ export default function PhotoImportDialog({ open, onOpenChange }: { open: boolea
+         <DialogHeader>
+           <DialogTitle>Upload drug photos</DialogTitle>
+           <DialogDescription>
+-            Name each photo by its Drug ID, for example 25.jpg. Each photo becomes that drug's main picture and replaces
+-            any current one.
++            Name each photo by its Drug ID, for example 25.jpg. Each photo becomes that drug's main picture. For drugs
++            that already have one, you can compare and choose to keep the current picture.
+           </DialogDescription>
+         </DialogHeader>
+         <Steps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />
+@@ -134,17 +138,38 @@ function ReviewStep({
+   onBack: () => void;
+   onDone: (r: PhotoReport) => void;
+ }) {
+-  const [shown, setShown] = useState(PAGE);
+-  const replacing = review.matched.filter((m) => m.hasPhoto).length;
++  const [shownAdd, setShownAdd] = useState(PAGE);
++  const [shownReplace, setShownReplace] = useState(PAGE);
++  // Drug IDs whose current picture is kept; empty = replace all (the default)
++  const [keep, setKeep] = useState<Set<string>>(new Set());
++  const [selected, setSelected] = useState<Set<string>>(new Set());
++  const { adding, replacing } = splitMatches(review.matched);
++  const toUpload = photosToUpload(review.matched, keep);
++  const keptCount = review.matched.length - toUpload.length;
+   const skipped = [
+     ...review.notFound.map((p) => `${p.fileName}: no drug with Drug ID ${p.drugId}`),
+     ...ignored.map((f) => `${f}: not a photo named by Drug ID`),
+     ...duplicates.map((f) => `${f}: another photo for the same Drug ID was used`),
+   ];
+ 
++  const choose = (drugId: string, c: Choice) => setKeep(applyKeepChoice(keep, replacing, new Set([drugId]), c));
++  const applyChoice = (c: Choice) => {
++    setKeep(applyKeepChoice(keep, replacing, selected, c));
++    if (selected.size > 0) {
++      toast.success(`${c === "file" ? "Replacing" : "Keeping current"} for ${selected.size} drug${selected.size === 1 ? "" : "s"}`);
++      setSelected(new Set());
++    }
++  };
++  const toggleSelected = (drugId: string, on: boolean) => {
++    const next = new Set(selected);
++    if (on) next.add(drugId);
++    else next.delete(drugId);
++    setSelected(next);
++  };
++
+   const submit = async () => {
+     try {
+-      onDone(await importer.run(review.matched));
++      onDone(await importer.run(toUpload));
+     } catch (error) {
+       toast.error(errorMessage(error, "The upload stopped part way. Upload the photos again to continue."));
+     }
+@@ -153,29 +178,56 @@ function ReviewStep({
+   return (
+     <>
+       <div className="grid grid-cols-3 gap-2">
+-        <Stat label="Will be added" value={review.matched.length - replacing} />
+-        <Stat label="Will replace" value={replacing} />
++        <Stat label="Will be added" value={adding.length} />
++        <Stat label={keptCount > 0 ? `Will replace (${keptCount} kept)` : "Will replace"} value={replacing.length - keptCount} />
+         <Stat label="Skipped" value={skipped.length} highlight={skipped.length > 0} />
+       </div>
+-      <Tabs defaultValue="matched" className="min-h-0 flex-1">
++      <Tabs defaultValue={replacing.length > 0 ? "replace" : "add"} className="min-h-0 flex-1">
+         <TabsList className="w-full">
+-          <TabsTrigger value="matched">Matched ({review.matched.length})</TabsTrigger>
++          <TabsTrigger value="add">Will be added ({adding.length})</TabsTrigger>
++          <TabsTrigger value="replace">Will replace ({replacing.length})</TabsTrigger>
+           <TabsTrigger value="skipped">Skipped ({skipped.length})</TabsTrigger>
+         </TabsList>
+-        <TabsContent value="matched" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
+-          {review.matched.length === 0 ? (
+-            <Note>No photo matches a saved Drug ID.</Note>
++        <TabsContent value="add" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
++          {adding.length === 0 ? (
++            <Note>No new pictures. Every matched drug already has one.</Note>
++          ) : (
++            <>
++              {adding.slice(0, shownAdd).map((m) => (
++                <AddPhotoRow key={m.drugId} m={m} />
++              ))}
++              {shownAdd < adding.length && (
++                <Button variant="secondary" className="w-full" onClick={() => setShownAdd(shownAdd + PAGE)}>
++                  Show more
++                </Button>
++              )}
++            </>
++          )}
++        </TabsContent>
++        <TabsContent value="replace" className="min-h-0 space-y-1 overflow-y-auto pr-1 [max-height:45vh]">
++          {replacing.length === 0 ? (
++            <Note>No current pictures will be replaced.</Note>
+           ) : (
+             <>
+-              {review.matched.slice(0, shown).map((m) => (
+-                <div key={m.drugId} className="flex items-center gap-3 rounded-md border px-2 py-1.5 text-sm">
+-                  <span className="w-16 shrink-0 font-mono text-xs text-muted-foreground">{m.drugId}</span>
+-                  <span className="min-w-0 flex-1 truncate">{m.name}</span>
+-                  {m.hasPhoto && <span className="shrink-0 text-xs text-chart-3">Replaces current</span>}
+-                </div>
++              <ImportConflictsBar
++                total={replacing.length}
++                selected={selected.size}
++                useFileCount={replacing.length - keptCount}
++                onSelectAll={(on) => setSelected(on ? new Set(replacing.map((m) => m.drugId)) : new Set())}
++                onApply={applyChoice}
++              />
++              {replacing.slice(0, shownReplace).map((m) => (
++                <ReplacePhotoRow
++                  key={m.drugId}
++                  m={m}
++                  choice={keep.has(m.drugId) ? "keep" : "file"}
++                  onChoose={(c) => choose(m.drugId, c)}
++                  selected={selected.has(m.drugId)}
++                  onSelectedChange={(on) => toggleSelected(m.drugId, on)}
++                />
+               ))}
+-              {shown < review.matched.length && (
+-                <Button variant="secondary" className="w-full" onClick={() => setShown(shown + PAGE)}>
++              {shownReplace < replacing.length && (
++                <Button variant="secondary" className="w-full" onClick={() => setShownReplace(shownReplace + PAGE)}>
+                   Show more
+                 </Button>
+               )}
+@@ -198,8 +250,9 @@ function ReviewStep({
+         <Button variant="ghost" onClick={onBack}>
+           Choose other photos
+         </Button>
+-        <Button disabled={review.matched.length === 0} onClick={() => void submit()}>
+-          Upload {review.matched.length.toLocaleString()} photos
++        <Button disabled={toUpload.length === 0} onClick={() => void submit()}>
++          Upload {toUpload.length.toLocaleString()} photos
++          {keptCount > 0 && ` (${keptCount.toLocaleString()} kept current)`}
+         </Button>
+       </DialogFooter>
+     </>
+diff --git a/src/pages/inventory/_hooks/use-photo-import.ts b/src/pages/inventory/_hooks/use-photo-import.ts
+index 65915cf..4f07fee 100644
+--- a/src/pages/inventory/_hooks/use-photo-import.ts
++++ b/src/pages/inventory/_hooks/use-photo-import.ts
+@@ -6,7 +6,7 @@ import { MAX_PHOTO_BATCH, MAX_PHOTO_CHECK } from "@/convex/lib/drugPhotos.ts";
+ import { useUploadImage } from "@/hooks/use-upload-image.ts";
+ import type { PickedPhoto } from "../_lib/read-photo-files.ts";
+ 
+-export type PhotoMatch = PickedPhoto & { name: string; hasPhoto: boolean };
++export type PhotoMatch = PickedPhoto & { name: string; hasPhoto: boolean; photoUrl: string | null };
+ 
+ export type PhotoReview = { matched: PhotoMatch[]; notFound: PickedPhoto[] };
+ 
+@@ -38,7 +38,7 @@ export function usePhotoImport() {
+         const results = await convex.query(api.drugPhotos.checkPhotos, { drugIds: batches[i].map((p) => p.drugId) });
+         results.forEach((r, j) => {
+           const photo = batches[i][j];
+-          if (r.found) review.matched.push({ ...photo, name: r.name, hasPhoto: r.hasPhoto });
++          if (r.found) review.matched.push({ ...photo, name: r.name, hasPhoto: r.hasPhoto, photoUrl: r.photoUrl });
+           else review.notFound.push(photo);
+         });
+       }
+
+diff --git a/src/pages/inventory/_components/photo-review-rows.tsx b/src/pages/inventory/_components/photo-review-rows.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_components/photo-review-rows.tsx
+@@ -0,0 +1,90 @@
++import { useEffect, useMemo, type ReactNode } from "react";
++import { ArrowRight } from "lucide-react";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import ZoomableDrugImage from "@/components/zoomable-drug-image.tsx";
++import { cn } from "@/lib/utils.ts";
++import type { PhotoMatch } from "../_hooks/use-photo-import.ts";
++import type { Choice } from "../_lib/import-choices.ts";
++import { ChoicePair } from "./import-conflict-card.tsx";
++
++// Preview link for a picked photo; released when the row leaves the screen so memory stays low
++function useObjectUrl(file: File) {
++  const url = useMemo(() => URL.createObjectURL(file), [file]);
++  useEffect(() => () => URL.revokeObjectURL(url), [url]);
++  return url;
++}
++
++function Labeled({ label, children }: { label: string; children: ReactNode }) {
++  return (
++    <div className="flex flex-col items-center gap-0.5">
++      {children}
++      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</span>
++    </div>
++  );
++}
++
++function DrugLabel({ m }: { m: PhotoMatch }) {
++  return (
++    <div className="min-w-0 flex-1">
++      <div className="truncate font-medium">{m.name}</div>
++      <div className="truncate text-xs text-muted-foreground">
++        Drug ID {m.drugId} · {m.fileName}
++      </div>
++    </div>
++  );
++}
++
++export function AddPhotoRow({ m }: { m: PhotoMatch }) {
++  const url = useObjectUrl(m.file);
++  return (
++    <div className="flex items-center gap-3 rounded-lg border p-2 text-sm">
++      <ZoomableDrugImage url={url} alt={`${m.name} (new)`} className="size-14" hoverPreview />
++      <DrugLabel m={m} />
++    </div>
++  );
++}
++
++export function ReplacePhotoRow({
++  m,
++  choice,
++  onChoose,
++  selected,
++  onSelectedChange,
++}: {
++  m: PhotoMatch;
++  choice: Choice;
++  onChoose: (c: Choice) => void;
++  selected: boolean;
++  onSelectedChange: (on: boolean) => void;
++}) {
++  const url = useObjectUrl(m.file);
++  return (
++    <div
++      className={cn(
++        "flex flex-wrap items-center gap-3 rounded-lg border p-2 text-sm transition-colors",
++        selected && "border-primary bg-primary/5",
++      )}
++    >
++      <Checkbox
++        checked={selected}
++        onCheckedChange={(on) => onSelectedChange(on === true)}
++        aria-label={`Select ${m.name}`}
++      />
++      <div className="flex items-center gap-2">
++        <Labeled label="Current">
++          <div className={cn("transition-opacity", choice === "file" && "opacity-50")}>
++            <ZoomableDrugImage url={m.photoUrl} alt={`${m.name} (current)`} className="size-14" hoverPreview />
++          </div>
++        </Labeled>
++        <ArrowRight className="size-4 shrink-0 text-muted-foreground" />
++        <Labeled label="New">
++          <div className={cn("transition-opacity", choice === "keep" && "opacity-50")}>
++            <ZoomableDrugImage url={url} alt={`${m.name} (new)`} className="size-14" hoverPreview />
++          </div>
++        </Labeled>
++      </div>
++      <DrugLabel m={m} />
++      <ChoicePair choice={choice} onChoose={onChoose} />
++    </div>
++  );
++}
+diff --git a/src/pages/inventory/_lib/photo-choices.test.ts b/src/pages/inventory/_lib/photo-choices.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_lib/photo-choices.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from "vitest";
++import type { PhotoMatch } from "../_hooks/use-photo-import.ts";
++import { applyKeepChoice, photosToUpload, splitMatches } from "./photo-choices.ts";
++
++function match(drugId: string, hasPhoto: boolean): PhotoMatch {
++  return {
++    drugId,
++    fileName: `${drugId}.jpg`,
++    file: new File([], `${drugId}.jpg`),
++    name: `Drug ${drugId}`,
++    hasPhoto,
++    photoUrl: hasPhoto ? `https://x/${drugId}` : null,
++  };
++}
++
++const matched = [match("1", false), match("2", true), match("3", true)];
++const { replacing } = splitMatches(matched);
++
++describe("photo upload choices", () => {
++  it("replaces every current picture by default", () => {
++    expect(photosToUpload(matched, new Set()).map((m) => m.drugId)).toEqual(["1", "2", "3"]);
++  });
++
++  it("leaves out replacements kept current, but always adds new pictures", () => {
++    expect(photosToUpload(matched, new Set(["1", "2"])).map((m) => m.drugId)).toEqual(["1", "3"]);
++  });
++
++  it("applies a bulk choice to the ticked ones only", () => {
++    const keep = applyKeepChoice(new Set(), replacing, new Set(["3"]), "keep");
++    expect([...keep]).toEqual(["3"]);
++    expect([...applyKeepChoice(keep, replacing, new Set(["3"]), "file")]).toEqual([]);
++  });
++
++  it("applies a bulk choice to every replacement when nothing is ticked", () => {
++    expect([...applyKeepChoice(new Set(), replacing, new Set(), "keep")].sort()).toEqual(["2", "3"]);
++  });
++});
+diff --git a/src/pages/inventory/_lib/photo-choices.ts b/src/pages/inventory/_lib/photo-choices.ts
+new file mode 100644
+--- /dev/null
++++ b/src/pages/inventory/_lib/photo-choices.ts
+@@ -0,0 +1,30 @@
++import type { PhotoMatch } from "../_hooks/use-photo-import.ts";
++
++// Splits matched photos into new pictures and replacements of a current picture
++export function splitMatches(matched: PhotoMatch[]) {
++  return {
++    adding: matched.filter((m) => !m.hasPhoto),
++    replacing: matched.filter((m) => m.hasPhoto),
++  };
++}
++
++// Photos to upload: every new picture, plus replacements the admin did not choose to keep
++export function photosToUpload(matched: PhotoMatch[], keep: ReadonlySet<string>): PhotoMatch[] {
++  return matched.filter((m) => !m.hasPhoto || !keep.has(m.drugId));
++}
++
++// Bulk choice: keep or replace the ticked Drug IDs, or every replacement when none are ticked
++export function applyKeepChoice(
++  keep: ReadonlySet<string>,
++  replacing: PhotoMatch[],
++  selected: ReadonlySet<string>,
++  choice: "keep" | "file",
++): Set<string> {
++  const targets = selected.size > 0 ? replacing.filter((m) => selected.has(m.drugId)) : replacing;
++  const next = new Set(keep);
++  for (const m of targets) {
++    if (choice === "keep") next.add(m.drugId);
++    else next.delete(m.drugId);
++  }
++  return next;
++}

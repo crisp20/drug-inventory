@@ -21,7 +21,7 @@ export type ReviewItem = { drug: ImportDrug; check: CheckResult };
 export type ImportReview = {
   newDrugs: ReviewItem[];
   conflicts: ReviewItem[];
-  // Saved drugs whose blank Specifications/Remarks will be filled from the file without asking
+  // Saved drugs whose blank Specifications/Remarks or new mark are taken from the file without asking
   filled: ReviewItem[];
   unchanged: number;
   missing: MissingDrug[];

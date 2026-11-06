@@ -19,6 +19,484 @@ The database schema lives in `convex/schema.ts` and `convex/schema/*.ts`. Runnin
 
 ---
 
+## v71 · 2026-11-05 · Dangerous Drug (DDA) tick box
+
+**Summary**
+- Admins can tick **Dangerous Drug (DDA)** when adding or editing a medicine in Inventory.
+- DDA medicines show an amber **DDA** badge on their Inventory card, in the details panel and when picked at Stock In/Out.
+- New **DDA only** filter on the Inventory page (works alongside search).
+- Stock Out shows a DDA notice for DDA medicines.
+- The Canister QR label prints the DDA box automatically for DDA medicines, including reprints.
+- The medicine file import reads an optional **DDA** column (Yes/No). Marking is applied straight away; unmarking asks first on the review screen.
+- New **Export file** button (admins) downloads every medicine as a CSV in the same columns the import reads, including LASA and DDA.
+- Ticking or unticking DDA is recorded in the Log.
+
+**Database**
+- `drugs.dda`: new optional boolean (`v.optional(v.boolean())`); missing means not DDA. No migration needed.
+- New index `drugs.by_dda_and_name` on `["dda", "name"]`, built automatically.
+
+**Logic**
+- Only admins can set DDA (same check as other medicine edits).
+- `false` is stored as "not set", like the LASA mark.
+- Reprints use the medicine's current DDA mark, because it isn't saved on the Stock Out entry.
+
+**Where**
+- `convex/schema/drugs.ts`: `dda` field and index.
+- `convex/drugs.ts`: `dda` argument on create/update, new `listDda` query.
+- `convex/drugImport.ts`, `convex/lib/drugImport.ts`: DDA column, diff and saving; new `listForExport` query.
+- `convex/lib/activity.ts`: `diffDda` for the Log.
+- `src/pages/inventory/_components/dda-field.tsx`, `src/components/dda-badge.tsx`: tick box and badge.
+- `src/pages/inventory/page.tsx`: DDA only filter and Export file button; `_lib/export-drugs.ts` builds the CSV.
+- `src/pages/inventory/_lib/import-choices.ts`, `_components/import-conflict-card.tsx`: DDA decisions in the import review.
+- `src/components/stock/movement-form.tsx`, `reprint-label-dialog.tsx`, `src/lib/label/label-data.ts`: DDA notice and label.
+
+<!-- files:v71 -->
+<details><summary>All files changed (25) · code: docs/changes/v71.diff</summary>
+
+- `convex/drugImport.ts` +39 -1
+- `convex/drugs.test.ts` +33 -0
+- `convex/drugs.ts` +21 -0
+- `convex/lib/activity.ts` +13 -3
+- `convex/lib/drugImport.test.ts` +26 -0
+- `convex/lib/drugImport.ts` +34 -8
+- `convex/lib/drugs.ts` +1 -0
+- `convex/schema/drugs.ts` +3 -0
+- `src/components/stock/drug-package-picker.tsx` +7 -1
+- `src/components/stock/movement-form.tsx` +12 -1
+- `src/components/stock/reprint-label-dialog.tsx` +1 -1
+- `src/lib/label/label-data.ts` +5 -1
+- `src/lib/label/label.test.ts` +2 -0
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/inventory/_components/drug-detail-sheet.tsx` +7 -0
+- `src/pages/inventory/_components/drug-form-dialog.tsx` +4 -0
+- `src/pages/inventory/_components/drug-row.tsx` +7 -1
+- `src/pages/inventory/_components/import-conflict-card.tsx` +21 -1
+- `src/pages/inventory/_components/import-dialog.tsx` +2 -2
+- `src/pages/inventory/_lib/drug-form-schema.ts` +2 -0
+- `src/pages/inventory/_lib/import-choices.ts` +47 -13
+- `src/pages/inventory/page.tsx` +137 -33
+- `src/components/dda-badge.tsx` (new) +19 -0
+- `src/pages/inventory/_components/dda-field.tsx` (new) +46 -0
+- `src/pages/inventory/_lib/export-drugs.ts` (new) +89 -0
+
+</details>
+<!-- /files -->
+
+## v70 · 2026-11-05 · Canister QR label design
+
+**Summary**
+- The label pop-up has a new **Design** switch: **Canister QR** (new) or **Full label** (the existing one).
+- 40 × 60 mm starts on **Canister QR**; 52 × 110 mm starts on **Full label**. Each computer remembers the choice per size.
+- The Canister QR label matches the ACP samples: brand name, drug name, tablet picture, batch, expiry, Drug ID box, type shape with the canister quantity, and a QR code.
+- The QR code holds `;Drug ID;Batch;Expiry;Quantity;Type`, e.g. `;8223;345397;2027/11/30;720;1`.
+- The type shape is a full circle for 1, a half for 0.5, and a matching slice for a third, quarter or eighth.
+- Space is kept for the Resident Name and the **OS** (Own Stock) and **DDA** (Dangerous Drug) boxes. They will print once those details are collected in a later version.
+
+**Database**
+- None.
+
+**Logic**
+- `canisterQrText` builds the QR text, with the expiry as YYYY/MM/DD.
+- `LabelData` gained `canisterQty` plus optional `residentName`, `ownStock`, `dangerousDrug`.
+
+**Where**
+- `src/lib/label/render-compact.ts`: new Canister QR design.
+- `src/lib/label/label-designs.ts`: design list, defaults per size, QR text.
+- `src/lib/label/draw.ts`: drawing tools shared by both designs (moved out of `render-label.ts`).
+- `src/lib/label/render-label.ts`: picks the design.
+- `src/components/stock/label-print-dialog.tsx`: Design switch.
+- `src/lib/label/label-data.ts`, `src/components/stock/movement-form.tsx`: canister quantity on the label.
+- `src/lib/label/label.test.ts`: QR text, type shapes and design defaults.
+
+<!-- files:v70 -->
+<details><summary>All files changed (9) · code: docs/changes/v70.diff</summary>
+
+- `src/components/stock/label-print-dialog.tsx` +42 -3
+- `src/components/stock/movement-form.tsx` +1 -0
+- `src/lib/label/label-data.ts` +8 -1
+- `src/lib/label/label.test.ts` +59 -1
+- `src/lib/label/render-label.ts` +42 -164
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/lib/label/draw.ts` (new) +215 -0
+- `src/lib/label/label-designs.ts` (new) +58 -0
+- `src/lib/label/render-compact.ts` (new) +159 -0
+
+</details>
+<!-- /files -->
+
+## v69 · 2026-11-05 · Reprint canister labels
+
+**Summary**
+- Every canister entry in **Recent Stock Out** (and other Stock Out lists) has a **Reprint label** button, for when a print did not come out well.
+- The reprinted label uses the original fill: same batch, expiry, type, picture, filler initials and fill date.
+- The reprint pop-up shows the preview first and never prints by itself, so size and direction can be checked.
+- Entries that were undone don't show the button. Reprints are not recorded in the activity log.
+
+**Database**
+- None.
+
+**Logic**
+- `labelFromMovement` rebuilds the label from a saved canister Stock Out; the drug picture is looked up with `drugs.get` because entries don't store it.
+- `LabelPrintDialog` takes `title` and `autoPrint` (default on, off for reprints).
+
+**Where**
+- `src/lib/label/label-data.ts`: `labelFromMovement`.
+- `src/components/stock/reprint-label-dialog.tsx`: new reprint pop-up.
+- `src/components/stock/label-print-dialog.tsx`: `title` and `autoPrint` options.
+- `src/components/stock/movement-log.tsx`: Reprint label button.
+- `src/lib/label/label.test.ts`: reprint label test.
+
+<!-- files:v69 -->
+<details><summary>All files changed (6) · code: docs/changes/v69.diff</summary>
+
+- `src/components/stock/label-print-dialog.tsx` +32 -10
+- `src/components/stock/movement-log.tsx` +20 -1
+- `src/lib/label/label-data.ts` +30 -0
+- `src/lib/label/label.test.ts` +28 -0
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/components/stock/reprint-label-dialog.tsx` (new) +34 -0
+
+</details>
+<!-- /files -->
+
+## v68 · 2026-11-05 · Label direction (portrait / landscape)
+
+**Summary**
+- The label print window has a **Direction** switch: **Portrait** or **Landscape**.
+- 40 × 60 mm starts on **Landscape**, 52 × 110 mm on **Portrait**.
+- Each computer remembers the last direction separately for each label size.
+- The preview, Print window and Bluetooth printing all use the chosen direction.
+
+**Database**
+- None.
+
+**Logic**
+- Landscape turns the finished label a quarter turn clockwise, and the print window page is sized to match (e.g. 60 × 40 mm).
+- Saved on the device as `acp-label-orientation-<size>`. Unknown saved values fall back to the size's default.
+
+**Where**
+- `src/lib/label/label-sizes.ts`: directions, defaults per size, load/save (+ test).
+- `src/lib/label/print-label.ts`: `orientCanvas` turns the label; the print window page size now follows the turned label.
+- `src/components/stock/label-print-dialog.tsx`: Direction switch and matching preview shape.
+
+<!-- files:v68 -->
+<details><summary>All files changed (5) · code: docs/changes/v68.diff</summary>
+
+- `src/components/stock/label-print-dialog.tsx` +67 -14
+- `src/lib/label/label-sizes.ts` +41 -0
+- `src/lib/label/label.test.ts` +17 -0
+- `src/lib/label/print-label.ts` +23 -8
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+
+</details>
+<!-- /files -->
+
+## v67 · 2026-11-05 · Label prints the grey dot and a clearer photo
+
+**Summary**
+- Fixes labels printed with **Print window**: the grey canister type circle was missing and the tablet photo had faded to almost white.
+- The circle now prints as a grey dot pattern, and the tablet photo prints in higher contrast so its shape and shade show.
+- The preview now shows the exact black and white dots that will print.
+
+**Database**
+- None.
+
+**Logic**
+- Label printers can't print grey, and the computer's print window rounded light grey to white. The app now turns the whole label into black and white dots itself (dithering) before previewing or printing.
+- The tablet photo is turned grey and contrast-stretched first: the lightest 2% becomes white, the darkest 2% black, with mid-tones darkened.
+
+**Where**
+- `src/lib/label/bitmap.ts`: new `boostContrast` (+ test).
+- `src/lib/label/render-label.ts`: `loadPhoto` (grey, high-contrast photo) and `toPrintedDots` (whole label to dots) at the end of `renderLabel`.
+
+<!-- files:v67 -->
+<details><summary>All files changed (4) · code: docs/changes/v67.diff</summary>
+
+- `src/lib/label/bitmap.ts` +18 -0
+- `src/lib/label/label.test.ts` +21 -1
+- `src/lib/label/render-label.ts` +52 -2
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+
+</details>
+<!-- /files -->
+
+## v66 · 2026-11-05 · Two label sizes
+
+**Summary**
+- The label print window has a **Label size** switch: **40 × 60 mm** (as before) or **52 × 110 mm**.
+- The preview, Bluetooth print and print window all use the chosen size.
+- The choice is remembered on each device, so it stays set for that printer's roll.
+
+**Database**
+- None.
+
+**Logic**
+- One label design laid out in 40mm-wide units and scaled up for bigger labels (52mm = 1.3×). The 52 × 110 mm label gives each section more room, with a bigger photo and QR codes.
+- QR codes are drawn in whole printer dots so they stay sharp at any size.
+- Only the first drawing prints by itself when a printer is connected; switching size just redraws the preview.
+
+**Where**
+- `src/lib/label/label-sizes.ts` (new): the sizes, their section positions, and remembering the choice.
+- `src/lib/label/render-label.ts`: draws at the chosen size.
+- `src/lib/label/print-label.ts`: print window page size follows the chosen size.
+- `src/components/stock/label-print-dialog.tsx`: size switch and matching preview.
+
+<!-- files:v66 -->
+<details><summary>All files changed (7) · code: docs/changes/v66.diff</summary>
+
+- `src/components/stock/label-print-dialog.tsx` +58 -8
+- `src/lib/label/label-data.ts` +1 -1
+- `src/lib/label/label.test.ts` +35 -0
+- `src/lib/label/print-label.ts` +8 -5
+- `src/lib/label/render-label.ts` +79 -44
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/lib/label/label-sizes.ts` (new) +95 -0
+
+</details>
+<!-- /files -->
+
+## v65 · 2026-11-05 · Compare pictures before a photo upload
+
+**Summary**
+- The photo upload review now has three tabs: **Will be added**, **Will replace** and **Skipped**.
+- **Will be added** shows a thumbnail of each new picture (hover or click to enlarge).
+- **Will replace** shows the current picture next to the new one, with **Keep current** / **Use file** for each drug. Replacing is the default.
+- Tick several drugs (or Select all), then **Keep selected current** or **Use file for selected**. With nothing ticked, the buttons apply to every replacement.
+- The upload button and summary show how many pictures are kept current.
+
+**Database**
+- None.
+
+**Logic**
+- `drugPhotos.checkPhotos` also returns the current picture's link (`photoUrl`).
+- Kept drugs are left out of the upload, so their current picture is not touched. New pictures are always added.
+
+**Where**
+- `convex/drugPhotos.ts`: `photoUrl` in the check.
+- `src/pages/inventory/_components/photo-import-dialog.tsx`: new tabs, bulk bar and counts.
+- `src/pages/inventory/_components/photo-review-rows.tsx`: rows with thumbnails and the side-by-side comparison.
+- `src/pages/inventory/_lib/photo-choices.ts` (+ test): which photos to upload, bulk keep/replace.
+- `src/pages/inventory/_components/import-conflict-card.tsx`: `ChoicePair` shared.
+
+<!-- files:v65 -->
+<details><summary>All files changed (9) · code: docs/changes/v65.diff</summary>
+
+- `convex/drugPhotos.test.ts` +3 -0
+- `convex/drugPhotos.ts` +9 -2
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/inventory/_components/import-conflict-card.tsx` +1 -1
+- `src/pages/inventory/_components/photo-import-dialog.tsx` +75 -22
+- `src/pages/inventory/_hooks/use-photo-import.ts` +2 -2
+- `src/pages/inventory/_components/photo-review-rows.tsx` (new) +90 -0
+- `src/pages/inventory/_lib/photo-choices.test.ts` (new) +37 -0
+- `src/pages/inventory/_lib/photo-choices.ts` (new) +30 -0
+
+</details>
+<!-- /files -->
+
+---
+
+## v64 · 2026-11-05 · Picture of the other drug in barcode clashes
+
+**Summary**
+- When an imported barcode already belongs to another drug, the clash box now shows that drug's main picture (hover or click to enlarge), plus its brand name, manufacturer, the package form that owns the barcode, and its stock.
+- Shown on both the New and Conflicts tabs. No picture is shown if the other drug has none.
+
+**Database**
+- None.
+
+**Logic**
+- `findClashes` now returns the other drug's brand, manufacturer, piece name, package form, stock and picture. `checkBatch` turns the picture into a link (`describeClashes`).
+
+**Where**
+- `convex/drugImport.ts`: richer clash details.
+- `src/pages/inventory/_components/barcode-clash-fix.tsx`: picture and details in the clash box.
+- `convex/drugImport.test.ts`: checks the new clash details.
+
+<!-- files:v64 -->
+<details><summary>All files changed (4) · code: docs/changes/v64.diff</summary>
+
+- `convex/drugImport.test.ts` +7 -0
+- `convex/drugImport.ts` +33 -3
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/inventory/_components/barcode-clash-fix.tsx` +24 -3
+
+</details>
+<!-- /files -->
+
+---
+
+## v63 · 2026-11-05 · Fix barcode clashes during import
+
+**Summary**
+- When a barcode in the import file already belongs to another drug, the review screen now gives two choices for each clash: **Add without barcode** (the default) or **Change barcode**.
+- "Change barcode" shows a box to type a new barcode, with a live check that says whether it is free or also used by another drug.
+- A drug is no longer left with fewer package forms: a clashing package form is still added, just without the barcode.
+- The finished screen now says "added without barcode … (already used by another drug)".
+
+**Database**
+- None.
+
+**Logic**
+- `applyDrug` keeps the package form of a clashing barcode and saves it with an empty barcode instead of dropping it. Two clashing barcodes with the same form become one form.
+- New admin query `drugImport.barcodeOwner` checks a typed replacement barcode.
+- Typed replacements are swapped in on the screen before the import is sent (`withBarcodeFixes`). A replacement that is still taken falls back to no barcode.
+
+**Where**
+- `convex/drugImport.ts`: clash handling in `applyDrug`, new `barcodeOwner` query.
+- `src/pages/inventory/_components/barcode-clash-fix.tsx`: new per-clash choice with the barcode box.
+- `src/pages/inventory/_components/import-dialog.tsx`, `import-conflict-card.tsx`: show the choice for new drugs and conflicts.
+- `src/pages/inventory/_lib/import-choices.ts`: `BarcodeFixes` and `withBarcodeFixes`.
+- `convex/drugImport.test.ts`: tests for adding without barcode, a changed barcode, and merging.
+
+<!-- files:v63 -->
+<details><summary>All files changed (7) · code: docs/changes/v63.diff</summary>
+
+- `convex/drugImport.test.ts` +31 -1
+- `convex/drugImport.ts` +19 -2
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/inventory/_components/import-conflict-card.tsx` +9 -13
+- `src/pages/inventory/_components/import-dialog.tsx` +26 -8
+- `src/pages/inventory/_lib/import-choices.ts` +17 -0
+- `src/pages/inventory/_components/barcode-clash-fix.tsx` (new) +115 -0
+
+</details>
+<!-- /files -->
+
+---
+
+## v62 · 2026-11-05 · Look Alike, Sound Alike column in the import file
+
+**Summary**
+- The inventory import reads an optional **LASA** column (also "Look Alike, Sound Alike", "Look alike", "Sound alike") with Yes or No.
+- **Yes** marks the drug straight away. **No** on a marked drug shows up as a conflict with Keep current / Use file, because unmarking also removes its look-alike links.
+- A blank cell, or no column, leaves the mark as it is. Other values are listed under problems and ignored.
+
+**Database**
+- None. Uses the existing `drugs.lasa` field and `lasaLinks` table.
+
+**Logic**
+- `convex/lib/drugImport.ts`: `ImportDrug.lasa`, `parseYesNo`, `diffDrug(...).lasa` (`auto` when marking). Headers are now normalized by dropping all punctuation.
+- `convex/drugImport.ts`: create, update and notes-only save the mark. Unmarking clears the look-alike links (`clearLookAlikes`).
+- `logDrugImport` records mark and link changes in the activity log.
+
+**Where**
+- `convex/lib/drugImport.ts`, `convex/drugImport.ts`, `convex/lib/activity.ts`: reading, comparing and saving the mark.
+- `src/pages/inventory/_lib/import-choices.ts`, `_components/import-conflict-card.tsx`, `_components/import-dialog.tsx`: the review choice and wording.
+- Tests: `convex/lib/drugImport.test.ts`, `convex/drugImport.test.ts`.
+
+---
+
+## v61 · 2026-11-05 · Switch drug from the look-alike warning, cursor in Quantity
+
+**Summary**
+- In the Look Alike, Sound Alike warning, each look-alike now has **Use this drug instead** under each of its package forms (Stock In / Stock Out), or **Open this drug instead** (Inventory). Switching loads that drug straight away without a second warning.
+- After continuing or switching in Stock In / Stock Out, the cursor goes straight to the **Quantity** box with the number selected, ready to type.
+
+**Database**
+- None.
+
+**Logic**
+- `LasaWarningDialog` takes `switchMode`, `onSwitch` and `onAfterChoose`. It no longer returns focus to the search box after a choice.
+- `StockDrugFinder`: switching searches the other drug's Drug ID and picks its package form. While that loads, the old barcode match is not used.
+
+**Where**
+- `src/components/lasa/lasa-warning-dialog.tsx`, `src/components/lasa/lasa-drug-card.tsx`: switch buttons and focus handling.
+- `src/components/stock/stock-drug-finder.tsx`: switching and Quantity focus.
+- `src/pages/inventory/page.tsx`: switching opens the other drug's details.
+
+---
+
+## v60 · 2026-11-05 · Look Alike, Sound Alike warning pop-up
+
+**Summary**
+- Choosing a Look Alike, Sound Alike drug in **Stock In** or **Stock Out** (by tapping or by scanning its barcode) now opens a warning first. Opening one in **Inventory** shows the same warning before the details.
+- The warning shows the chosen drug and every linked look-alike side by side: drug picture, package form pictures (tap to enlarge and swipe), barcode, specifications and remarks.
+- Staff must tick "I have checked the drug picture, package form pictures, specifications and remarks" to continue. Cancel clears the pick in Stock In / Stock Out.
+
+**Database**
+- None.
+
+**Logic**
+- New query `drugs.lasaCompare(id)` returns `{ selected, lookAlikes }` with full details, or `null` for a bad id.
+- `withDetails` takes an optional `includeLookAlikes` flag (default `true`).
+- `StockDrugFinder` hides the selection from the stock form until the warning is confirmed for that drug.
+
+**Where**
+- `convex/drugs.ts`, `convex/lib/drugs.ts`: new query and flag.
+- `src/components/lasa/lasa-warning-dialog.tsx`, `src/components/lasa/lasa-drug-card.tsx`: the warning.
+- `src/components/stock/stock-drug-finder.tsx`: Stock In / Stock Out hook-up.
+- `src/pages/inventory/page.tsx`: Inventory hook-up.
+- `convex/drugs.test.ts`: test for `lasaCompare`.
+
+---
+
+## v59 · 2026-11-05 · Pictures on chosen look-alike drugs
+
+**Summary**
+- In the drug form, each chosen "Looks or sounds like" drug now shows as a small card with its picture, brand and Drug ID. Tap the picture to enlarge it, or hover for a quick preview.
+
+**Database**
+- None.
+
+**Logic**
+- `getLookAlikes` (`convex/lib/lasa.ts`) now also returns each linked drug's `imageUrl`, so `drugs.get` / `drugs.search` include it in `lookAlikes`.
+
+**Where**
+- `convex/lib/lasa.ts`: `LookAlike` type gains `imageUrl`.
+- `src/pages/inventory/_lib/drug-form-schema.ts`: `lookAlikes` items carry `imageUrl`.
+- `src/pages/inventory/_components/look-alike-picker.tsx`: chips replaced by picture cards.
+
+---
+
+## v58 · 2026-11-05 · Pictures and keyboard in the look-alike picker
+
+**Summary**
+- The "Looks or sounds like" search results now show each drug's picture (or a pill placeholder).
+- Arrow Up/Down move the highlight and Enter adds the highlighted drug. Enter no longer submits the drug form from this box. Escape clears the search.
+
+**Database**
+- None.
+
+**Logic**
+- Frontend only. Uses the existing `imageUrl` returned by `drugs.search`.
+
+**Where**
+- `src/pages/inventory/_components/look-alike-picker.tsx`: picture thumbnails, highlight state and key handling.
+
+---
+
+## v57 · 2026-11-05 · Look Alike, Sound Alike marking and filter
+
+**Summary**
+- Admins can switch on **Look Alike, Sound Alike** in the drug form and link the drugs it looks or sounds like. Links work both ways, and a linked drug is marked too.
+- Marked drugs show a red warning badge in the Inventory, Stock In and Stock Out search results. The Inventory detail panel lists the linked drugs.
+- The Inventory page has a **Look Alike, Sound Alike only** filter, which also narrows a search.
+- Barcodes stay unique.
+
+**Database**
+- `drugs.lasa` (optional boolean) and index `by_lasa_and_name`.
+- New table `lasaLinks` (`drugRef`, `otherRef`), index `by_drugRef_and_otherRef`. Each link is stored in both directions.
+- No migration needed. Unmarked drugs simply have no `lasa` field.
+
+**Logic**
+- `drugs.create` / `drugs.update` take `lasa` and `lookAlikeIds`. Switching the mark off removes every link. Self-links are ignored, at most 20 links.
+- Deleting a drug removes its links.
+- `withDetails` returns `lookAlikes` (name, brand, Drug ID) for marked drugs.
+- New query `drugs.listLasa` (paginated, by name).
+- The activity log records the mark and link changes. The import never changes the mark.
+
+**Where**
+- `convex/lib/lasa.ts`: linking helpers.
+- `convex/schema/drugs.ts`, `convex/schema.ts`: field, index and table.
+- `convex/drugs.ts`, `convex/lib/drugs.ts`, `convex/lib/activity.ts`: saving, details, logging.
+- `src/components/lasa-badge.tsx`: warning badge.
+- `src/pages/inventory/_components/lasa-fields.tsx`, `look-alike-picker.tsx`: form switch and linked-drug search.
+- `src/pages/inventory/page.tsx`: filter toggle.
+- `drug-row.tsx`, `drug-package-picker.tsx`, `drug-detail-sheet.tsx`: badge and linked drugs.
+
+---
+
 ## v56 · 2026-11-05 · Drugs with package forms first in search
 
 **Summary**
