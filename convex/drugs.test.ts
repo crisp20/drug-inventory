@@ -192,7 +192,7 @@ describe("Dangerous Drug (DDA)", () => {
   it("only lets admins mark a drug DDA", async () => {
     const { owner, staff } = await setup();
     const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
-    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
+    await owner.mutation(api.users.updateAccess, { userId: pending._id, status: "active" });
     await expect(staff.mutation(api.drugs.create, { ...drug, dda: true })).rejects.toThrow(/admins/);
   });
 });
