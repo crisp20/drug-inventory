@@ -1,6 +1,6 @@
 import { forwardRef, useState } from "react";
 import { type VariantProps } from "class-variance-authority";
-import { Eye, EyeOff, Loader2, LogIn, LogOut } from "lucide-react";
+import {  CircleAlertIcon, CircleCheckIcon, Eye, EyeOff, Loader2, LogIn, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useConvexAuth } from "convex/react";
@@ -23,8 +23,8 @@ import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
 
 export interface SignInButtonProps
   extends
-    Omit<React.ComponentProps<"button">, "onClick">,
-    VariantProps<typeof buttonVariants> {
+  Omit<React.ComponentProps<"button">, "onClick">,
+  VariantProps<typeof buttonVariants> {
   /**
    * Custom onClick handler that runs before authentication action
    */
@@ -169,6 +169,8 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
       <LogIn className="size-4" />
     );
 
+    const [credentials, setCredentials] = useState({ username: '', password: '', confirmPassword: '' });
+
     return (
       <>
         <Button
@@ -195,11 +197,12 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
               <DialogTitle>
                 {isSignUp ? "Create an account" : "Sign in"}
               </DialogTitle>
-              <DialogDescription>
-                Usernames must be in email format. No email is sent. The
-                configured Director account is activated automatically; all
-                other new accounts need Director approval.
-              </DialogDescription>
+              {
+                isSignUp &&
+                <DialogDescription>
+                  New accounts need Director approval.
+                </DialogDescription>
+              }
             </DialogHeader>
             <form
               onSubmit={(event) => void handleSubmit(event)}
@@ -230,7 +233,21 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                   autoComplete="username"
                   maxLength={MAX_USERNAME_LENGTH}
                   required
+                  onChange={(e) => setCredentials({ ...credentials, username: e.currentTarget.value })}
                 />
+                {
+                  isSignUp &&
+                  <>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        isValidUsername(credentials.username) ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Usernames must be in email format.</span>
+                    </div>
+                  </>
+                }
               </div>
               <div className="space-y-2">
                 <label htmlFor="auth-password" className="text-sm font-medium">
@@ -248,6 +265,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     maxLength={isSignUp ? MAX_PASSWORD_LENGTH : undefined}
                     className="pr-10"
                     required
+                    onChange={(e) => setCredentials({ ...credentials, password: e.currentTarget.value })}
                   />
                   <Button
                     type="button"
@@ -262,11 +280,51 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                     {showPassword ? <EyeOff /> : <Eye />}
                   </Button>
                 </div>
-                {isSignUp && (
-                  <p className="text-sm text-muted-foreground">
-                    {PASSWORD_REQUIREMENTS_MESSAGE}
-                  </p>
-                )}
+                {
+                  isSignUp &&
+                  <>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        (MIN_PASSWORD_LENGTH <= credentials.password?.length && credentials.password?.length <= MAX_PASSWORD_LENGTH) ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Between {MIN_PASSWORD_LENGTH} and {MAX_PASSWORD_LENGTH} characters long</span>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        credentials.password?.match(/[A-Z]+/) != null ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Include at least one upper case letter</span>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        credentials.password?.match(/[a-z]+/) != null ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Include at least one lower case letter</span>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        credentials.password?.match(/[^\w\s]+/) != null ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Include at least one special character</span>
+                    </div>
+                    <div className="flex space-x-2 items-center">
+                      {
+                        credentials.password?.match(/[0-9]+/) != null ?
+                          <CircleCheckIcon color="green" /> :
+                          <CircleAlertIcon color="red" />
+                      }
+                      <span className="text-sm text-muted-foreground">Include at least one digit</span>
+                    </div>
+                  </>
+                }
               </div>
               {isSignUp && (
                 <div className="space-y-2">
@@ -285,6 +343,7 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                       minLength={MIN_PASSWORD_LENGTH}
                       maxLength={MAX_PASSWORD_LENGTH}
                       required
+                      onChange={(e) => setCredentials({ ...credentials, confirmPassword: e.currentTarget.value })}
                     />
                     <Button
                       type="button"
@@ -301,6 +360,19 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
                   </div>
                 </div>
               )}
+              {
+                isSignUp &&
+                <>
+                  <div className="flex space-x-2 items-center">
+                    {
+                      credentials.confirmPassword != '' && credentials.password == credentials.confirmPassword ?
+                        <CircleCheckIcon color="green" /> :
+                        <CircleAlertIcon color="red" />
+                    }
+                    <span className="text-sm text-muted-foreground">Passwords must match</span>
+                  </div>
+                </>
+              }
               <Button type="submit" className="w-full" disabled={signingIn}>
                 {signingIn && <Loader2 className="size-4 animate-spin" />}
                 {signingIn
