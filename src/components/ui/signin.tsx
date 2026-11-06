@@ -19,6 +19,7 @@ import {
   PASSWORD_REQUIREMENTS_MESSAGE,
   validatePasswordRequirements,
 } from "@/convex/lib/password.ts";
+import { signInErrorMessage } from "@/lib/auth-errors.ts";
 import { isValidUsername, MAX_USERNAME_LENGTH } from "@/convex/lib/username.ts";
 
 export interface SignInButtonProps
@@ -147,7 +148,11 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
         toast.success(isSignUp ? "Account created" : "Signed in");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Could not sign in",
+          isSignUp
+            ? error instanceof Error
+              ? error.message
+              : "Could not sign in"
+            : signInErrorMessage(error),
         );
       } finally {
         setSigningIn(false);
