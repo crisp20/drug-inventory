@@ -15,7 +15,7 @@ In Keycloak, create a public client with Standard Flow enabled and PKCE using
 `S256`. Set the client's URLs separately:
 
 - **Valid Redirect URIs:** `http://localhost:5173/auth/callback`
-- **Valid Post Logout Redirect URIs:** `http://localhost:5173/`
+- **Valid Post Logout Redirect URIs:** `http://localhost:5173`
 - **Web Origins:** `http://localhost:5173`
 
 The Keycloak ID token must contain `email` and `name`, and its `aud` claim must
@@ -38,3 +38,7 @@ The Keycloak client secret is not used by this browser-based public client.
 After changing an identity provider, existing app profiles may not be found:
 the app keys a profile by the OIDC issuer and subject. Users may need to sign in
 once with Keycloak and be approved again by an administrator.
+
+# Ownership
+
+The `OWNER_EMAILS` env var configures the owner of the application, who are irrevokable admins.
