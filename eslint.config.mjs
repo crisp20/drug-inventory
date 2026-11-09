@@ -1,5 +1,6 @@
 import convexPlugin from "@convex-dev/eslint-plugin";
 import js from "@eslint/js";
+import herculesPlugin from "@usehercules/eslint-plugin";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import { globalIgnores } from "eslint/config";
@@ -17,6 +18,7 @@ export default defineConfig([
       reactHooks.configs.flat["recommended-latest"],
       reactRefresh.configs.vite,
       convexPlugin.configs.recommended,
+      herculesPlugin.configs.recommended,
     ],
     rules: {
       "@typescript-eslint/ban-ts-comment": [

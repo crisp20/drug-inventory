@@ -1,0 +1,150 @@
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 456f0fe..25992f4 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v75");
++    expect(CHANGE_ENTRIES[0].version).toBe("v76");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/users/page.tsx b/src/pages/users/page.tsx
+index 2932154..dc43925 100644
+--- a/src/pages/users/page.tsx
++++ b/src/pages/users/page.tsx
+@@ -42,7 +42,7 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
+     try {
+       await setAccess({ userId: user._id, enabled });
+       toast.success(
+-        `Canister features ${enabled ? "on" : "off"} for ${user.name ?? "this user"}`,
++        `Canister features ${enabled ? "on" : "off"} for ${user.name ?? user.email ?? "this user"}`,
+       );
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not update canister access"));
+@@ -92,8 +92,8 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+     const rejecting = user.status === "pending";
+     const ok = await confirm({
+       title: rejecting
+-        ? `Reject ${user.name ?? "this user"}?`
+-        : `Remove access for ${user.name ?? "this user"}?`,
++        ? `Reject ${user.name ?? user.email ?? "this user"}?`
++        : `Remove access for ${user.name ?? user.email ?? "this user"}?`,
+       description:
+         "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
+       confirmLabel: rejecting ? "Reject" : "Remove access",
+@@ -107,59 +107,65 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+   };
+ 
+   return (
+-    <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
+-      <div className="min-w-0 flex-1">
++    <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
++      {/* Name and email get their own line so the controls never squeeze them out */}
++      <div className="min-w-0">
+         <div className="flex items-center gap-2">
+-          <span className="truncate font-semibold">
+-            {user.name ?? "Unnamed"}
++          <span className="font-semibold break-words">
++            {user.name ?? user.email ?? "Unnamed"}
+           </span>
+           {isSelf && <Badge variant="secondary">You</Badge>}
+         </div>
+-        <div className="truncate text-sm text-muted-foreground">
+-          {user.email ?? "No email"}
+-        </div>
++        {user.name && (
++          <div className="text-sm break-all text-muted-foreground">
++            {user.email ?? "No email"}
++          </div>
++        )}
+       </div>
+-      {user.status === "active" && <InitialsField user={user} />}
+-      {user.status === "active" && <CanisterAccessToggle user={user} />}
+-      {!isSelf && (
+-        <div className="flex flex-wrap items-center gap-2">
+-          <Select
+-            value={role}
+-            onValueChange={(v) =>
+-              void save(
+-                { role: v === "admin" ? "admin" : "staff" },
+-                "Role updated",
+-              )
+-            }
+-          >
+-            <SelectTrigger className="w-28" aria-label="Role">
+-              <SelectValue />
+-            </SelectTrigger>
+-            <SelectContent>
+-              <SelectItem value="staff">Staff</SelectItem>
+-              <SelectItem value="admin">Admin</SelectItem>
+-            </SelectContent>
+-          </Select>
+-          {user.status !== "active" && (
+-            <Button
+-              size="sm"
+-              onClick={() => void save({ status: "active" }, "User approved")}
+-            >
+-              <UserCheck /> Approve
+-            </Button>
+-          )}
+-          {user.status !== "disabled" && (
+-            <Button
+-              size="sm"
+-              variant="ghost"
+-              className="text-destructive"
+-              onClick={() => void removeAccess()}
++      <div className="flex flex-wrap items-center gap-2">
++        {user.status === "active" && <InitialsField user={user} />}
++        {user.status === "active" && <CanisterAccessToggle user={user} />}
++        {!isSelf && (
++          <div className="flex flex-wrap items-center gap-2">
++            <Select
++              value={role}
++              onValueChange={(v) =>
++                void save(
++                  { role: v === "admin" ? "admin" : "staff" },
++                  "Role updated",
++                )
++              }
+             >
+-              <UserX /> {user.status === "pending" ? "Reject" : "Remove access"}
+-            </Button>
+-          )}
+-        </div>
+-      )}
++              <SelectTrigger className="w-28" aria-label="Role">
++                <SelectValue />
++              </SelectTrigger>
++              <SelectContent>
++                <SelectItem value="staff">Staff</SelectItem>
++                <SelectItem value="admin">Admin</SelectItem>
++              </SelectContent>
++            </Select>
++            {user.status !== "active" && (
++              <Button
++                size="sm"
++                onClick={() => void save({ status: "active" }, "User approved")}
++              >
++                <UserCheck /> Approve
++              </Button>
++            )}
++            {user.status !== "disabled" && (
++              <Button
++                size="sm"
++                variant="ghost"
++                className="text-destructive"
++                onClick={() => void removeAccess()}
++              >
++                <UserX />{" "}
++                {user.status === "pending" ? "Reject" : "Remove access"}
++              </Button>
++            )}
++          </div>
++        )}
++      </div>
+     </div>
+   );
+ }

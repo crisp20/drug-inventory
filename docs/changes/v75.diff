@@ -1,0 +1,301 @@
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 2072911..ba13594 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -164,7 +164,28 @@ export default function MovementForm({
+     data: StockInLabelData;
+     copies: number;
+     afterSave: boolean;
++    // Set while the Stock In is waiting to be saved (it saves on print)
++    save?: () => Promise<boolean>;
+   } | null>(null);
++  const closeStockInLabel = async () => {
++    const pending = stockInLabel;
++    if (!pending) return;
++    if (pending.save) {
++      const ok = await confirm({
++        title: "Save without printing?",
++        description:
++          "This Stock In hasn't been saved yet. Save it without printing labels, or go back to the form to keep editing.",
++        confirmLabel: "Save Stock In",
++        cancelLabel: "Back to the form",
++      });
++      if (ok && !(await pending.save())) return;
++      setStockInLabel(null);
++      if (ok) onDone();
++      return;
++    }
++    setStockInLabel(null);
++    if (pending.afterSave) onDone();
++  };
+   const buildStockInLabel = (): StockInLabelData => {
+     const values = form.getValues();
+     return {
+@@ -250,8 +271,41 @@ export default function MovementForm({
+         return;
+       }
+     }
++    const args = { packageId: pkg._id, ...values };
++    if (kind === "in" && needsLabels) {
++      // Preview the labels first; nothing is saved until the user prints
++      const inArgs = {
++        ...args,
++        batch: batch || undefined,
++        expiry: expiry || undefined,
++        mismatchedScan: mismatchedScan || undefined,
++        eight: eight ? true : undefined,
++        labels: hasBarcode && labelsOn ? true : undefined,
++      };
++      setStockInLabel({
++        data: buildStockInLabel(),
++        copies: defaultLabelCopies(values.quantity),
++        afterSave: true,
++        save: async () => {
++          try {
++            const result = await recordIn(inArgs);
++            toast.success(
++              `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
++              { description: `Stock is now ${result.stockAfter}` },
++            );
++            form.reset(form.getValues());
++            // Saved: printing again or closing must not save a second time
++            setStockInLabel((s) => (s ? { ...s, save: undefined } : s));
++            return true;
++          } catch (e) {
++            toast.error(errorMessage(e, copy.error));
++            return false;
++          }
++        },
++      });
++      return;
++    }
+     try {
+-      const args = { packageId: pkg._id, ...values };
+       const canister = useCanister
+         ? {
+             batch,
+@@ -287,16 +341,6 @@ export default function MovementForm({
+           description: `Stock is now ${result.stockAfter}`,
+         },
+       );
+-      if (needsLabels) {
+-        // Stock is saved; one label per package received by default (editable)
+-        setStockInLabel({
+-          data: buildStockInLabel(),
+-          copies: defaultLabelCopies(values.quantity),
+-          afterSave: true,
+-        });
+-        form.reset(form.getValues());
+-        return;
+-      }
+       if (canister) {
+         // Stock is saved first; the label dialog lets them print or reprint
+         setLabel({
+@@ -473,7 +517,7 @@ export default function MovementForm({
+             {willPrint
+               ? "Print Label & Record Stock Out"
+               : needsLabels
+-                ? "Record Stock In & Print Labels"
++                ? "Check Labels & Record Stock In"
+                 : copy.submit}
+           </Button>
+         </div>
+@@ -489,15 +533,22 @@ export default function MovementForm({
+         data={stockInLabel?.data ?? null}
+         copies={stockInLabel?.copies ?? 1}
+         title={
+-          stockInLabel?.afterSave
+-            ? "Stock In recorded. Print the labels"
+-            : "Print labels"
++          stockInLabel?.save
++            ? "Check the labels, then print"
++            : stockInLabel?.afterSave
++              ? "Stock In recorded. Print the labels"
++              : "Print labels"
+         }
+-        onClose={() => {
+-          const afterSave = stockInLabel?.afterSave;
+-          setStockInLabel(null);
+-          if (afterSave) onDone();
+-        }}
++        onSave={stockInLabel?.save}
++        onEdit={
++          stockInLabel?.save
++            ? () => {
++                // Back to the form with everything still filled in
++                setStockInLabel(null);
++              }
++            : undefined
++        }
++        onClose={() => void closeStockInLabel()}
+       />
+     </Form>
+   );
+diff --git a/src/components/stock/stock-in-label-dialog.tsx b/src/components/stock/stock-in-label-dialog.tsx
+index b3f1545..54d2505 100644
+--- a/src/components/stock/stock-in-label-dialog.tsx
++++ b/src/components/stock/stock-in-label-dialog.tsx
+@@ -1,5 +1,12 @@
+ import { useEffect, useRef, useState } from "react";
+-import { Bluetooth, Minus, Plus, Printer, RotateCcw } from "lucide-react";
++import {
++  Bluetooth,
++  Minus,
++  Pencil,
++  Plus,
++  Printer,
++  RotateCcw,
++} from "lucide-react";
+ import { toast } from "sonner";
+ import {
+   Dialog,
+@@ -61,6 +68,10 @@ type Props = {
+   // Starting number of labels (usually the quantity received)
+   copies: number;
+   title: string;
++  // Saves the Stock In before the first print; false means saving failed
++  onSave?: () => Promise<boolean>;
++  // Back to the form to change the entry (not offered on reprints)
++  onEdit?: () => void;
+   onClose: () => void;
+ };
+ 
+@@ -70,6 +81,8 @@ export default function StockInLabelDialog({
+   data,
+   copies,
+   title,
++  onSave,
++  onEdit,
+   onClose,
+ }: Props) {
+   return (
+@@ -81,6 +94,8 @@ export default function StockInLabelDialog({
+             data={data}
+             initialCopies={copies}
+             title={title}
++            onSave={onSave}
++            onEdit={onEdit}
+           />
+         )}
+       </DialogContent>
+@@ -96,11 +111,26 @@ function StockInLabelPrinter({
+   data,
+   initialCopies,
+   title,
++  onSave,
++  onEdit,
+ }: {
+   data: StockInLabelData;
+   initialCopies: number;
+   title: string;
++  onSave?: () => Promise<boolean>;
++  onEdit?: () => void;
+ }) {
++  const [saving, setSaving] = useState(false);
++  // Saves the entry (once) before printing; returns false if it couldn't be saved
++  const saveFirst = async (): Promise<boolean> => {
++    if (!onSave) return true;
++    setSaving(true);
++    try {
++      return await onSave();
++    } finally {
++      setSaving(false);
++    }
++  };
+   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const [preview, setPreview] = useState<string | null>(null);
+   const [status, setStatus] = useState<Status>({ state: "drawing" });
+@@ -139,6 +169,7 @@ function StockInLabelPrinter({
+   const printBluetooth = async () => {
+     const canvas = canvasRef.current;
+     if (!canvas) return;
++    if (!(await saveFirst())) return;
+     setStatus({ state: "printing" });
+     try {
+       await connectPrinter();
+@@ -158,16 +189,19 @@ function StockInLabelPrinter({
+     }
+   };
+ 
+-  const printWindow = () => {
+-    if (!canvasRef.current) return;
++  const printWindow = async () => {
++    const canvas = canvasRef.current;
++    if (!canvas) return;
++    if (!(await saveFirst())) return;
+     try {
+-      printCanvasWindow(canvasRef.current, copies);
++      printCanvasWindow(canvas, copies);
+     } catch (e) {
+       toast.error(errorMessage(e, "Could not open the print window"));
+     }
+   };
+ 
+-  const busy = status.state === "drawing" || status.state === "printing";
++  const busy =
++    saving || status.state === "drawing" || status.state === "printing";
+   const name = printerName();
+ 
+   return (
+@@ -179,7 +213,9 @@ function StockInLabelPrinter({
+             ? `${status.copies} label${status.copies === 1 ? "" : "s"} printed${name ? ` on ${name}` : ""}.`
+             : status.state === "printing"
+               ? "Printing…"
+-              : `40 × 60 mm label. ${canBluetooth ? "Connect the HPRT printer by Bluetooth, or use the print window." : "Use the print window with the printer paired to this device."}`}
++              : onSave
++                ? "Not saved yet. The Stock In is saved when you print. Use Edit to change the entry."
++                : `40 × 60 mm label. ${canBluetooth ? "Connect the HPRT printer by Bluetooth, or use the print window." : "Use the print window with the printer paired to this device."}`}
+         </DialogDescription>
+       </DialogHeader>
+ 
+@@ -265,15 +301,28 @@ function StockInLabelPrinter({
+       )}
+ 
+       <DialogFooter className="gap-2 sm:justify-between">
+-        <Button
+-          type="button"
+-          variant="ghost"
+-          onClick={printWindow}
+-          disabled={!preview}
+-        >
+-          <Printer />
+-          Print window
+-        </Button>
++        <div className="flex gap-2">
++          {onEdit && (
++            <Button
++              type="button"
++              variant="secondary"
++              onClick={onEdit}
++              disabled={saving || status.state === "printing"}
++            >
++              <Pencil />
++              Edit
++            </Button>
++          )}
++          <Button
++            type="button"
++            variant="ghost"
++            onClick={() => void printWindow()}
++            disabled={!preview || saving}
++          >
++            {saving ? <Spinner /> : <Printer />}
++            Print window
++          </Button>
++        </div>
+         {canBluetooth && (
+           <div className="flex gap-2">
+             {name && (
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 79bcf91..456f0fe 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v74");
++    expect(CHANGE_ENTRIES[0].version).toBe("v75");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,

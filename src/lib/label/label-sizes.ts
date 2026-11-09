@@ -2,13 +2,18 @@
 // Layout numbers are in "base" units: the 40mm design is 320 units wide, and bigger
 // labels are drawn at a scale so the same 320-unit design fills their width.
 
-export type LabelSizeId = "40x60" | "52x110";
+export type LabelSizeId = "40x60" | "52x110" | "54x70";
+
+// A label with a pre-printed strip (the ACP logo): the design of a smaller size
+// is printed inside it, `leftMm` from the left and centred along the length
+export type LabelSheet = { content: LabelSizeId; leftMm: number };
 
 export type LabelSize = {
   id: LabelSizeId;
   name: string;
   widthMm: number;
   heightMm: number;
+  sheet?: LabelSheet;
   // Where the fill record ends and the canister face ends, in base units
   topEnd: number;
   middleEnd: number;
@@ -51,9 +56,60 @@ export const LABEL_SIZES: Record<LabelSizeId, LabelSize> = {
     faceQr: 110,
     tagQr: 105,
   },
+  // Pre-printed ACP logo strip down the left; prints the 40 x 60 design beside it.
+  // The layout numbers below are the 40 x 60 ones, since that design is what prints.
+  "54x70": {
+    id: "54x70",
+    name: "54 × 70 mm",
+    widthMm: 54,
+    heightMm: 70,
+    // 13 mm (not 14) leaves ~1 mm clear of the pre-printed bottom strip
+    sheet: { content: "40x60", leftMm: 13 },
+    topEnd: 125,
+    middleEnd: 365,
+    photoW: 100,
+    photoH: 80,
+    photoAcross: 58,
+    faceQr: 78,
+    tagQr: 72,
+  },
 };
 
 export const DEFAULT_LABEL_SIZE: LabelSizeId = "40x60";
+
+// Stock In labels come in the plain 40 x 60 or the ACP 54 x 70 with the logo strip
+export const STOCK_IN_LABEL_SIZES: LabelSizeId[] = ["40x60", "54x70"];
+
+const STOCK_IN_KEY = "acp-stock-in-label-size";
+
+export function loadStockInLabelSize(): LabelSizeId {
+  try {
+    const saved = localStorage.getItem(STOCK_IN_KEY);
+    return isLabelSizeId(saved) && STOCK_IN_LABEL_SIZES.includes(saved)
+      ? saved
+      : DEFAULT_LABEL_SIZE;
+  } catch {
+    return DEFAULT_LABEL_SIZE;
+  }
+}
+
+export function saveStockInLabelSize(id: LabelSizeId): void {
+  try {
+    localStorage.setItem(STOCK_IN_KEY, id);
+  } catch {
+    // Private mode: the choice just isn't remembered
+  }
+}
+
+// Where the printed design sits on a sheet label, in printer dots
+export function sheetOffset(size: LabelSize): { x: number; y: number } | null {
+  if (!size.sheet) return null;
+  const content = LABEL_SIZES[size.sheet.content];
+  return {
+    x: Math.round(size.sheet.leftMm * DOTS_PER_MM),
+    y: Math.round(((size.heightMm - content.heightMm) / 2) * DOTS_PER_MM),
+  };
+}
 
 export function isLabelSizeId(value: unknown): value is LabelSizeId {
   return typeof value === "string" && value in LABEL_SIZES;
@@ -106,6 +162,8 @@ export const LABEL_ORIENTATIONS: { id: LabelOrientation; name: string }[] = [
 export const DEFAULT_ORIENTATION: Record<LabelSizeId, LabelOrientation> = {
   "40x60": "landscape",
   "52x110": "portrait",
+  // Prints upright from the printer, like the ACP sample
+  "54x70": "portrait",
 };
 
 export function isLabelOrientation(value: unknown): value is LabelOrientation {

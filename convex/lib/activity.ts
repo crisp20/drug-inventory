@@ -72,7 +72,13 @@ export async function logActivity(ctx: MutationCtx, actor: Actor, e: Entry) {
 
 type DrugFields = Pick<
   Doc<"drugs">,
-  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName" | "specifications" | "remarks"
+  | "drugId"
+  | "name"
+  | "brandName"
+  | "manufacturer"
+  | "pieceName"
+  | "specifications"
+  | "remarks"
 >;
 
 const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
@@ -112,18 +118,32 @@ export function diffLasa(
   const changes: Change[] = [];
   const yesNo = (b: boolean | undefined) => (b ? "Yes" : "No");
   if (!!beforeMark !== !!afterMark) {
-    changes.push({ field: "Look Alike, Sound Alike", before: yesNo(beforeMark), after: yesNo(afterMark) });
+    changes.push({
+      field: "Look Alike, Sound Alike",
+      before: yesNo(beforeMark),
+      after: yesNo(afterMark),
+    });
   }
   const old = links.before.join("; ");
   const now = links.after.join("; ");
-  if (old !== now) changes.push({ field: "Look-alike drugs", before: old, after: now });
+  if (old !== now)
+    changes.push({ field: "Look-alike drugs", before: old, after: now });
   return changes;
 }
 
 // The Dangerous Drug (DDA) mark, as an activity change
-export function diffDda(beforeMark: boolean | undefined, afterMark: boolean | undefined): Change[] {
+export function diffDda(
+  beforeMark: boolean | undefined,
+  afterMark: boolean | undefined,
+): Change[] {
   if (!!beforeMark === !!afterMark) return [];
-  return [{ field: "Dangerous Drug (DDA)", before: beforeMark ? "Yes" : "No", after: afterMark ? "Yes" : "No" }];
+  return [
+    {
+      field: "Dangerous Drug (DDA)",
+      before: beforeMark ? "Yes" : "No",
+      after: afterMark ? "Yes" : "No",
+    },
+  ];
 }
 
 type PackageLike = Pick<
@@ -190,9 +210,15 @@ function pictureDetail(added: number, removed: number) {
 
 type DrugSave = {
   drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
-  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean }) | null;
+  before:
+    | (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean })
+    | null;
   beforePackages: SavedPackage[];
-  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean };
+  after: DrugFields & {
+    imageId?: Id<"_storage">;
+    lasa?: boolean;
+    dda?: boolean;
+  };
   afterPackages: PackageInput[];
   // The import only sends this when unmarking removed links
   lookAlikes?: LookAlikeChange;
@@ -307,7 +333,11 @@ export async function logDrugImport(
   const { drug, before, after } = s;
   const changes = [
     ...diffDrugFields(before, after),
-    ...diffLasa(before?.lasa, after.lasa, s.lookAlikes ?? { before: [], after: [] }),
+    ...diffLasa(
+      before?.lasa,
+      after.lasa,
+      s.lookAlikes ?? { before: [], after: [] },
+    ),
     ...diffDda(before?.dda, after.dda),
   ];
   const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
@@ -378,6 +408,9 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
         `Stock ${m.stockBefore} → ${m.stockAfter}`,
         m.reason ?? "",
         m.canister ? formatCanister(m.canister) : formatBatchExpiry(m),
+        m.labels ? "Labels printed" : "",
+        m.bagLabels ? "Medicine Bag Labels printed" : "",
+        m.eight ? "8 box ticked" : "",
         formatMismatchedScan(m.mismatchedScan),
         m.notes,
       ]

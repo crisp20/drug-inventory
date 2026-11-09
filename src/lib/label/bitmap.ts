@@ -45,16 +45,17 @@ export function packRows(
   return { bytesPerRow, data };
 }
 
-// One CPCL label: the picture at the top-left, then feed to the next label gap
+// One CPCL label picture, printed `copies` times, feeding to the next label gap each time
 export function buildCpclJob(
   mono: Uint8Array,
   width: number,
   height: number,
+  copies = 1,
 ): Uint8Array {
   const { bytesPerRow, data } = packRows(mono, width, height);
   const enc = new TextEncoder();
   const head = enc.encode(
-    `! 0 200 200 ${height} 1\r\nPAGE-WIDTH ${bytesPerRow * 8}\r\nCG ${bytesPerRow} ${height} 0 0 `,
+    `! 0 200 200 ${height} ${Math.max(1, Math.floor(copies))}\r\nPAGE-WIDTH ${bytesPerRow * 8}\r\nCG ${bytesPerRow} ${height} 0 0 `,
   );
   const tail = enc.encode("\r\nFORM\r\nPRINT\r\n");
   const job = new Uint8Array(head.length + data.length + tail.length);

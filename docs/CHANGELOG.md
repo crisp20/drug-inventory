@@ -19,6 +19,343 @@ The database schema lives in `convex/schema.ts` and `convex/schema/*.ts`. Runnin
 
 ---
 
+## v82 · 2026-11-07 · Import accepts 1 and 0 for DDA and LASA
+
+**Summary**
+- The inventory import reads `1` as Yes and `0` as No in the DDA and LASA columns, including Excel number cells such as `1.0` or `0.00`.
+- The import window and the problem message now mention 1/0.
+
+**Database**
+- None.
+
+**Logic**
+- `parseYesNo`: any number equal to 1 is Yes, any number equal to 0 is No; other numbers (e.g. 2) are reported and the mark is left unchanged.
+
+**Where**
+- `convex/lib/drugImport.ts`: number handling in `parseYesNo`, clearer problem message.
+- `convex/lib/drugImport.test.ts`: test for 1/0 values.
+- `src/pages/inventory/_components/import-dialog.tsx`: column help text.
+
+<!-- files:v82 -->
+<details><summary>All files changed (4) · code: docs/changes/v82.diff</summary>
+
+- `convex/lib/drugImport.test.ts` +8 -0
+- `convex/lib/drugImport.ts` +9 -3
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/inventory/_components/import-dialog.tsx` +2 -2
+
+</details>
+<!-- /files -->
+
+## v81 · 2026-11-06 · Medicine Bag Label
+
+**Summary**
+- Stock In now has two label types: the **Medicine Label** (the existing one, one per package) and the new **Medicine Bag Label**.
+- Package forms without a barcode always print the Medicine Label (it can't be unticked). The Medicine Bag Label is optional for every package form, and the Medicine Label is optional for barcoded ones.
+- Each Medicine Bag Label has a numbered 5 × 3 grid. Numbers start at 1 for each Stock In, 15 per label: a quantity of 16 prints one label with 1–15 and one with 16.
+- The bag label shows the brand and generic names, "DDA,8"-style marks, the package icon and package form, the grid and a QR code. It has no photo.
+- The print dialog previews every label, uses the same size and direction choices, and prints both types together. Reprints use the label types the entry was printed with.
+- v80 holds the first part of this work (the bag label drawing).
+
+**Database**
+- `stockMovements.bagLabels` (optional boolean) added: true when Medicine Bag Labels were chosen. No migration needed.
+
+**Logic**
+- Bag label QR text follows the old system: `<Drug ID>;<Resident ID>;<Start time>;<Package form>;<Resident ID>,<DDA>_<Initials><*>`. Resident ID and start time are left blank for now, e.g. `12670;;;60/Box x1;DDA_HS`. The Medicine Label QR text is unchanged.
+- The 8 mark is kept when the entry gets either label type.
+- An entry can be reprinted if it had a Medicine Label or bag labels.
+
+**Where**
+- `src/lib/label/bag-label.ts`, `render-bag.ts`, `stock-in-set.ts`: bag label numbers, QR text, drawing, and drawing both types together.
+- `src/components/stock/stock-in-label-section.tsx`: the two label choices.
+- `src/components/stock/stock-in-label-dialog.tsx`, `label-preview.tsx`: previews and printing of both types.
+- `src/components/stock/movement-form.tsx`, `movement-form-schema.ts`, `reprint-label-dialog.tsx`: the new choice is passed through.
+- `convex/stock.ts`, `convex/schema/stock.ts`, `convex/lib/activity.ts`: saves and logs `bagLabels`.
+
+<!-- files:v81 -->
+<details><summary>All files changed (16) · code: docs/changes/v81.diff</summary>
+
+- `convex/lib/activity.ts` +1 -0
+- `convex/schema/stock.ts` +2 -0
+- `convex/stock.test.ts` +18 -0
+- `convex/stock.ts` +18 -4
+- `src/components/stock/movement-form-schema.ts` +4 -1
+- `src/components/stock/movement-form.tsx` +28 -3
+- `src/components/stock/reprint-label-dialog.tsx` +10 -1
+- `src/components/stock/stock-in-label-dialog.tsx` +141 -92
+- `src/components/stock/stock-in-label-section.tsx` +91 -45
+- `src/lib/label/bag-label.ts` +40 -7
+- `src/lib/label/render-bag.ts` +11 -4
+- `src/lib/label/stock-in-label.ts` +16 -5
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/components/stock/label-preview.tsx` (new) +31 -0
+- `src/lib/label/bag-label.test.ts` (new) +59 -0
+- `src/lib/label/stock-in-set.ts` (new) +47 -0
+
+</details>
+<!-- /files -->
+
+---
+
+## v79 · 2026-11-06 · 54 × 70 mm label moved 1 mm
+
+**Summary**
+- On 54 × 70 mm labels the print now starts 13 mm from the logo side (was 14 mm), so it no longer runs onto the pre-printed purple strip at the bottom. There is about 1 mm clear on each side.
+
+**Database**
+- None.
+
+**Logic**
+- `leftMm` for the `54x70` sheet changed from 14 to 13 (104 dots instead of 112).
+
+**Where**
+- `src/lib/label/label-sizes.ts`: the new offset.
+- `src/lib/label/label.test.ts`: test updated.
+
+<!-- files:v79 -->
+<details><summary>All files changed (3) · code: docs/changes/v79.diff</summary>
+
+- `src/lib/label/label-sizes.ts` +2 -1
+- `src/lib/label/label.test.ts` +4 -4
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+
+</details>
+<!-- /files -->
+
+---
+
+## v78 · 2026-11-06 · 54 × 70 mm ACP label size
+
+**Summary**
+- New 54 × 70 mm label size, for the ACP label roll with the logo strip pre-printed down the left.
+- The 40 × 60 mm design prints on it 14 mm from the left, centred along the length (5 mm top and bottom). The logo strip area is left blank.
+- Offered everywhere: the Stock In label window now has a Label size picker (40 × 60 or 54 × 70), and the Canister label window lists it too. The choice is remembered on each device.
+- Starts in Portrait (upright, like the sample); the Portrait/Landscape switch still works.
+- The preview shows a faint dashed outline where the pre-printed logo is. It is never printed.
+
+**Database**
+- None.
+
+**Logic**
+- A "sheet" size prints a smaller size's design at a fixed offset on a bigger label.
+
+**Where**
+- `src/lib/label/label-sizes.ts`: `54x70` size with `sheet: { content: "40x60", leftMm: 14 }`, `sheetOffset`, and the remembered Stock In size.
+- `src/lib/label/sheet.ts`: new; places the design on the sheet, and draws the preview-only outline.
+- `src/lib/label/render-label.ts`, `render-stock-in.ts`: draw through `renderOnSheet`.
+- `src/lib/label/preview-class.ts`: new; preview box shapes shared by both label windows.
+- `src/components/stock/stock-in-label-dialog.tsx`: Label size picker.
+- `src/components/stock/label-print-dialog.tsx`: preview outline for 54 × 70.
+
+<!-- files:v78 -->
+<details><summary>All files changed (10) · code: docs/changes/v78.diff</summary>
+
+- `src/components/stock/label-print-dialog.tsx` +8 -16
+- `src/components/stock/stock-in-label-dialog.tsx` +56 -20
+- `src/lib/label/label-designs.ts` +1 -0
+- `src/lib/label/label-sizes.ts` +58 -1
+- `src/lib/label/label.test.ts` +12 -0
+- `src/lib/label/render-label.ts` +6 -3
+- `src/lib/label/render-stock-in.ts` +5 -2
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/lib/label/preview-class.ts` (new) +23 -0
+- `src/lib/label/sheet.ts` (new) +61 -0
+
+</details>
+<!-- /files -->
+
+## v77 · 2026-11-06 · Package icon matches the package form on Stock In labels
+
+**Summary**
+- The icon beside the package form on Stock In labels now matches what was chosen: Box, Bottle, Strip or Bag, using the owner's uploaded icons. This applies to the preview, printing and reprints.
+- Icons print solid black so the lines stay sharp. If an icon can't load, the old drawn box is used instead.
+
+**Database**
+- None.
+
+**Logic**
+- The label data now carries the package form's base unit, which picks the icon.
+
+**Where**
+- `src/lib/label/package-icons.ts`: new; icon address per base unit, and a loader that turns the purple icon into black-on-white.
+- `src/lib/label/render-stock-in.ts`: draws the chosen icon, falling back to the drawn box.
+- `src/lib/label/stock-in-label.ts`: `StockInLabelData.baseUnit`; reprints fill it from the saved entry.
+- `src/components/stock/movement-form.tsx`: passes the package's base unit to the label.
+- `src/lib/label/draw.ts`: `loadImage` shared.
+
+<!-- files:v77 -->
+<details><summary>All files changed (7) · code: docs/changes/v77.diff</summary>
+
+- `src/components/stock/movement-form.tsx` +1 -0
+- `src/lib/label/draw.ts` +1 -1
+- `src/lib/label/render-stock-in.ts` +11 -4
+- `src/lib/label/stock-in-label.test.ts` +1 -0
+- `src/lib/label/stock-in-label.ts` +3 -0
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/lib/label/package-icons.ts` (new) +45 -0
+
+</details>
+<!-- /files -->
+
+## v76 · 2026-11-06 · Users page shows every name and email
+
+**Summary**
+- Each user card on the Users page now shows the person's name and email on their own line, with the Initials, Canister, Role and Remove access controls underneath. Before, the controls squeezed the name and email out of view for everyone except the signed-in admin.
+- When a person has no saved name, their email is shown as the main line (instead of "Unnamed"), and is used in pop-ups and messages.
+
+**Database**
+- None.
+
+**Logic**
+- No rule changes; display only.
+
+**Where**
+- `src/pages/users/page.tsx`: `UserRow` stacks the name/email above a wrapping row of controls; long emails wrap instead of being cut off; email fallback when the name is missing.
+
+<!-- files:v76 -->
+<details><summary>All files changed (2) · code: docs/changes/v76.diff</summary>
+
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/users/page.tsx` +56 -50
+
+</details>
+<!-- /files -->
+
+## v75 · 2026-11-06 · Check and edit Stock In labels before saving
+
+**Summary**
+- When a Stock In needs labels, the button now reads **Check Labels & Record Stock In**. It opens the label preview **before** anything is saved.
+- The preview window has an **Edit** button that goes back to the form with everything still filled in (quantity, batch, expiry, 8 box, notes).
+- The Stock In is saved when the user clicks **Print window** or **Connect & print** (only once, even if printed again).
+- Closing the window without printing asks **Save without printing?**: **Save Stock In** saves it; **Back to the form** keeps editing.
+- Reprints have no Edit button; only the number of labels and direction can change.
+
+**Database**
+- No changes.
+
+**Logic**
+- The large-quantity and expiring-soon checks still run before the preview.
+- If saving fails (e.g. not enough permission), nothing prints and the error is shown.
+
+**Where**
+- `src/components/stock/movement-form.tsx`: preview first; `save` callback runs `recordIn` on first print; close asks to save.
+- `src/components/stock/stock-in-label-dialog.tsx`: `onSave` and `onEdit` props, Edit button, "Not saved yet" note.
+
+<!-- files:v75 -->
+<details><summary>All files changed (3) · code: docs/changes/v75.diff</summary>
+
+- `src/components/stock/movement-form.tsx` +71 -20
+- `src/components/stock/stock-in-label-dialog.tsx` +64 -15
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+
+</details>
+<!-- /files -->
+
+---
+
+## v74 · 2026-11-06 · Optional Stock In labels for package forms with a barcode
+
+**Summary**
+- Stock In of a package form **with a barcode** now shows a **Print labels** tick box (unticked by default).
+- Ticking it shows the same Labels section as package forms without a barcode: **Print label** button, **Print 8 on the labels** tick box, and the print window after saving (number of labels = quantity received, editable).
+- These entries get a **Reprint label** button only if labels were turned on.
+
+**Database**
+- `stockMovements.labels` (optional boolean) added: labels were chosen for a package form that has a barcode. No migration needed.
+
+**Logic**
+- `labels` is only saved for Stock In of a package form with a barcode when ticked.
+- `eight` is now saved for any Stock In that gets labels (no barcode, or labels chosen).
+- Activity log detail adds "Labels printed".
+
+**Where**
+- `convex/stock.ts`, `convex/schema/stock.ts`, `convex/lib/activity.ts`: save `labels` and the wider `eight` rule.
+- `src/components/stock/stock-in-label-section.tsx`: the Print labels tick box for barcoded forms.
+- `src/components/stock/movement-form.tsx`, `movement-form-schema.ts`: `labelsOn` field; labels needed when no barcode or ticked.
+- `src/lib/label/stock-in-label.ts`: `hasReprintableLabel` includes entries with `labels`.
+
+<!-- files:v74 -->
+<details><summary>All files changed (10) · code: docs/changes/v74.diff</summary>
+
+- `convex/lib/activity.ts` +39 -8
+- `convex/schema/stock.ts` +4 -1
+- `convex/stock.test.ts` +25 -0
+- `convex/stock.ts` +14 -6
+- `src/components/stock/movement-form-schema.ts` +3 -1
+- `src/components/stock/movement-form.tsx` +10 -3
+- `src/components/stock/stock-in-label-section.tsx` +81 -45
+- `src/lib/label/stock-in-label.test.ts` +8 -1
+- `src/lib/label/stock-in-label.ts` +6 -3
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+
+</details>
+<!-- /files -->
+
+---
+
+## v73 · 2026-11-06 · Stock In labels for package forms without a barcode
+
+**Summary**
+- Stock In of a package form **without a barcode** now has a **Labels** section with a **Print label** button and a **Print 8 on the labels** tick box (unticked by default).
+- After **Record Stock In & Print Labels**, a print window opens for a 40 × 60 mm label, with **Number of labels** filled in from the quantity received (editable, up to 100).
+- The label matches the ACP samples: brand name, drug name, package icon and form (e.g. 100/Box x1), tablet photo, DDA box (from the medicine's DDA mark), 8 box (stacked under DDA), batch and expiry when entered, and a QR code.
+- QR code text: `<Drug ID>;<Package form>;<DDA>_<Initials><*>`, e.g. `13103;100/Box x1;DDA_HS` or `5467;28/Box x1;_HS*` (the `*` means the 8 box).
+- Recent Stock In entries without a barcode get a **Reprint label** button (initials and 8 from the original entry; DDA from the medicine now).
+- Admins can set each person's **label initials** on the Users page. Blank uses the first letters of their name. Canister labels use them too.
+
+**Database**
+- `users.initials` (optional string) added.
+- `stockMovements.eight` (optional boolean) and `stockMovements.userInitials` (optional string) added.
+- All optional, so no migration is needed. Older entries reprint with initials worked out from the saved name.
+
+**Logic**
+- `eight` is only saved for Stock In of a package form with no barcode.
+- Initials: 1–4 letters/numbers, saved in capitals; admin only; changes logged in the activity log.
+- The Bluetooth job asks the printer for N copies of one picture; the print window prints one page per copy.
+
+**Where**
+- `convex/lib/initials.ts`: shared initials rules (`userInitials`, `normalizeInitials`, `isValidInitials`).
+- `convex/users.ts`: new admin mutation `setInitials`.
+- `convex/stock.ts`: `recordIn` accepts `eight`; every entry saves `userInitials`.
+- `src/lib/label/stock-in-label.ts`, `render-stock-in.ts`: Stock In label data, QR text and drawing.
+- `src/lib/label/render-compact.ts`, `draw.ts`: shared landscape drawing and tag boxes.
+- `src/lib/label/bitmap.ts`, `print-label.ts`: copies.
+- `src/components/stock/stock-in-label-dialog.tsx`, `stock-in-label-section.tsx`, `movement-form.tsx`, `reprint-label-dialog.tsx`, `movement-log.tsx`: Stock In form, print window and reprints.
+- `src/pages/users/_components/initials-field.tsx`: initials box on the Users page.
+
+<!-- files:v73 -->
+<details><summary>All files changed (26) · code: docs/changes/v73.diff</summary>
+
+- `convex/lib/activity.ts` +1 -0
+- `convex/schema/stock.ts` +4 -0
+- `convex/schema/users.ts` +2 -0
+- `convex/stock.test.ts` +95 -0
+- `convex/stock.ts` +9 -1
+- `convex/users.ts` +41 -0
+- `src/components/stock/drug-package-picker.tsx` +5 -1
+- `src/components/stock/movement-form-schema.ts` +2 -0
+- `src/components/stock/movement-form.tsx` +81 -8
+- `src/components/stock/movement-log.tsx` +3 -1
+- `src/components/stock/reprint-label-dialog.tsx` +25 -9
+- `src/components/stock/stock-drug-finder.tsx` +5 -2
+- `src/lib/label/bitmap.ts` +3 -2
+- `src/lib/label/draw.ts` +26 -0
+- `src/lib/label/label-data.ts` +6 -14
+- `src/lib/label/print-label.ts` +15 -6
+- `src/lib/label/render-compact.ts` +14 -29
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `src/pages/users/page.tsx` +2 -0
+- `convex/lib/initials.ts` (new) +35 -0
+- `src/components/stock/stock-in-label-dialog.tsx` (new) +311 -0
+- `src/components/stock/stock-in-label-section.tsx` (new) +77 -0
+- `src/lib/label/render-stock-in.ts` (new) +114 -0
+- `src/lib/label/stock-in-label.test.ts` (new) +123 -0
+- `src/lib/label/stock-in-label.ts` (new) +98 -0
+- `src/pages/users/_components/initials-field.tsx` (new) +62 -0
+
+</details>
+<!-- /files -->
+
 ## v71 · 2026-11-05 · Dangerous Drug (DDA) tick box
 
 **Summary**

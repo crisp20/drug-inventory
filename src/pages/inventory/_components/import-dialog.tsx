@@ -65,8 +65,8 @@ export default function ImportDialog({ open, onOpenChange }: { open: boolean; on
           <DialogTitle>Import inventory file</DialogTitle>
           <DialogDescription>
             Excel or CSV file with the columns drugid, printoutName, brandName, Manufacturer, DosageForm, barcode,
-            form, per and amount. Optional: Specifications, Remarks, LASA (Yes or No for Look Alike, Sound
-            Alike) and DDA (Yes or No for Dangerous Drug).
+            form, per and amount. Optional: Specifications, Remarks, LASA (Yes/No or 1/0 for Look Alike, Sound
+            Alike) and DDA (Yes/No or 1/0 for Dangerous Drug).
           </DialogDescription>
         </DialogHeader>
         <ImportSteps step={step} setStep={setStep} importer={importer} onClose={() => reset(false)} />

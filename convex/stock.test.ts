@@ -3,7 +3,17 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-import { createTestUsers } from "./testUsers";
+
+const OWNER = {
+  tokenIdentifier: "iss|owner",
+  email: "hubert@activecaregroup.com",
+  name: "Hubert",
+};
+const STAFF = {
+  tokenIdentifier: "iss|staff",
+  email: "staff@example.com",
+  name: "Sam",
+};
 
 const drug = {
   drugId: "PCM500",
@@ -25,13 +35,17 @@ const drug = {
 
 async function setup({ approveStaff = true } = {}) {
   const t = convexTest(schema, modules);
-  const { owner, staff } = await createTestUsers(t);
+  const owner = t.withIdentity(OWNER);
+  const staff = t.withIdentity(STAFF);
+  await owner.mutation(api.users.updateCurrentUser, {});
+  await staff.mutation(api.users.updateCurrentUser, {});
   if (approveStaff) {
     const [pending] = await owner.query(api.users.listByStatus, {
       status: "pending",
     });
     await owner.mutation(api.users.updateAccess, {
       userId: pending._id,
+      role: "staff",
       status: "active",
     });
   }
@@ -279,7 +293,7 @@ describe("Undo", () => {
         movementId: m._id,
         reason: "x",
       }),
-    ).rejects.toThrow(/Admin/);
+    ).rejects.toThrow(/admins/);
     await expect(
       owner.mutation(api.stock.undoMovement, {
         movementId: m._id,
@@ -400,5 +414,143 @@ describe("Filtered log", () => {
     await expect(
       owner.query(api.stock.listMovements, { paginationOpts: page }),
     ).rejects.toThrow();
+  });
+});
+
+describe("Stock In labels (8 box and initials)", () => {
+  async function addNoBarcodeForm() {
+    const s = await setup();
+    await s.owner.mutation(api.drugs.update, {
+      id: s.drugRef,
+      ...drug,
+      packages: [
+        { ...drug.packages[0], packageId: s.packageId },
+        {
+          barcode: "",
+          qtyPerUnit: 100,
+          baseUnit: "Box" as const,
+          unitCount: 1,
+          stock: 0,
+          imageIds: [],
+        },
+      ],
+    });
+    const updated = await s.owner.query(api.drugs.get, { id: s.drugRef });
+    const noBarcode = updated!.packages.find((p) => p._id !== s.packageId)!._id;
+    return { ...s, noBarcode };
+  }
+  const page = { numItems: 10, cursor: null };
+
+  it("keeps the 8 mark only for package forms without a barcode", async () => {
+    const { owner, staff, packageId, noBarcode } = await addNoBarcodeForm();
+    await staff.mutation(api.stock.recordIn, {
+      packageId: noBarcode,
+      ...entry,
+      eight: true,
+    });
+    await staff.mutation(api.stock.recordIn, {
+      packageId,
+      ...entry,
+      eight: true,
+    });
+    const log = await owner.query(api.stock.listMovements, {
+      kind: "in",
+      paginationOpts: page,
+    });
+    const byPkg = new Map(log.page.map((m) => [m.packageRef, m]));
+    expect(byPkg.get(noBarcode)!.eight).toBe(true);
+    expect(byPkg.get(packageId)!.eight).toBeUndefined();
+    expect(byPkg.get(packageId)!.labels).toBeUndefined();
+  });
+
+  it("keeps labels and the 8 mark when labels are chosen for a barcoded form", async () => {
+    const { owner, staff, packageId, noBarcode } = await addNoBarcodeForm();
+    await staff.mutation(api.stock.recordIn, {
+      packageId,
+      ...entry,
+      labels: true,
+      eight: true,
+    });
+    // Barcode-less forms always get labels, so "labels" isn't saved for them
+    await staff.mutation(api.stock.recordIn, {
+      packageId: noBarcode,
+      ...entry,
+      labels: true,
+    });
+    const log = await owner.query(api.stock.listMovements, {
+      kind: "in",
+      paginationOpts: page,
+    });
+    const byPkg = new Map(log.page.map((m) => [m.packageRef, m]));
+    expect(byPkg.get(packageId)!.labels).toBe(true);
+    expect(byPkg.get(packageId)!.eight).toBe(true);
+    expect(byPkg.get(noBarcode)!.labels).toBeUndefined();
+  });
+
+  it("keeps the Medicine Bag Label choice and its 8 mark on a barcoded form", async () => {
+    const { owner, staff, packageId } = await addNoBarcodeForm();
+    await staff.mutation(api.stock.recordIn, {
+      packageId,
+      ...entry,
+      bagLabels: true,
+      eight: true,
+    });
+    const log = await owner.query(api.stock.listMovements, {
+      kind: "in",
+      paginationOpts: page,
+    });
+    const m = log.page[0];
+    expect(m.bagLabels).toBe(true);
+    expect(m.labels).toBeUndefined();
+    expect(m.eight).toBe(true);
+  });
+
+  it("saves the person's initials, using the admin-set ones when given", async () => {
+    const { owner, staff, packageId } = await setup();
+    await staff.mutation(api.stock.recordIn, { packageId, ...entry });
+    const [pending] = await owner
+      .query(api.users.listByStatus, { status: "active" })
+      .then((u) => u.filter((x) => x.name === "Sam"));
+    await owner.mutation(api.users.setInitials, {
+      userId: pending._id,
+      initials: " sk ",
+    });
+    await staff.mutation(api.stock.recordIn, { packageId, ...entry });
+    const log = await owner.query(api.stock.listMovements, {
+      kind: "in",
+      paginationOpts: page,
+    });
+    expect(log.page.map((m) => m.userInitials)).toEqual(["SK", "SA"]);
+  });
+
+  it("only lets admins set initials, and checks them", async () => {
+    const { owner, staff } = await setup();
+    const [sam] = (
+      await owner.query(api.users.listByStatus, { status: "active" })
+    ).filter((x) => x.name === "Sam");
+    await expect(
+      staff.mutation(api.users.setInitials, {
+        userId: sam._id,
+        initials: "SK",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      owner.mutation(api.users.setInitials, {
+        userId: sam._id,
+        initials: "TOO LONG",
+      }),
+    ).rejects.toThrow(/Initials/);
+    await owner.mutation(api.users.setInitials, {
+      userId: sam._id,
+      initials: "SK",
+    });
+    await owner.mutation(api.users.setInitials, {
+      userId: sam._id,
+      initials: "",
+    });
+    const [after] = (
+      await owner.query(api.users.listByStatus, { status: "active" })
+    ).filter((x) => x.name === "Sam");
+    expect(after.initials).toBeUndefined();
   });
 });

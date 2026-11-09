@@ -35,19 +35,9 @@ export function canisterTypeLabel(type: number): string {
   return TYPE_LABELS[String(type)] ?? String(type);
 }
 
-// "Hubert Suen" -> "HS"; falls back to the first letters of an email
-export function initialsOf(name: string | undefined): string {
-  const words = (name ?? "")
-    .replace(/@.*/, "")
-    .split(/[\s._-]+/)
-    .filter(Boolean);
-  if (words.length === 0) return "";
-  const letters =
-    words.length === 1
-      ? words[0].slice(0, 2)
-      : words[0][0] + words[words.length - 1][0];
-  return letters.toUpperCase();
-}
+// "Hubert Suen" -> "HS" (shared with the backend, which saves initials on each entry)
+export { initialsOf } from "@/convex/lib/initials.ts";
+import { initialsOf } from "@/convex/lib/initials.ts";
 
 // The saved parts of a canister Stock Out that a reprinted label needs
 export type ReprintSource = {
@@ -55,6 +45,8 @@ export type ReprintSource = {
   brandName: string;
   drugName: string;
   userName: string;
+  // Initials saved on the entry (newer entries); otherwise taken from the name
+  userInitials?: string;
   // ISO time of the original Stock Out
   occurredAt: string;
   canister: { batch: string; expiry: string; quantity: number; type: number };
@@ -75,7 +67,7 @@ export function labelFromMovement(
     expiry: m.canister.expiry,
     canisterType: m.canister.type,
     canisterQty: m.canister.quantity,
-    filledBy: initialsOf(m.userName),
+    filledBy: m.userInitials || initialsOf(m.userName),
     fillDate: fillDateCode(new Date(m.occurredAt)),
     qrText: m.drugCode,
     imageUrl,

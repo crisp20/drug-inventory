@@ -1,11 +1,21 @@
 import { ConvexError } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
 import type { QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 
+// The owner's account is always an active admin
+export const OWNER_EMAILS = ["hubert@activecaregroup.com"];
+
+export function isOwnerEmail(email: string | undefined): boolean {
+  return !!email && OWNER_EMAILS.includes(email.trim().toLowerCase());
+}
+
 export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
-  const userId = await getAuthUserId(ctx);
-  return userId ? await ctx.db.get("users", userId) : null;
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+  return await ctx.db
+    .query("users")
+    .withIndex("by_token", (q) => q.eq("tokenIdentifier", identity.tokenIdentifier))
+    .unique();
 }
 
 export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
@@ -26,7 +36,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
 export async function requireAdmin(ctx: QueryCtx): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
   if (user.role !== "admin") {
-    throw new ConvexError({ code: "FORBIDDEN", message: "Only the admin can do this" });
+    throw new ConvexError({ code: "FORBIDDEN", message: "Only admins can do this" });
   }
   return user;
 }

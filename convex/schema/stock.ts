@@ -46,8 +46,17 @@ export const stockMovementsTable = defineTable({
       type: v.number(),
     }),
   ),
+  // Stock In with labels: the "8" box was ticked for its labels
+  eight: v.optional(v.boolean()),
+  // Stock In of a package form WITH a barcode where the person chose to print labels
+  // (package forms without a barcode always get labels)
+  labels: v.optional(v.boolean()),
+  // Stock In where the person chose to print Medicine Bag Labels (15 numbers each)
+  bagLabels: v.optional(v.boolean()),
   userRef: v.id("users"),
   userName: v.string(),
+  // Initials of the person at the time, so reprinted labels match the originals
+  userInitials: v.optional(v.string()),
   occurredAt: v.string(),
   // Set when an admin reverses this entry; its stock change has been put back
   undo: v.optional(

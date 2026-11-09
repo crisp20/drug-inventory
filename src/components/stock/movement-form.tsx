@@ -1,12 +1,16 @@
 import { useCallback, useState } from "react";
 import { Printer } from "lucide-react";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
+import { fillDateCode, type LabelData } from "@/lib/label/label-data.ts";
+import { userInitials } from "@/convex/lib/initials.ts";
 import {
-  fillDateCode,
-  initialsOf,
-  type LabelData,
-} from "@/lib/label/label-data.ts";
+  defaultLabelCopies,
+  type StockInLabelData,
+} from "@/lib/label/stock-in-label.ts";
+import type { StockInLabelChoice } from "@/lib/label/stock-in-set.ts";
 import LabelPrintDialog from "./label-print-dialog.tsx";
+import StockInLabelDialog from "./stock-in-label-dialog.tsx";
+import StockInLabelSection from "./stock-in-label-section.tsx";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "convex/react";
@@ -95,6 +99,8 @@ const COPY = {
   },
 } as const;
 
+const NO_LABELS: StockInLabelChoice = { medicine: false, bag: false };
+
 const MAX_QUANTITY_DIGITS = String(MAX_MOVEMENT_QUANTITY).length;
 
 function toNumber(value: string | number | undefined): number {
@@ -127,6 +133,9 @@ export default function MovementForm({
       notes: "",
       reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
       canisterOn: false,
+      eight: false,
+      labelsOn: false,
+      bagLabelsOn: false,
       batch: scanned?.batch ?? "",
       expiry: scannedExpired ? "" : (scanned?.expiry ?? ""),
       mismatchedScan: "",
@@ -150,6 +159,63 @@ export default function MovementForm({
   // Label waiting to print after a canister Stock Out was saved
   const [label, setLabel] = useState<LabelData | null>(null);
   const currentUser = useCurrentUser();
+  // Stock In of a package form without a barcode always needs the Medicine Label;
+  // with a barcode, only when ticked. The Medicine Bag Label is always optional.
+  const hasBarcode = !!pkg.barcode.trim();
+  const labelChoice = (values: {
+    labelsOn?: boolean;
+    bagLabelsOn?: boolean;
+  }): StockInLabelChoice => ({
+    medicine: !hasBarcode || values.labelsOn === true,
+    bag: values.bagLabelsOn === true,
+  });
+  const watchedChoice = labelChoice(watched);
+  const needsLabels =
+    kind === "in" && (watchedChoice.medicine || watchedChoice.bag);
+  const [stockInLabel, setStockInLabel] = useState<{
+    data: StockInLabelData;
+    choice: StockInLabelChoice;
+    copies: number;
+    quantity: number;
+    afterSave: boolean;
+    // Set while the Stock In is waiting to be saved (it saves on print)
+    save?: () => Promise<boolean>;
+  } | null>(null);
+  const closeStockInLabel = async () => {
+    const pending = stockInLabel;
+    if (!pending) return;
+    if (pending.save) {
+      const ok = await confirm({
+        title: "Save without printing?",
+        description:
+          "This Stock In hasn't been saved yet. Save it without printing labels, or go back to the form to keep editing.",
+        confirmLabel: "Save Stock In",
+        cancelLabel: "Back to the form",
+      });
+      if (ok && !(await pending.save())) return;
+      setStockInLabel(null);
+      if (ok) onDone();
+      return;
+    }
+    setStockInLabel(null);
+    if (pending.afterSave) onDone();
+  };
+  const buildStockInLabel = (): StockInLabelData => {
+    const values = form.getValues();
+    return {
+      drugId: drug.drugId,
+      brandName: drug.brandName,
+      name: drug.name,
+      packageForm: formatPackageForm(pkg),
+      baseUnit: pkg.baseUnit,
+      dangerousDrug: !!drug.dda,
+      eight: values.eight === true,
+      initials: userInitials(currentUser),
+      batch: values.batch.trim() || undefined,
+      expiry: values.expiry || undefined,
+      imageUrl: drug.imageUrl,
+    };
+  };
 
   const confirm = useConfirm();
   const settings = useQuery(api.settings.get, {});
@@ -186,8 +252,12 @@ export default function MovementForm({
     mismatchedScan,
     canisterQty,
     canisterType,
+    eight,
+    labelsOn,
+    bagLabelsOn,
     ...values
   }: MovementFormValues) => {
+    const choice = labelChoice({ labelsOn, bagLabelsOn });
     // Large amounts are often a barcode scanned into the quantity box, so ask again
     if (needsLargeQuantityConfirm(values.quantity, threshold)) {
       const ok = await confirm({
@@ -218,8 +288,44 @@ export default function MovementForm({
         return;
       }
     }
+    const args = { packageId: pkg._id, ...values };
+    if (kind === "in" && needsLabels) {
+      // Preview the labels first; nothing is saved until the user prints
+      const inArgs = {
+        ...args,
+        batch: batch || undefined,
+        expiry: expiry || undefined,
+        mismatchedScan: mismatchedScan || undefined,
+        eight: eight ? true : undefined,
+        labels: hasBarcode && labelsOn ? true : undefined,
+        bagLabels: bagLabelsOn ? true : undefined,
+      };
+      setStockInLabel({
+        data: buildStockInLabel(),
+        choice,
+        copies: defaultLabelCopies(values.quantity),
+        quantity: values.quantity,
+        afterSave: true,
+        save: async () => {
+          try {
+            const result = await recordIn(inArgs);
+            toast.success(
+              `${copy.verb} ${values.quantity} × ${formatPackageForm(pkg)} of ${drug.name}`,
+              { description: `Stock is now ${result.stockAfter}` },
+            );
+            form.reset(form.getValues());
+            // Saved: printing again or closing must not save a second time
+            setStockInLabel((s) => (s ? { ...s, save: undefined } : s));
+            return true;
+          } catch (e) {
+            toast.error(errorMessage(e, copy.error));
+            return false;
+          }
+        },
+      });
+      return;
+    }
     try {
-      const args = { packageId: pkg._id, ...values };
       const canister = useCanister
         ? {
             batch,
@@ -238,6 +344,9 @@ export default function MovementForm({
               batch: batch || undefined,
               expiry: expiry || undefined,
               mismatchedScan: mismatchedScan || undefined,
+              eight: needsLabels && eight ? true : undefined,
+              labels: hasBarcode && labelsOn ? true : undefined,
+              bagLabels: bagLabelsOn ? true : undefined,
             })
           : await recordOut({
               ...args,
@@ -263,7 +372,7 @@ export default function MovementForm({
           expiry: canister.expiry,
           canisterType: canister.type,
           canisterQty: canister.quantity,
-          filledBy: initialsOf(currentUser?.name ?? currentUser?.email),
+          filledBy: userInitials(currentUser),
           fillDate: fillDateCode(new Date()),
           qrText: drug.drugId,
           imageUrl: drug.imageUrl,
@@ -296,7 +405,10 @@ export default function MovementForm({
             <ShieldAlert className="mt-0.5 size-4 shrink-0" />
             <div>
               <div className="font-semibold">Dangerous Drug (DDA)</div>
-              <div>Follow the DDA procedure for this medicine. DDA is printed on the canister label.</div>
+              <div>
+                Follow the DDA procedure for this medicine. DDA is printed on
+                the canister label.
+              </div>
             </div>
           </div>
         )}
@@ -343,6 +455,24 @@ export default function MovementForm({
           scannedExpired={scannedExpired}
           required={canisterEnabled && canisterOn}
         />
+
+        {kind === "in" && (
+          <StockInLabelSection
+            control={form.control}
+            dangerousDrug={!!drug.dda}
+            hasBarcode={hasBarcode}
+            quantity={quantity}
+            onPrint={() =>
+              setStockInLabel({
+                data: buildStockInLabel(),
+                choice: watchedChoice,
+                copies: defaultLabelCopies(Math.max(1, quantity)),
+                quantity: Math.max(1, quantity),
+                afterSave: false,
+              })
+            }
+          />
+        )}
 
         {canisterEnabled && (
           <CanisterSection
@@ -403,12 +533,16 @@ export default function MovementForm({
           >
             {form.formState.isSubmitting ? (
               <Spinner />
-            ) : willPrint ? (
+            ) : willPrint || needsLabels ? (
               <Printer />
             ) : (
               <copy.icon />
             )}
-            {willPrint ? "Print Label & Record Stock Out" : copy.submit}
+            {willPrint
+              ? "Print Label & Record Stock Out"
+              : needsLabels
+                ? "Check Labels & Record Stock In"
+                : copy.submit}
           </Button>
         </div>
       </form>
@@ -418,6 +552,29 @@ export default function MovementForm({
           setLabel(null);
           onDone();
         }}
+      />
+      <StockInLabelDialog
+        data={stockInLabel?.data ?? null}
+        choice={stockInLabel?.choice ?? NO_LABELS}
+        copies={stockInLabel?.copies ?? 1}
+        quantity={stockInLabel?.quantity ?? 1}
+        title={
+          stockInLabel?.save
+            ? "Check the labels, then print"
+            : stockInLabel?.afterSave
+              ? "Stock In recorded. Print the labels"
+              : "Print labels"
+        }
+        onSave={stockInLabel?.save}
+        onEdit={
+          stockInLabel?.save
+            ? () => {
+                // Back to the form with everything still filled in
+                setStockInLabel(null);
+              }
+            : undefined
+        }
+        onClose={() => void closeStockInLabel()}
       />
     </Form>
   );

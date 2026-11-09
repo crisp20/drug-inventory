@@ -26,6 +26,7 @@ const EXCLUDE = [
   "docs",
   "tmp-photos",
   "tmp-import",
+  "tmp-pdf",
   "convex/drugImportSeedData.ts",
 ];
 

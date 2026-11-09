@@ -4,8 +4,8 @@ import { env } from "./_generated/server";
 export default {
   providers: [
     {
-      domain: env.CONVEX_SITE_URL,
-      applicationID: "convex",
+      domain: env.HERCULES_OIDC_AUTHORITY,
+      applicationID: env.HERCULES_OIDC_CLIENT_ID,
     },
   ],
 } satisfies AuthConfig;

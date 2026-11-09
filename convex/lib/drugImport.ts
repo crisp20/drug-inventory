@@ -161,8 +161,14 @@ function noteOf(rows: SheetRecord[], key: NoteKey): string | undefined {
 // "Yes"/"No" and common variations. null = not readable.
 export function parseYesNo(raw: string): boolean | null {
   const v = raw.trim().toLowerCase();
-  if (["yes", "y", "true", "1", "x"].includes(v)) return true;
-  if (["no", "n", "false", "0"].includes(v)) return false;
+  if (["yes", "y", "true", "x"].includes(v)) return true;
+  if (["no", "n", "false"].includes(v)) return false;
+  // 1 = Yes, 0 = No, including number cells Excel saves as "1.0" or "0.00"
+  if (/^\d+(\.\d+)?$/.test(v)) {
+    const n = Number(v);
+    if (n === 1) return true;
+    if (n === 0) return false;
+  }
   return null;
 }
 
@@ -177,7 +183,7 @@ function markOf(
   if (!r) return undefined;
   const value = parseYesNo(r.values[column]);
   if (value === null) {
-    report(r.row, `${label} value "${r.values[column]}" is not Yes or No, mark left unchanged`);
+    report(r.row, `${label} value "${r.values[column]}" is not Yes or No (or 1 or 0), mark left unchanged`);
     return undefined;
   }
   return value;

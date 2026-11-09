@@ -1,0 +1,1703 @@
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index 59285ec..c731aa6 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -378,6 +378,7 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
+         `Stock ${m.stockBefore} → ${m.stockAfter}`,
+         m.reason ?? "",
+         m.canister ? formatCanister(m.canister) : formatBatchExpiry(m),
++        m.eight ? "8 box ticked" : "",
+         formatMismatchedScan(m.mismatchedScan),
+         m.notes,
+       ]
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index d1e7e3f..df29fb6 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -46,8 +46,12 @@ export const stockMovementsTable = defineTable({
+       type: v.number(),
+     }),
+   ),
++  // Stock In of a package form without a barcode: the "8" box was ticked for its labels
++  eight: v.optional(v.boolean()),
+   userRef: v.id("users"),
+   userName: v.string(),
++  // Initials of the person at the time, so reprinted labels match the originals
++  userInitials: v.optional(v.string()),
+   occurredAt: v.string(),
+   // Set when an admin reverses this entry; its stock change has been put back
+   undo: v.optional(
+diff --git a/convex/schema/users.ts b/convex/schema/users.ts
+index 4e50977..7f21374 100644
+--- a/convex/schema/users.ts
++++ b/convex/schema/users.ts
+@@ -17,6 +17,8 @@ export const usersTable = defineTable({
+   status: v.optional(userStatus),
+   // Early access to canister features before they are rolled out to everyone
+   canisterAccess: v.optional(v.boolean()),
++  // Printed on Stock In labels (e.g. "HS"); set by an admin, else taken from the name
++  initials: v.optional(v.string()),
+ })
+   .index("by_token", ["tokenIdentifier"])
+   .index("by_status", ["status"]);
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index c4e0fe9..d4bd34f 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -416,3 +416,98 @@ describe("Filtered log", () => {
+     ).rejects.toThrow();
+   });
+ });
++
++describe("Stock In labels (8 box and initials)", () => {
++  async function addNoBarcodeForm() {
++    const s = await setup();
++    await s.owner.mutation(api.drugs.update, {
++      id: s.drugRef,
++      ...drug,
++      packages: [
++        { ...drug.packages[0], packageId: s.packageId },
++        {
++          barcode: "",
++          qtyPerUnit: 100,
++          baseUnit: "Box" as const,
++          unitCount: 1,
++          stock: 0,
++          imageIds: [],
++        },
++      ],
++    });
++    const updated = await s.owner.query(api.drugs.get, { id: s.drugRef });
++    const noBarcode = updated!.packages.find((p) => p._id !== s.packageId)!._id;
++    return { ...s, noBarcode };
++  }
++  const page = { numItems: 10, cursor: null };
++
++  it("keeps the 8 mark only for package forms without a barcode", async () => {
++    const { owner, staff, packageId, noBarcode } = await addNoBarcodeForm();
++    await staff.mutation(api.stock.recordIn, {
++      packageId: noBarcode,
++      ...entry,
++      eight: true,
++    });
++    await staff.mutation(api.stock.recordIn, {
++      packageId,
++      ...entry,
++      eight: true,
++    });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: page,
++    });
++    const byPkg = new Map(log.page.map((m) => [m.packageRef, m]));
++    expect(byPkg.get(noBarcode)!.eight).toBe(true);
++    expect(byPkg.get(packageId)!.eight).toBeUndefined();
++  });
++
++  it("saves the person's initials, using the admin-set ones when given", async () => {
++    const { owner, staff, packageId } = await setup();
++    await staff.mutation(api.stock.recordIn, { packageId, ...entry });
++    const [pending] = await owner
++      .query(api.users.listByStatus, { status: "active" })
++      .then((u) => u.filter((x) => x.name === "Sam"));
++    await owner.mutation(api.users.setInitials, {
++      userId: pending._id,
++      initials: " sk ",
++    });
++    await staff.mutation(api.stock.recordIn, { packageId, ...entry });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: page,
++    });
++    expect(log.page.map((m) => m.userInitials)).toEqual(["SK", "SA"]);
++  });
++
++  it("only lets admins set initials, and checks them", async () => {
++    const { owner, staff } = await setup();
++    const [sam] = (
++      await owner.query(api.users.listByStatus, { status: "active" })
++    ).filter((x) => x.name === "Sam");
++    await expect(
++      staff.mutation(api.users.setInitials, {
++        userId: sam._id,
++        initials: "SK",
++      }),
++    ).rejects.toThrow();
++    await expect(
++      owner.mutation(api.users.setInitials, {
++        userId: sam._id,
++        initials: "TOO LONG",
++      }),
++    ).rejects.toThrow(/Initials/);
++    await owner.mutation(api.users.setInitials, {
++      userId: sam._id,
++      initials: "SK",
++    });
++    await owner.mutation(api.users.setInitials, {
++      userId: sam._id,
++      initials: "",
++    });
++    const [after] = (
++      await owner.query(api.users.listByStatus, { status: "active" })
++    ).filter((x) => x.name === "Sam");
++    expect(after.initials).toBeUndefined();
++  });
++});
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 49efdce..99a719d 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -3,6 +3,7 @@ import { ConvexError, v } from "convex/values";
+ import { mutation, query, type MutationCtx } from "./_generated/server";
+ import type { Id } from "./_generated/dataModel";
+ import { requireActiveUser, requireAdmin } from "./lib/access";
++import { userInitials } from "./lib/initials";
+ import { logMovement, logUndo } from "./lib/activity";
+ import {
+   canUseCanister,
+@@ -39,6 +40,7 @@ async function recordMovement(
+   canister?: CanisterInput,
+   batchExpiry: BatchExpiry = {},
+   mismatchedScan?: string,
++  eight?: boolean,
+ ) {
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+@@ -78,8 +80,11 @@ async function recordMovement(
+     expiry: batchExpiry.expiry,
+     mismatchedScan,
+     canister,
++    // Only package forms without a barcode get Stock In labels, so only they keep the 8 mark
++    eight: eight && kind === "in" && !pkg.barcode ? true : undefined,
+     userRef: user._id,
+     userName: user.name ?? user.email ?? "Unknown user",
++    userInitials: userInitials(user) || undefined,
+     occurredAt: new Date().toISOString(),
+   });
+   const movement = await ctx.db.get("stockMovements", movementId);
+@@ -94,10 +99,12 @@ export const recordIn = mutation({
+     batch: v.optional(v.string()),
+     expiry: v.optional(v.string()),
+     mismatchedScan: v.optional(v.string()),
++    // The "8" box, only kept for package forms without a barcode (they get labels)
++    eight: v.optional(v.boolean()),
+   },
+   handler: async (
+     ctx,
+-    { packageId, batch, expiry, mismatchedScan, ...rest },
++    { packageId, batch, expiry, mismatchedScan, eight, ...rest },
+   ) => {
+     return await recordMovement(
+       ctx,
+@@ -108,6 +115,7 @@ export const recordIn = mutation({
+       undefined,
+       cleanBatchExpiry({ batch, expiry }),
+       cleanMismatchedScan(mismatchedScan),
++      eight,
+     );
+   },
+ });
+diff --git a/convex/users.ts b/convex/users.ts
+index c8d6df9..464bdf9 100644
+--- a/convex/users.ts
++++ b/convex/users.ts
+@@ -7,6 +7,11 @@ import {
+   requireAdmin,
+ } from "./lib/access";
+ import { actorOf, displayName, logActivity } from "./lib/activity";
++import {
++  isValidInitials,
++  MAX_INITIALS_LENGTH,
++  normalizeInitials,
++} from "./lib/initials";
+ import { userRole, userStatus } from "./schema/users";
+ 
+ export const updateCurrentUser = mutation({
+@@ -152,6 +157,42 @@ export const updateAccess = mutation({
+   },
+ });
+ 
++// Admin: initials printed on this person's labels ("" goes back to the name's initials)
++export const setInitials = mutation({
++  args: { userId: v.id("users"), initials: v.string() },
++  handler: async (ctx, { userId, initials }) => {
++    const admin = await requireAdmin(ctx);
++    const target = await ctx.db.get("users", userId);
++    if (!target) {
++      throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
++    }
++    const next = normalizeInitials(initials);
++    if (next !== "" && !isValidInitials(next)) {
++      throw new ConvexError({
++        code: "BAD_REQUEST",
++        message: `Initials must be 1 to ${MAX_INITIALS_LENGTH} letters or numbers`,
++      });
++    }
++    const before = target.initials ?? "";
++    if (before === next) return null;
++    await ctx.db.patch("users", userId, { initials: next || undefined });
++    await logActivity(ctx, actorOf(admin), {
++      category: "user",
++      action: "Access changed",
++      summary: `Changed label initials for ${displayName(target)}`,
++      detail: target.email,
++      changes: [
++        {
++          field: "Label initials",
++          before: before || "(from name)",
++          after: next || "(from name)",
++        },
++      ],
++    });
++    return null;
++  },
++});
++
+ // Admin: early access to canister features for one person
+ export const setCanisterAccess = mutation({
+   args: { userId: v.id("users"), enabled: v.boolean() },
+diff --git a/src/components/stock/drug-package-picker.tsx b/src/components/stock/drug-package-picker.tsx
+index ee5f3fc..5e5b586 100644
+--- a/src/components/stock/drug-package-picker.tsx
++++ b/src/components/stock/drug-package-picker.tsx
+@@ -55,7 +55,11 @@ export default function DrugPackagePicker({
+             <span className="font-mono">{drug.drugId}</span>
+           </div>
+           <ManufacturerLine manufacturer={drug.manufacturer} className="pt-1" />
+-          <DrugNotes specifications={drug.specifications} remarks={drug.remarks} className="pt-1" />
++          <DrugNotes
++            specifications={drug.specifications}
++            remarks={drug.remarks}
++            className="pt-1"
++          />
+         </div>
+       </div>
+       <div className="grid gap-2 sm:grid-cols-2">
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index fd2a116..54c5da8 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -44,6 +44,8 @@ export function movementFormSchema(kind: MovementKind) {
+       reason:
+         kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
+       canisterOn: z.boolean(),
++      // Stock In labels: the "8" box (only used for package forms without a barcode)
++      eight: z.boolean(),
+       batch: z.string().trim(),
+       expiry: z.string(),
+       // GS1 code used even though its product didn't match (set by the scan box)
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 8796b49..85a15a1 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -1,12 +1,15 @@
+ import { useCallback, useState } from "react";
+ import { Printer } from "lucide-react";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
++import { fillDateCode, type LabelData } from "@/lib/label/label-data.ts";
++import { userInitials } from "@/convex/lib/initials.ts";
+ import {
+-  fillDateCode,
+-  initialsOf,
+-  type LabelData,
+-} from "@/lib/label/label-data.ts";
++  defaultLabelCopies,
++  type StockInLabelData,
++} from "@/lib/label/stock-in-label.ts";
+ import LabelPrintDialog from "./label-print-dialog.tsx";
++import StockInLabelDialog from "./stock-in-label-dialog.tsx";
++import StockInLabelSection from "./stock-in-label-section.tsx";
+ import { useForm, useWatch } from "react-hook-form";
+ import { zodResolver } from "@hookform/resolvers/zod";
+ import { useMutation, useQuery } from "convex/react";
+@@ -127,6 +130,7 @@ export default function MovementForm({
+       notes: "",
+       reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
+       canisterOn: false,
++      eight: false,
+       batch: scanned?.batch ?? "",
+       expiry: scannedExpired ? "" : (scanned?.expiry ?? ""),
+       mismatchedScan: "",
+@@ -150,6 +154,28 @@ export default function MovementForm({
+   // Label waiting to print after a canister Stock Out was saved
+   const [label, setLabel] = useState<LabelData | null>(null);
+   const currentUser = useCurrentUser();
++  // Stock In of a package form without a barcode needs labels
++  const needsLabels = kind === "in" && !pkg.barcode.trim();
++  const [stockInLabel, setStockInLabel] = useState<{
++    data: StockInLabelData;
++    copies: number;
++    afterSave: boolean;
++  } | null>(null);
++  const buildStockInLabel = (): StockInLabelData => {
++    const values = form.getValues();
++    return {
++      drugId: drug.drugId,
++      brandName: drug.brandName,
++      name: drug.name,
++      packageForm: formatPackageForm(pkg),
++      dangerousDrug: !!drug.dda,
++      eight: values.eight === true,
++      initials: userInitials(currentUser),
++      batch: values.batch.trim() || undefined,
++      expiry: values.expiry || undefined,
++      imageUrl: drug.imageUrl,
++    };
++  };
+ 
+   const confirm = useConfirm();
+   const settings = useQuery(api.settings.get, {});
+@@ -186,6 +212,7 @@ export default function MovementForm({
+     mismatchedScan,
+     canisterQty,
+     canisterType,
++    eight,
+     ...values
+   }: MovementFormValues) => {
+     // Large amounts are often a barcode scanned into the quantity box, so ask again
+@@ -238,6 +265,7 @@ export default function MovementForm({
+               batch: batch || undefined,
+               expiry: expiry || undefined,
+               mismatchedScan: mismatchedScan || undefined,
++              eight: needsLabels && eight ? true : undefined,
+             })
+           : await recordOut({
+               ...args,
+@@ -253,6 +281,16 @@ export default function MovementForm({
+           description: `Stock is now ${result.stockAfter}`,
+         },
+       );
++      if (needsLabels) {
++        // Stock is saved; one label per package received by default (editable)
++        setStockInLabel({
++          data: buildStockInLabel(),
++          copies: defaultLabelCopies(values.quantity),
++          afterSave: true,
++        });
++        form.reset(form.getValues());
++        return;
++      }
+       if (canister) {
+         // Stock is saved first; the label dialog lets them print or reprint
+         setLabel({
+@@ -263,7 +301,7 @@ export default function MovementForm({
+           expiry: canister.expiry,
+           canisterType: canister.type,
+           canisterQty: canister.quantity,
+-          filledBy: initialsOf(currentUser?.name ?? currentUser?.email),
++          filledBy: userInitials(currentUser),
+           fillDate: fillDateCode(new Date()),
+           qrText: drug.drugId,
+           imageUrl: drug.imageUrl,
+@@ -296,7 +334,10 @@ export default function MovementForm({
+             <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+             <div>
+               <div className="font-semibold">Dangerous Drug (DDA)</div>
+-              <div>Follow the DDA procedure for this medicine. DDA is printed on the canister label.</div>
++              <div>
++                Follow the DDA procedure for this medicine. DDA is printed on
++                the canister label.
++              </div>
+             </div>
+           </div>
+         )}
+@@ -344,6 +385,20 @@ export default function MovementForm({
+           required={canisterEnabled && canisterOn}
+         />
+ 
++        {needsLabels && (
++          <StockInLabelSection
++            control={form.control}
++            dangerousDrug={!!drug.dda}
++            onPrint={() =>
++              setStockInLabel({
++                data: buildStockInLabel(),
++                copies: defaultLabelCopies(Math.max(1, quantity)),
++                afterSave: false,
++              })
++            }
++          />
++        )}
++
+         {canisterEnabled && (
+           <CanisterSection
+             autoQty={canisterQtyFor(Math.max(1, quantity), pkg)}
+@@ -403,12 +458,16 @@ export default function MovementForm({
+           >
+             {form.formState.isSubmitting ? (
+               <Spinner />
+-            ) : willPrint ? (
++            ) : willPrint || needsLabels ? (
+               <Printer />
+             ) : (
+               <copy.icon />
+             )}
+-            {willPrint ? "Print Label & Record Stock Out" : copy.submit}
++            {willPrint
++              ? "Print Label & Record Stock Out"
++              : needsLabels
++                ? "Record Stock In & Print Labels"
++                : copy.submit}
+           </Button>
+         </div>
+       </form>
+@@ -419,6 +478,20 @@ export default function MovementForm({
+           onDone();
+         }}
+       />
++      <StockInLabelDialog
++        data={stockInLabel?.data ?? null}
++        copies={stockInLabel?.copies ?? 1}
++        title={
++          stockInLabel?.afterSave
++            ? "Stock In recorded. Print the labels"
++            : "Print labels"
++        }
++        onClose={() => {
++          const afterSave = stockInLabel?.afterSave;
++          setStockInLabel(null);
++          if (afterSave) onDone();
++        }}
++      />
+     </Form>
+   );
+ }
+diff --git a/src/components/stock/movement-log.tsx b/src/components/stock/movement-log.tsx
+index 46153df..095ef98 100644
+--- a/src/components/stock/movement-log.tsx
++++ b/src/components/stock/movement-log.tsx
+@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { cn } from "@/lib/utils.ts";
+ import UndoMovementDialog from "./undo-movement-dialog.tsx";
++import { hasReprintableLabel } from "@/lib/label/stock-in-label.ts";
+ import ReprintLabelDialog from "./reprint-label-dialog.tsx";
+ 
+ const PAGE_SIZE = 25;
+@@ -149,6 +150,7 @@ export default function MovementLog({
+                   {formatPackageForm(m)}
+                 </span>
+                 {m.reason && <Badge variant="secondary">{m.reason}</Badge>}
++                {m.eight && <Badge variant="secondary">8</Badge>}
+                 {m.undo && <Badge variant="destructive">Undone</Badge>}
+               </div>
+               <div className="truncate text-xs text-muted-foreground">
+@@ -201,7 +203,7 @@ export default function MovementLog({
+               <div className="font-medium text-foreground">{m.userName}</div>
+               <div>{format(new Date(m.occurredAt), "d MMM yyyy")}</div>
+               <div>{format(new Date(m.occurredAt), "h:mm a")}</div>
+-              {m.canister && !m.undo && (
++              {hasReprintableLabel(m) && (
+                 <Button
+                   variant="ghost"
+                   size="sm"
+diff --git a/src/components/stock/reprint-label-dialog.tsx b/src/components/stock/reprint-label-dialog.tsx
+index 22bcbb5..c1356f1 100644
+--- a/src/components/stock/reprint-label-dialog.tsx
++++ b/src/components/stock/reprint-label-dialog.tsx
+@@ -2,30 +2,46 @@ import { useQuery } from "convex/react";
+ import { api } from "@/convex/_generated/api.js";
+ import type { Doc } from "@/convex/_generated/dataModel.d.ts";
+ import { labelFromMovement } from "@/lib/label/label-data.ts";
++import { stockInLabelFromMovement } from "@/lib/label/stock-in-label.ts";
+ import LabelPrintDialog from "./label-print-dialog.tsx";
++import StockInLabelDialog from "./stock-in-label-dialog.tsx";
+ 
+ type Props = {
+   movement: Doc<"stockMovements"> | null;
+   onClose: () => void;
+ };
+ 
+-// Reprints the label of an earlier canister Stock Out. Never prints by itself,
+-// so the size and direction can be checked first.
++// Reprints the label of an earlier entry. Never prints by itself,
++// so the size, direction and count can be checked first.
+ export default function ReprintLabelDialog({ movement, onClose }: Props) {
+-  // The picture isn't saved on the entry, so look up the drug (skipped while closed)
++  // The picture and DDA mark aren't saved on the entry, so look up the drug (skipped while closed)
+   const drug = useQuery(
+     api.drugs.get,
+-    movement?.canister ? { id: movement.drugRef } : "skip",
++    movement ? { id: movement.drugRef } : "skip",
+   );
++  const ready = movement !== null && drug !== undefined;
++  const imageUrl = drug?.imageUrl ?? null;
++  const dda = !!drug?.dda;
+   const canister = movement?.canister;
+-  const data =
+-    movement && canister && drug !== undefined
+-      ? labelFromMovement({ ...movement, canister }, drug?.imageUrl ?? null, !!drug?.dda)
+-      : null;
++
++  if (movement && movement.kind === "in" && !canister) {
++    return (
++      <StockInLabelDialog
++        data={ready ? stockInLabelFromMovement(movement, imageUrl, dda) : null}
++        copies={movement.quantity}
++        title="Reprint labels"
++        onClose={onClose}
++      />
++    );
++  }
+ 
+   return (
+     <LabelPrintDialog
+-      data={data}
++      data={
++        ready && movement && canister
++          ? labelFromMovement({ ...movement, canister }, imageUrl, dda)
++          : null
++      }
+       onClose={onClose}
+       title="Reprint label"
+       autoPrint={false}
+diff --git a/src/components/stock/stock-drug-finder.tsx b/src/components/stock/stock-drug-finder.tsx
+index e8f297b..5cba109 100644
+--- a/src/components/stock/stock-drug-finder.tsx
++++ b/src/components/stock/stock-drug-finder.tsx
+@@ -65,7 +65,9 @@ function Hint({ title, description }: { title: string; description: string }) {
+ function focusQuantity() {
+   let tries = 0;
+   const attempt = () => {
+-    const input = document.querySelector<HTMLInputElement>('input[name="quantity"]');
++    const input = document.querySelector<HTMLInputElement>(
++      'input[name="quantity"]',
++    );
+     if (input) {
+       input.focus();
+       input.select();
+@@ -100,7 +102,8 @@ export default function StockDrugFinder({ children }: Props) {
+ 
+   // Look Alike, Sound Alike drugs stay locked until staff confirm they checked the pictures
+   const [confirmedDrug, setConfirmedDrug] = useState<string | null>(null);
+-  const needsWarning = !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
++  const needsWarning =
++    !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
+   const usable = needsWarning ? null : selection;
+ 
+   const confirmDiscard = useConfirmDiscard();
+diff --git a/src/lib/label/bitmap.ts b/src/lib/label/bitmap.ts
+index 710aa15..5b98470 100644
+--- a/src/lib/label/bitmap.ts
++++ b/src/lib/label/bitmap.ts
+@@ -45,16 +45,17 @@ export function packRows(
+   return { bytesPerRow, data };
+ }
+ 
+-// One CPCL label: the picture at the top-left, then feed to the next label gap
++// One CPCL label picture, printed `copies` times, feeding to the next label gap each time
+ export function buildCpclJob(
+   mono: Uint8Array,
+   width: number,
+   height: number,
++  copies = 1,
+ ): Uint8Array {
+   const { bytesPerRow, data } = packRows(mono, width, height);
+   const enc = new TextEncoder();
+   const head = enc.encode(
+-    `! 0 200 200 ${height} 1\r\nPAGE-WIDTH ${bytesPerRow * 8}\r\nCG ${bytesPerRow} ${height} 0 0 `,
++    `! 0 200 200 ${height} ${Math.max(1, Math.floor(copies))}\r\nPAGE-WIDTH ${bytesPerRow * 8}\r\nCG ${bytesPerRow} ${height} 0 0 `,
+   );
+   const tail = enc.encode("\r\nFORM\r\nPRINT\r\n");
+   const job = new Uint8Array(head.length + data.length + tail.length);
+diff --git a/src/lib/label/draw.ts b/src/lib/label/draw.ts
+index 8638e74..47a35ca 100644
+--- a/src/lib/label/draw.ts
++++ b/src/lib/label/draw.ts
+@@ -195,6 +195,32 @@ export function rotateAnticlockwise(
+   return out;
+ }
+ 
++// A thin box with centred bold text (Drug ID, OS, DDA, 8 tags)
++export function tagBox(
++  ctx: Ctx,
++  text: string,
++  x: number,
++  y: number,
++  w: number,
++  h: number,
++  size: number,
++) {
++  ctx.lineWidth = 2;
++  ctx.strokeStyle = "#000";
++  ctx.strokeRect(x, y, w, h);
++  ctx.font = `bold ${size}px ${FONT}`;
++  let s = size;
++  while (s > 10 && ctx.measureText(text).width > w - 8) {
++    s -= 1;
++    ctx.font = `bold ${s}px ${FONT}`;
++  }
++  ctx.fillStyle = "#000";
++  ctx.textAlign = "center";
++  ctx.textBaseline = "middle";
++  ctx.fillText(text, x + w / 2, y + h / 2 + 1);
++  ctx.textAlign = "left";
++}
++
+ export function boxedText(
+   ctx: Ctx,
+   text: string,
+diff --git a/src/lib/label/label-data.ts b/src/lib/label/label-data.ts
+index d238b8c..6d27283 100644
+--- a/src/lib/label/label-data.ts
++++ b/src/lib/label/label-data.ts
+@@ -35,19 +35,9 @@ export function canisterTypeLabel(type: number): string {
+   return TYPE_LABELS[String(type)] ?? String(type);
+ }
+ 
+-// "Hubert Suen" -> "HS"; falls back to the first letters of an email
+-export function initialsOf(name: string | undefined): string {
+-  const words = (name ?? "")
+-    .replace(/@.*/, "")
+-    .split(/[\s._-]+/)
+-    .filter(Boolean);
+-  if (words.length === 0) return "";
+-  const letters =
+-    words.length === 1
+-      ? words[0].slice(0, 2)
+-      : words[0][0] + words[words.length - 1][0];
+-  return letters.toUpperCase();
+-}
++// "Hubert Suen" -> "HS" (shared with the backend, which saves initials on each entry)
++export { initialsOf } from "@/convex/lib/initials.ts";
++import { initialsOf } from "@/convex/lib/initials.ts";
+ 
+ // The saved parts of a canister Stock Out that a reprinted label needs
+ export type ReprintSource = {
+@@ -55,6 +45,8 @@ export type ReprintSource = {
+   brandName: string;
+   drugName: string;
+   userName: string;
++  // Initials saved on the entry (newer entries); otherwise taken from the name
++  userInitials?: string;
+   // ISO time of the original Stock Out
+   occurredAt: string;
+   canister: { batch: string; expiry: string; quantity: number; type: number };
+@@ -75,7 +67,7 @@ export function labelFromMovement(
+     expiry: m.canister.expiry,
+     canisterType: m.canister.type,
+     canisterQty: m.canister.quantity,
+-    filledBy: initialsOf(m.userName),
++    filledBy: m.userInitials || initialsOf(m.userName),
+     fillDate: fillDateCode(new Date(m.occurredAt)),
+     qrText: m.drugCode,
+     imageUrl,
+diff --git a/src/lib/label/print-label.ts b/src/lib/label/print-label.ts
+index 6b1473d..02e1e92 100644
+--- a/src/lib/label/print-label.ts
++++ b/src/lib/label/print-label.ts
+@@ -20,17 +20,21 @@ export function orientCanvas(
+   return out;
+ }
+ 
+-// Sends a drawn label to the Bluetooth printer
+-export async function printCanvasBluetooth(canvas: HTMLCanvasElement) {
++// Sends a drawn label to the Bluetooth printer (the printer repeats it `copies` times)
++export async function printCanvasBluetooth(
++  canvas: HTMLCanvasElement,
++  copies = 1,
++) {
+   const ctx = canvas.getContext("2d");
+   if (!ctx) throw new Error("This browser cannot draw labels");
+   const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+   const mono = ditherToMono(toGray(data), canvas.width, canvas.height);
+-  await sendToPrinter(buildCpclJob(mono, canvas.width, canvas.height));
++  await sendToPrinter(buildCpclJob(mono, canvas.width, canvas.height, copies));
+ }
+ 
+-// Fallback: the normal print window, with the page sized to the (turned) label
+-export function printCanvasWindow(canvas: HTMLCanvasElement): void {
++// Fallback: the normal print window, with the page sized to the (turned) label,
++// one page per copy
++export function printCanvasWindow(canvas: HTMLCanvasElement, copies = 1): void {
+   const frame = document.createElement("iframe");
+   frame.style.position = "fixed";
+   frame.style.width = "0";
+@@ -45,9 +49,14 @@ export function printCanvasWindow(canvas: HTMLCanvasElement): void {
+   }
+   const mmW = canvas.width / DOTS_PER_MM;
+   const mmH = canvas.height / DOTS_PER_MM;
++  const src = canvas.toDataURL("image/png");
++  const pages = Array.from(
++    { length: Math.max(1, Math.floor(copies)) },
++    () => `<img src="${src}">`,
++  ).join("");
+   doc.open();
+   doc.write(
+-    `<!doctype html><html><head><style>@page{size:${mmW}mm ${mmH}mm;margin:0}html,body{margin:0;padding:0}img{display:block;width:${mmW}mm;height:${mmH}mm;image-rendering:pixelated}</style></head><body><img src="${canvas.toDataURL("image/png")}"></body></html>`,
++    `<!doctype html><html><head><style>@page{size:${mmW}mm ${mmH}mm;margin:0}html,body{margin:0;padding:0}img{display:block;width:${mmW}mm;height:${mmH}mm;image-rendering:pixelated;break-after:page}img:last-child{break-after:auto}</style></head><body>${pages}</body></html>`,
+   );
+   doc.close();
+   const img = doc.querySelector("img");
+diff --git a/src/lib/label/render-compact.ts b/src/lib/label/render-compact.ts
+index 39bb8c9..bd2cf0f 100644
+--- a/src/lib/label/render-compact.ts
++++ b/src/lib/label/render-compact.ts
+@@ -7,6 +7,7 @@ import {
+   FONT,
+   loadPhoto,
+   rotateAnticlockwise,
++  tagBox,
+   toPrintedDots,
+   wrapLines,
+   type Ctx,
+@@ -50,32 +51,6 @@ function drawTypeMarker(
+   ctx.fill();
+ }
+ 
+-// A thin box with centred bold text
+-function tagBox(
+-  ctx: Ctx,
+-  text: string,
+-  x: number,
+-  y: number,
+-  w: number,
+-  h: number,
+-  size: number,
+-) {
+-  ctx.lineWidth = 2;
+-  ctx.strokeStyle = "#000";
+-  ctx.strokeRect(x, y, w, h);
+-  ctx.font = `bold ${size}px ${FONT}`;
+-  let s = size;
+-  while (s > 10 && ctx.measureText(text).width > w - 8) {
+-    s -= 1;
+-    ctx.font = `bold ${s}px ${FONT}`;
+-  }
+-  ctx.fillStyle = "#000";
+-  ctx.textAlign = "center";
+-  ctx.textBaseline = "middle";
+-  ctx.fillText(text, x + w / 2, y + h / 2 + 1);
+-  ctx.textAlign = "left";
+-}
+-
+ function drawCompact(
+   ctx: Ctx,
+   scale: number,
+@@ -136,6 +111,18 @@ export async function renderCompactLabel(
+   data: LabelData,
+   size: LabelSize,
+ ): Promise<HTMLCanvasElement> {
++  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
++  return drawLandscape(size, (ctx, scale) =>
++    drawCompact(ctx, scale, data, photo),
++  );
++}
++
++// Draws a 480 x 320 landscape design onto the label (scaled and centred for bigger
++// labels), turns it to printed dots and returns it upright (portrait)
++export function drawLandscape(
++  size: LabelSize,
++  draw: (ctx: Ctx, scale: number) => void,
++): HTMLCanvasElement {
+   const dots = labelDots(size);
+   // Landscape drawing: the label's length runs across
+   const canvas = document.createElement("canvas");
+@@ -143,17 +130,15 @@ export async function renderCompactLabel(
+   canvas.height = dots.width;
+   const ctx = canvas.getContext("2d");
+   if (!ctx) throw new Error("This browser cannot draw labels");
+-  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
+   ctx.fillStyle = "#fff";
+   ctx.fillRect(0, 0, canvas.width, canvas.height);
+-  // Bigger labels: scale the 60 x 40 design to fit and centre it
+   const scale = Math.min(canvas.width / W, canvas.height / H);
+   ctx.translate(
+     Math.round((canvas.width - W * scale) / 2),
+     Math.round((canvas.height - H * scale) / 2),
+   );
+   ctx.scale(scale, scale);
+-  drawCompact(ctx, scale, data, photo);
++  draw(ctx, scale);
+   toPrintedDots(ctx, canvas.width, canvas.height);
+   return rotateAnticlockwise(canvas);
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 50a0438..8ab7f09 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v71");
++    expect(CHANGE_ENTRIES[0].version).toBe("v73");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+diff --git a/src/pages/users/page.tsx b/src/pages/users/page.tsx
+index 8638c96..2932154 100644
+--- a/src/pages/users/page.tsx
++++ b/src/pages/users/page.tsx
+@@ -28,6 +28,7 @@ import PageHeader from "@/components/page-header.tsx";
+ import { useCurrentUser } from "@/hooks/use-current-user.ts";
+ import { useConfirm } from "@/hooks/use-confirm.ts";
+ import { errorMessage } from "@/lib/errors.ts";
++import InitialsField from "./_components/initials-field.tsx";
+ 
+ type Status = "pending" | "active" | "disabled";
+ type Role = "admin" | "staff";
+@@ -118,6 +119,7 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+           {user.email ?? "No email"}
+         </div>
+       </div>
++      {user.status === "active" && <InitialsField user={user} />}
+       {user.status === "active" && <CanisterAccessToggle user={user} />}
+       {!isSelf && (
+         <div className="flex flex-wrap items-center gap-2">
+
+diff --git a/convex/lib/initials.ts b/convex/lib/initials.ts
+new file mode 100644
+--- /dev/null
++++ b/convex/lib/initials.ts
+@@ -0,0 +1,35 @@
++// Initials printed on labels (e.g. "HS"). Admins can set them per user;
++// otherwise they are worked out from the name.
++export const MAX_INITIALS_LENGTH = 4;
++
++// "Hubert Suen" -> "HS"; falls back to the first letters of an email
++export function initialsOf(name: string | undefined): string {
++  const words = (name ?? "")
++    .replace(/@.*/, "")
++    .split(/[\s._-]+/)
++    .filter(Boolean);
++  if (words.length === 0) return "";
++  const letters =
++    words.length === 1
++      ? words[0].slice(0, 2)
++      : words[0][0] + words[words.length - 1][0];
++  return letters.toUpperCase();
++}
++
++// Trims and capitalises typed initials; "" means "not set"
++export function normalizeInitials(raw: string): string {
++  return raw.trim().toUpperCase();
++}
++
++// 1 to 4 letters or digits, after normalising
++export function isValidInitials(value: string): boolean {
++  return new RegExp(`^[A-Z0-9]{1,${MAX_INITIALS_LENGTH}}$`).test(value);
++}
++
++// The initials to print for a user: the admin-set ones, else from the name/email
++export function userInitials(
++  user: { initials?: string; name?: string; email?: string } | null | undefined,
++): string {
++  if (user?.initials) return user.initials;
++  return initialsOf(user?.name ?? user?.email);
++}
+diff --git a/src/components/stock/stock-in-label-dialog.tsx b/src/components/stock/stock-in-label-dialog.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/stock/stock-in-label-dialog.tsx
+@@ -0,0 +1,311 @@
++import { useEffect, useRef, useState } from "react";
++import { Bluetooth, Minus, Plus, Printer, RotateCcw } from "lucide-react";
++import { toast } from "sonner";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.tsx";
++import { Button } from "@/components/ui/button.tsx";
++import { Input } from "@/components/ui/input.tsx";
++import { Spinner } from "@/components/ui/spinner.tsx";
++import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group.tsx";
++import {
++  bluetoothSupported,
++  connectPrinter,
++  forgetPrinter,
++  printerConnected,
++  printerName,
++} from "@/lib/label/bluetooth-printer.ts";
++import {
++  isLabelOrientation,
++  LABEL_ORIENTATIONS,
++  LABEL_SIZES,
++  loadLabelOrientation,
++  saveLabelOrientation,
++  type LabelOrientation,
++} from "@/lib/label/label-sizes.ts";
++import {
++  orientCanvas,
++  printCanvasBluetooth,
++  printCanvasWindow,
++} from "@/lib/label/print-label.ts";
++import { renderStockInLabel } from "@/lib/label/render-stock-in.ts";
++import {
++  MAX_LABEL_COPIES,
++  type StockInLabelData,
++} from "@/lib/label/stock-in-label.ts";
++import { errorMessage } from "@/lib/errors.ts";
++
++// Stock In labels are always 40 x 60 mm
++const SIZE = LABEL_SIZES["40x60"];
++const PREVIEW_CLASS: Record<LabelOrientation, string> = {
++  portrait: "h-[300px] w-[200px]",
++  landscape: "h-[200px] w-[300px]",
++};
++const TOGGLE_ITEM_CLASS =
++  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
++
++type Status =
++  | { state: "drawing" }
++  | { state: "ready" }
++  | { state: "printing" }
++  | { state: "printed"; copies: number }
++  | { state: "failed"; message: string };
++
++type Props = {
++  data: StockInLabelData | null;
++  // Starting number of labels (usually the quantity received)
++  copies: number;
++  title: string;
++  onClose: () => void;
++};
++
++// Previews the Stock In label and prints the chosen number of copies.
++// Never prints by itself, so the count can be checked first.
++export default function StockInLabelDialog({
++  data,
++  copies,
++  title,
++  onClose,
++}: Props) {
++  return (
++    <Dialog open={data !== null} onOpenChange={(open) => !open && onClose()}>
++      <DialogContent className="sm:max-w-md">
++        {data && (
++          <StockInLabelPrinter
++            key={JSON.stringify(data)}
++            data={data}
++            initialCopies={copies}
++            title={title}
++          />
++        )}
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++function clampCopies(n: number): number {
++  return Math.min(MAX_LABEL_COPIES, Math.max(1, Math.floor(n) || 1));
++}
++
++function StockInLabelPrinter({
++  data,
++  initialCopies,
++  title,
++}: {
++  data: StockInLabelData;
++  initialCopies: number;
++  title: string;
++}) {
++  const canvasRef = useRef<HTMLCanvasElement | null>(null);
++  const [preview, setPreview] = useState<string | null>(null);
++  const [status, setStatus] = useState<Status>({ state: "drawing" });
++  const [orientation, setOrientation] = useState<LabelOrientation>(() =>
++    loadLabelOrientation(SIZE.id),
++  );
++  // Kept as typed text so the box can be cleared while typing
++  const [copiesText, setCopiesText] = useState(
++    String(clampCopies(initialCopies)),
++  );
++  const copies = clampCopies(Number(copiesText));
++  const canBluetooth = bluetoothSupported();
++
++  const changeOrientation = (value: string) => {
++    if (!isLabelOrientation(value) || value === orientation) return;
++    saveLabelOrientation(SIZE.id, value);
++    setPreview(null);
++    setStatus({ state: "drawing" });
++    setOrientation(value);
++  };
++
++  useEffect(() => {
++    let cancelled = false;
++    void renderStockInLabel(data, SIZE).then((drawn) => {
++      if (cancelled) return;
++      const canvas = orientCanvas(drawn, orientation);
++      canvasRef.current = canvas;
++      setPreview(canvas.toDataURL("image/png"));
++      setStatus({ state: "ready" });
++    });
++    return () => {
++      cancelled = true;
++    };
++  }, [data, orientation]);
++
++  const printBluetooth = async () => {
++    const canvas = canvasRef.current;
++    if (!canvas) return;
++    setStatus({ state: "printing" });
++    try {
++      await connectPrinter();
++      await printCanvasBluetooth(canvas, copies);
++      setStatus({ state: "printed", copies });
++      toast.success(
++        `${copies} label${copies === 1 ? "" : "s"} sent to the printer`,
++      );
++    } catch (e) {
++      const cancelled = e instanceof DOMException && e.name === "NotFoundError";
++      setStatus({
++        state: "failed",
++        message: cancelled
++          ? "No printer was chosen."
++          : errorMessage(e, "Could not print the labels"),
++      });
++    }
++  };
++
++  const printWindow = () => {
++    if (!canvasRef.current) return;
++    try {
++      printCanvasWindow(canvasRef.current, copies);
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not open the print window"));
++    }
++  };
++
++  const busy = status.state === "drawing" || status.state === "printing";
++  const name = printerName();
++
++  return (
++    <>
++      <DialogHeader>
++        <DialogTitle>{title}</DialogTitle>
++        <DialogDescription>
++          {status.state === "printed"
++            ? `${status.copies} label${status.copies === 1 ? "" : "s"} printed${name ? ` on ${name}` : ""}.`
++            : status.state === "printing"
++              ? "Printing…"
++              : `40 × 60 mm label. ${canBluetooth ? "Connect the HPRT printer by Bluetooth, or use the print window." : "Use the print window with the printer paired to this device."}`}
++        </DialogDescription>
++      </DialogHeader>
++
++      <div className="flex items-center justify-between gap-3">
++        <label htmlFor="label-copies" className="text-sm font-medium">
++          Number of labels
++        </label>
++        <div className="flex items-center gap-1">
++          <Button
++            type="button"
++            variant="secondary"
++            size="icon"
++            aria-label="One fewer label"
++            disabled={copies <= 1 || status.state === "printing"}
++            onClick={() => setCopiesText(String(clampCopies(copies - 1)))}
++          >
++            <Minus />
++          </Button>
++          <Input
++            id="label-copies"
++            value={copiesText}
++            inputMode="numeric"
++            maxLength={3}
++            onChange={(e) => setCopiesText(e.target.value.replace(/\D/g, ""))}
++            onBlur={() => setCopiesText(String(copies))}
++            onFocus={(e) => e.target.select()}
++            className="h-9 w-16 text-center text-lg font-bold"
++          />
++          <Button
++            type="button"
++            variant="secondary"
++            size="icon"
++            aria-label="One more label"
++            disabled={copies >= MAX_LABEL_COPIES || status.state === "printing"}
++            onClick={() => setCopiesText(String(clampCopies(copies + 1)))}
++          >
++            <Plus />
++          </Button>
++        </div>
++      </div>
++
++      <div className="flex items-center justify-between gap-3">
++        <span className="text-sm font-medium">Direction</span>
++        <ToggleGroup
++          type="single"
++          variant="outline"
++          value={orientation}
++          onValueChange={changeOrientation}
++          disabled={status.state === "printing"}
++        >
++          {LABEL_ORIENTATIONS.map((o) => (
++            <ToggleGroupItem
++              key={o.id}
++              value={o.id}
++              className={TOGGLE_ITEM_CLASS}
++            >
++              {o.name}
++            </ToggleGroupItem>
++          ))}
++        </ToggleGroup>
++      </div>
++
++      <div className="flex justify-center rounded-lg bg-muted p-3">
++        {preview ? (
++          <img
++            src={preview}
++            alt={`Stock In label preview, ${orientation}`}
++            className={`${PREVIEW_CLASS[orientation]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
++          />
++        ) : (
++          <div
++            className={`${PREVIEW_CLASS[orientation]} flex items-center justify-center`}
++          >
++            <Spinner />
++          </div>
++        )}
++      </div>
++
++      {status.state === "failed" && (
++        <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
++          {status.message} Try again or use the print window.
++        </p>
++      )}
++
++      <DialogFooter className="gap-2 sm:justify-between">
++        <Button
++          type="button"
++          variant="ghost"
++          onClick={printWindow}
++          disabled={!preview}
++        >
++          <Printer />
++          Print window
++        </Button>
++        {canBluetooth && (
++          <div className="flex gap-2">
++            {name && (
++              <Button
++                type="button"
++                variant="ghost"
++                size="icon"
++                title="Choose a different printer"
++                disabled={busy}
++                onClick={() => {
++                  forgetPrinter();
++                  void printBluetooth();
++                }}
++              >
++                <RotateCcw />
++              </Button>
++            )}
++            <Button
++              type="button"
++              onClick={() => void printBluetooth()}
++              disabled={busy}
++            >
++              {status.state === "printing" ? <Spinner /> : <Bluetooth />}
++              {status.state === "printed" || status.state === "failed"
++                ? `Print ${copies} again`
++                : printerConnected()
++                  ? `Print ${copies}`
++                  : `Connect & print ${copies}`}
++            </Button>
++          </div>
++        )}
++      </DialogFooter>
++    </>
++  );
++}
+diff --git a/src/components/stock/stock-in-label-section.tsx b/src/components/stock/stock-in-label-section.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/components/stock/stock-in-label-section.tsx
+@@ -0,0 +1,77 @@
++import type { Control } from "react-hook-form";
++import { Printer } from "lucide-react";
++import { Button } from "@/components/ui/button.tsx";
++import { Checkbox } from "@/components/ui/checkbox.tsx";
++import {
++  FormControl,
++  FormField,
++  FormItem,
++  FormLabel,
++} from "@/components/ui/form.tsx";
++import DdaBadge from "@/components/dda-badge.tsx";
++import type {
++  MovementFormInput,
++  MovementFormValues,
++} from "./movement-form-schema.ts";
++
++type Props = {
++  control: Control<MovementFormInput, unknown, MovementFormValues>;
++  dangerousDrug: boolean;
++  onPrint: () => void;
++};
++
++// Stock In of a package form without a barcode: the "8" tick box and a
++// print button for its labels (a print window also opens after saving)
++export default function StockInLabelSection({
++  control,
++  dangerousDrug,
++  onPrint,
++}: Props) {
++  return (
++    <div className="space-y-3 rounded-xl border border-primary/25 bg-primary/5 p-4">
++      <div className="flex items-start justify-between gap-3">
++        <div className="min-w-0">
++          <div className="flex items-center gap-2 font-semibold">
++            <Printer className="size-4 text-primary" /> Labels
++            {dangerousDrug && <DdaBadge />}
++          </div>
++          <p className="text-xs text-muted-foreground">
++            This package form has no barcode, so it needs labels. The print
++            window opens after you record the Stock In.
++          </p>
++        </div>
++        <Button
++          type="button"
++          size="sm"
++          variant="secondary"
++          className="shrink-0"
++          onClick={onPrint}
++        >
++          <Printer /> Print label
++        </Button>
++      </div>
++      <FormField
++        control={control}
++        name="eight"
++        render={({ field }) => (
++          <FormItem className="flex items-center gap-3 rounded-lg bg-background px-3 py-2.5">
++            <FormControl>
++              <Checkbox
++                checked={field.value === true}
++                onCheckedChange={(on) => field.onChange(on === true)}
++                className="size-5 cursor-pointer"
++              />
++            </FormControl>
++            <FormLabel className="flex cursor-pointer items-center gap-2">
++              Print
++              <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-sm border-2 border-foreground px-1 text-sm font-bold">
++                8
++              </span>
++              on the labels
++            </FormLabel>
++          </FormItem>
++        )}
++      />
++    </div>
++  );
++}
+diff --git a/src/lib/label/render-stock-in.ts b/src/lib/label/render-stock-in.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/render-stock-in.ts
+@@ -0,0 +1,114 @@
++import { formatLabelDate } from "./label-data.ts";
++import {
++  drawPhotoInBox,
++  drawQr,
++  fitText,
++  FONT,
++  loadPhoto,
++  tagBox,
++  wrapLines,
++  type Ctx,
++} from "./draw.ts";
++import { drawLandscape } from "./render-compact.ts";
++import type { LabelSize } from "./label-sizes.ts";
++import {
++  stockInQrText,
++  stockInTags,
++  type StockInLabelData,
++} from "./stock-in-label.ts";
++
++// Laid out on the same 480 x 320 landscape grid as the Canister QR label (60 x 40 mm),
++// matching the ACP Stock In samples
++const LEFT = 10;
++const W = 480;
++
++// A medicine box with a capsule on it, like the samples' package icon
++function drawPackageIcon(ctx: Ctx, x: number, y: number, w: number, h: number) {
++  const lid = h * 0.28;
++  ctx.lineWidth = 4;
++  ctx.strokeStyle = "#000";
++  ctx.lineJoin = "round";
++  ctx.beginPath();
++  // Lid, slightly wider at the bottom
++  ctx.moveTo(x + 6, y);
++  ctx.lineTo(x + w - 6, y);
++  ctx.lineTo(x + w, y + lid);
++  ctx.lineTo(x, y + lid);
++  ctx.closePath();
++  ctx.rect(x + 2, y + lid, w - 4, h - lid);
++  ctx.stroke();
++  // Capsule turned at 45 degrees
++  const cx = x + w / 2;
++  const cy = y + lid + (h - lid) / 2;
++  const len = w * 0.42;
++  const r = h * 0.12;
++  ctx.save();
++  ctx.translate(cx, cy);
++  ctx.rotate(-Math.PI / 4);
++  ctx.beginPath();
++  ctx.arc(-len / 2 + r, 0, r, Math.PI / 2, (Math.PI * 3) / 2);
++  ctx.arc(len / 2 - r, 0, r, -Math.PI / 2, Math.PI / 2);
++  ctx.closePath();
++  ctx.lineWidth = 3;
++  ctx.stroke();
++  ctx.beginPath();
++  ctx.moveTo(0, -r);
++  ctx.lineTo(len / 2 - r, -r);
++  ctx.arc(len / 2 - r, 0, r, -Math.PI / 2, Math.PI / 2);
++  ctx.lineTo(0, r);
++  ctx.closePath();
++  ctx.fillStyle = "#000";
++  ctx.fill();
++  ctx.restore();
++}
++
++function drawStockIn(
++  ctx: Ctx,
++  scale: number,
++  data: StockInLabelData,
++  photo: HTMLCanvasElement | null,
++) {
++  const textW = W - LEFT * 2;
++  // Brand name over up to two lines, then the drug name in bold
++  ctx.font = `26px ${FONT}`;
++  const brand = wrapLines(ctx, data.brandName || data.name, textW, 2);
++  brand.forEach((line, i) =>
++    fitText(ctx, line, LEFT, 36 + i * 34, textW, 26, false, 14),
++  );
++  const nameY = brand.length > 1 ? 112 : 78;
++  fitText(ctx, data.name, LEFT, nameY, textW, 26, true, 14);
++
++  // Batch and expiry, only when entered
++  const extras = [
++    data.batch && `B:${data.batch}`,
++    data.expiry && `E:${formatLabelDate(data.expiry)}`,
++  ].filter((t): t is string => Boolean(t));
++  extras.forEach((t, i) =>
++    fitText(ctx, t, LEFT, 146 + i * 26, 230, 20, true, 11),
++  );
++
++  // Package icon and package form, above the QR code
++  drawPackageIcon(ctx, 254, 136, 54, 44);
++  fitText(ctx, data.packageForm, 320, 162, W - 320 - 6, 28, true, 14);
++
++  // Tablet photo
++  if (photo) drawPhotoInBox(ctx, photo, 12, 190, 220, 120);
++
++  // DDA and 8 boxes, stacked beside the QR code
++  stockInTags(data).forEach((t, i) =>
++    tagBox(ctx, t, 254, 194 + i * 46, 60, 40, 28),
++  );
++
++  drawQr(ctx, scale, stockInQrText(data), 324, 192, 116);
++}
++
++// Draws the Stock In label and returns it upright (portrait), like every design
++export async function renderStockInLabel(
++  data: StockInLabelData,
++  size: LabelSize,
++): Promise<HTMLCanvasElement> {
++  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
++  return drawLandscape(size, (ctx, scale) =>
++    drawStockIn(ctx, scale, data, photo),
++  );
++}
+diff --git a/src/lib/label/stock-in-label.test.ts b/src/lib/label/stock-in-label.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/stock-in-label.test.ts
+@@ -0,0 +1,123 @@
++import { describe, expect, it } from "vitest";
++import {
++  defaultLabelCopies,
++  hasReprintableLabel,
++  MAX_LABEL_COPIES,
++  stockInLabelFromMovement,
++  stockInQrText,
++  stockInTags,
++} from "./stock-in-label.ts";
++import { buildCpclJob } from "./bitmap.ts";
++import { userInitials } from "@/convex/lib/initials.ts";
++
++describe("Stock In label", () => {
++  it("writes the QR text exactly like the ACP samples", () => {
++    expect(
++      stockInQrText({
++        drugId: "13103",
++        packageForm: "100/Box x1",
++        dangerousDrug: true,
++        initials: "HS",
++        eight: false,
++      }),
++    ).toBe("13103;100/Box x1;DDA_HS");
++    expect(
++      stockInQrText({
++        drugId: "5467",
++        packageForm: "28/Box x1",
++        dangerousDrug: false,
++        initials: "HS",
++        eight: true,
++      }),
++    ).toBe("5467;28/Box x1;_HS*");
++    expect(
++      stockInQrText({
++        drugId: "1",
++        packageForm: "60/Box x1",
++        dangerousDrug: true,
++        initials: "HS",
++        eight: true,
++      }),
++    ).toBe("1;60/Box x1;DDA_HS*");
++  });
++
++  it("stacks DDA above 8", () => {
++    expect(stockInTags({ dangerousDrug: true, eight: true })).toEqual([
++      "DDA",
++      "8",
++    ]);
++    expect(stockInTags({ dangerousDrug: false, eight: true })).toEqual(["8"]);
++    expect(stockInTags({ dangerousDrug: false, eight: false })).toEqual([]);
++  });
++
++  it("prints one label per package received, capped", () => {
++    expect(defaultLabelCopies(3)).toBe(3);
++    expect(defaultLabelCopies(5000)).toBe(MAX_LABEL_COPIES);
++  });
++
++  it("asks the printer for the number of copies", () => {
++    const text = new TextDecoder().decode(
++      buildCpclJob(new Uint8Array(16), 8, 2, 5),
++    );
++    expect(text.startsWith("! 0 200 200 2 5\r\n")).toBe(true);
++  });
++
++  it("uses admin-set initials before the name", () => {
++    expect(userInitials({ name: "Hubert Suen" })).toBe("HS");
++    expect(userInitials({ name: "Hubert Suen", initials: "HBS" })).toBe("HBS");
++    expect(userInitials(null)).toBe("");
++  });
++
++  it("rebuilds a reprint with the saved initials and 8 mark", () => {
++    const label = stockInLabelFromMovement(
++      {
++        drugCode: "13103",
++        brandName: "Lexotan 3mg Tab",
++        drugName: "Bromazepam 3mg Tab",
++        qtyPerUnit: 100,
++        baseUnit: "Box",
++        unitCount: 1,
++        userName: "Hubert Suen",
++        userInitials: "HBS",
++        eight: true,
++      },
++      null,
++      true,
++    );
++    expect(label).toMatchObject({
++      packageForm: "100/Box x1",
++      initials: "HBS",
++      eight: true,
++      dangerousDrug: true,
++    });
++    expect(
++      stockInLabelFromMovement(
++        {
++          drugCode: "1",
++          brandName: "",
++          drugName: "X",
++          qtyPerUnit: 1,
++          baseUnit: "Box",
++          unitCount: 1,
++          userName: "Mary Lee",
++        },
++        null,
++        false,
++      ).initials,
++    ).toBe("ML");
++  });
++
++  it("offers reprints only for canister fills and barcode-less Stock Ins", () => {
++    expect(hasReprintableLabel({ kind: "in", barcode: "" })).toBe(true);
++    expect(hasReprintableLabel({ kind: "in", barcode: "9312345678907" })).toBe(
++      false,
++    );
++    expect(hasReprintableLabel({ kind: "out", barcode: "" })).toBe(false);
++    expect(
++      hasReprintableLabel({ kind: "out", barcode: "1", canister: {} }),
++    ).toBe(true);
++    expect(hasReprintableLabel({ kind: "in", barcode: "", undo: {} })).toBe(
++      false,
++    );
++  });
++});
+diff --git a/src/lib/label/stock-in-label.ts b/src/lib/label/stock-in-label.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/stock-in-label.ts
+@@ -0,0 +1,98 @@
++import { formatPackageForm, type BaseUnit } from "@/convex/lib/barcode.ts";
++import { initialsOf } from "@/convex/lib/initials.ts";
++
++// Most labels sent in one go, so a mistyped count can't use up a roll
++export const MAX_LABEL_COPIES = 100;
++
++// Everything printed on a Stock In label (for package forms without a barcode)
++export type StockInLabelData = {
++  drugId: string;
++  brandName: string;
++  name: string;
++  // e.g. "100/Box x1"
++  packageForm: string;
++  // From the medicine's DDA mark
++  dangerousDrug: boolean;
++  // The "8" box ticked at Stock In
++  eight: boolean;
++  // e.g. "HS"
++  initials: string;
++  // Printed only when entered at Stock In
++  batch?: string;
++  // YYYY-MM-DD
++  expiry?: string;
++  imageUrl: string | null;
++};
++
++// QR text, matching the ACP samples: "<Drug ID>;<Package form>;<DDA>_<Initials><*>"
++// e.g. "13103;100/Box x1;DDA_HS" or "5467;28/Box x1;_HS*" (the * means the 8 box)
++export function stockInQrText(
++  data: Pick<
++    StockInLabelData,
++    "drugId" | "packageForm" | "dangerousDrug" | "initials" | "eight"
++  >,
++): string {
++  const marks = `${data.dangerousDrug ? "DDA" : ""}_${data.initials}${data.eight ? "*" : ""}`;
++  return [data.drugId, data.packageForm, marks].join(";");
++}
++
++// Boxes printed beside the QR code, top to bottom
++export function stockInTags(
++  data: Pick<StockInLabelData, "dangerousDrug" | "eight">,
++): string[] {
++  return [data.dangerousDrug && "DDA", data.eight && "8"].filter(
++    (t): t is string => Boolean(t),
++  );
++}
++
++// Labels to print by default: one per package received, up to the limit
++export function defaultLabelCopies(quantity: number): number {
++  return Math.min(MAX_LABEL_COPIES, Math.max(0, Math.floor(quantity)));
++}
++
++// The saved parts of a Stock In that a reprinted label needs
++export type StockInReprintSource = {
++  drugCode: string;
++  brandName: string;
++  drugName: string;
++  qtyPerUnit: number;
++  baseUnit: BaseUnit;
++  unitCount: number;
++  userName: string;
++  userInitials?: string;
++  eight?: boolean;
++  batch?: string;
++  expiry?: string;
++};
++
++// Entries that have a label to reprint: canister Stock Outs, and Stock Ins of
++// package forms without a barcode
++export function hasReprintableLabel(m: {
++  kind: "in" | "out";
++  barcode: string;
++  canister?: unknown;
++  undo?: unknown;
++}): boolean {
++  return !m.undo && (!!m.canister || (m.kind === "in" && !m.barcode.trim()));
++}
++
++// Rebuilds an earlier Stock In label with the original initials and 8 mark.
++// `dangerousDrug` is the medicine's current DDA mark (it isn't saved on the entry).
++export function stockInLabelFromMovement(
++  m: StockInReprintSource,
++  imageUrl: string | null,
++  dangerousDrug: boolean,
++): StockInLabelData {
++  return {
++    drugId: m.drugCode,
++    brandName: m.brandName,
++    name: m.drugName,
++    packageForm: formatPackageForm(m),
++    dangerousDrug,
++    eight: m.eight === true,
++    initials: m.userInitials || initialsOf(m.userName),
++    batch: m.batch,
++    expiry: m.expiry,
++    imageUrl,
++  };
++}
+diff --git a/src/pages/users/_components/initials-field.tsx b/src/pages/users/_components/initials-field.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/pages/users/_components/initials-field.tsx
+@@ -0,0 +1,62 @@
++import { useState } from "react";
++import { useMutation } from "convex/react";
++import { toast } from "sonner";
++import type { Doc } from "@/convex/_generated/dataModel.d.ts";
++import { api } from "@/convex/_generated/api.js";
++import {
++  initialsOf,
++  isValidInitials,
++  MAX_INITIALS_LENGTH,
++  normalizeInitials,
++} from "@/convex/lib/initials.ts";
++import { Input } from "@/components/ui/input.tsx";
++import { errorMessage } from "@/lib/errors.ts";
++
++// Admin: initials printed on this person's Stock In and canister labels.
++// Saved when the box loses focus or Enter is pressed; blank uses the name's initials.
++export default function InitialsField({ user }: { user: Doc<"users"> }) {
++  const setInitials = useMutation(api.users.setInitials);
++  const saved = user.initials ?? "";
++  const [value, setValue] = useState(saved);
++  const fallback = initialsOf(user.name ?? user.email);
++
++  const save = async () => {
++    const next = normalizeInitials(value);
++    setValue(next);
++    if (next === saved) return;
++    if (next !== "" && !isValidInitials(next)) {
++      toast.error(
++        `Initials must be 1 to ${MAX_INITIALS_LENGTH} letters or numbers`,
++      );
++      setValue(saved);
++      return;
++    }
++    try {
++      await setInitials({ userId: user._id, initials: next });
++      toast.success(`Label initials for ${user.name ?? "this user"} saved`);
++    } catch (e) {
++      toast.error(errorMessage(e, "Could not save the initials"));
++      setValue(saved);
++    }
++  };
++
++  return (
++    <label className="flex items-center gap-2 rounded-lg bg-muted px-2.5 py-1 text-sm">
++      Initials
++      <Input
++        value={value}
++        maxLength={MAX_INITIALS_LENGTH}
++        placeholder={fallback || "HS"}
++        onChange={(e) =>
++          setValue(e.target.value.replace(/[^a-z0-9]/gi, "").toUpperCase())
++        }
++        onBlur={() => void save()}
++        onKeyDown={(e) => {
++          if (e.key === "Enter") e.currentTarget.blur();
++        }}
++        aria-label="Label initials"
++        className="h-7 w-16 bg-background px-2 text-center font-bold uppercase"
++      />
++    </label>
++  );
++}

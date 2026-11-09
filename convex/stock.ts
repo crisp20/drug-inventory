@@ -3,6 +3,7 @@ import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireActiveUser, requireAdmin } from "./lib/access";
+import { userInitials } from "./lib/initials";
 import { logMovement, logUndo } from "./lib/activity";
 import {
   canUseCanister,
@@ -39,6 +40,7 @@ async function recordMovement(
   canister?: CanisterInput,
   batchExpiry: BatchExpiry = {},
   mismatchedScan?: string,
+  labelOptions: { eight?: boolean; labels?: boolean; bagLabels?: boolean } = {},
 ) {
   const user = await requireActiveUser(ctx);
   const input = cleanMovementInput(raw);
@@ -55,6 +57,13 @@ async function recordMovement(
       message: "This drug no longer exists",
     });
 
+  // Package forms without a barcode always get Stock In labels; others only when chosen
+  const hasBarcode = !!pkg.barcode.trim();
+  const chosenLabels =
+    kind === "in" && hasBarcode && labelOptions.labels === true;
+  const bagLabels = kind === "in" && labelOptions.bagLabels === true;
+  const getsLabels =
+    kind === "in" && (!hasBarcode || chosenLabels || bagLabels);
   const stockAfter = nextStock(pkg.stock, kind, input.quantity);
   await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
   const movementId = await ctx.db.insert("stockMovements", {
@@ -78,8 +87,13 @@ async function recordMovement(
     expiry: batchExpiry.expiry,
     mismatchedScan,
     canister,
+    // Only entries that get Stock In labels keep the 8 mark
+    eight: getsLabels && labelOptions.eight === true ? true : undefined,
+    labels: chosenLabels ? true : undefined,
+    bagLabels: bagLabels ? true : undefined,
     userRef: user._id,
     userName: user.name ?? user.email ?? "Unknown user",
+    userInitials: userInitials(user) || undefined,
     occurredAt: new Date().toISOString(),
   });
   const movement = await ctx.db.get("stockMovements", movementId);
@@ -87,17 +101,32 @@ async function recordMovement(
   return { stockAfter };
 }
 
-// Records stock received. Any approved user can do this.
+// Records stock received. Any approved user (admin or staff) can do this.
 export const recordIn = mutation({
   args: {
     ...movementArgs,
     batch: v.optional(v.string()),
     expiry: v.optional(v.string()),
     mismatchedScan: v.optional(v.string()),
+    // The "8" box, only kept when the entry gets labels
+    eight: v.optional(v.boolean()),
+    // Labels chosen for a package form that has a barcode
+    labels: v.optional(v.boolean()),
+    // Medicine Bag Labels chosen (any package form)
+    bagLabels: v.optional(v.boolean()),
   },
   handler: async (
     ctx,
-    { packageId, batch, expiry, mismatchedScan, ...rest },
+    {
+      packageId,
+      batch,
+      expiry,
+      mismatchedScan,
+      eight,
+      labels,
+      bagLabels,
+      ...rest
+    },
   ) => {
     return await recordMovement(
       ctx,
@@ -108,6 +137,7 @@ export const recordIn = mutation({
       undefined,
       cleanBatchExpiry({ batch, expiry }),
       cleanMismatchedScan(mismatchedScan),
+      { eight, labels, bagLabels },
     );
   },
 });

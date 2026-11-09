@@ -13,6 +13,7 @@ export const LABEL_DESIGNS: { id: LabelDesignId; name: string }[] = [
 export const DEFAULT_DESIGN: Record<LabelSizeId, LabelDesignId> = {
   "40x60": "compact",
   "52x110": "full",
+  "54x70": "compact",
 };
 
 export function isLabelDesignId(value: unknown): value is LabelDesignId {
