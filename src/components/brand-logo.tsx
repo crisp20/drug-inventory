@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils.ts";
 
-export const LOGO_URL = "https://hercules-cdn.com/file_1CrjBA7oz550P1YuXycIxorr";
+export const LOGO_URL = "/ACP.jpg";
 
 export default function BrandLogo({
   className,

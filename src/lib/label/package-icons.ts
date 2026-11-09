@@ -1,12 +1,12 @@
 import type { BaseUnit } from "@/convex/lib/barcode.ts";
 import { loadImage } from "./draw.ts";
 
-// The owner's package-form icons (Files & Media), one per base unit
+// Local icons keep label printing independent of external image hosts.
 export const PACKAGE_ICON_URLS: Record<BaseUnit, string> = {
-  Box: "https://hercules-cdn.com/file_ARbATTHCXeV95i4gR4GgxSrs",
-  Bottle: "https://hercules-cdn.com/file_BfPp5dKg8yjFRrh3SNYtCYOW",
-  Strip: "https://hercules-cdn.com/file_QYb3HsffMGTbMyy5C3cXTNWn",
-  Bag: "https://hercules-cdn.com/file_PjtiQptAbBe3jxSwRhHiU2e0",
+  Box: "/package-icons/drugbox_icon.png",
+  Bottle: "/package-icons/drugbot_icon.png",
+  Strip: "/package-icons/drugstrip_icon.png",
+  Bag: "/package-icons/drugbags_icon.png",
 };
 
 // Icons are scaled up before drawing so the lines stay smooth on the label
