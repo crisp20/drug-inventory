@@ -7,7 +7,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   server: {
     host: "0.0.0.0",
-    port: 5173,
+    port: 5273,
     allowedHosts: true,
     hmr: {
       overlay: false,
