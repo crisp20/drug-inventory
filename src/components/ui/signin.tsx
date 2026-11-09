@@ -2,7 +2,8 @@ import { forwardRef, useCallback, useEffect } from "react";
 import { type VariantProps } from "class-variance-authority";
 import { Loader2, LogIn, LogOut } from "lucide-react";
 import { toast } from "sonner";
-import { useAuth } from "@usehercules/auth/react";
+import { useLocation } from "react-router-dom";
+import { useAuth } from "@/hooks/use-auth.ts";
 import { Button, buttonVariants } from "@/components/ui/button.tsx";
 
 export interface SignInButtonProps
@@ -61,12 +62,14 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
     },
     ref,
   ) => {
+    const location = useLocation();
     const { isAuthenticated, signin, signout, isLoading, error } = useAuth();
 
     useEffect(() => {
       if (error) {
         toast.error("Login error", {
           description: error.message,
+          position: "top-center",
         });
         console.error("Login error", error);
       }
@@ -81,14 +84,24 @@ export const SignInButton = forwardRef<HTMLButtonElement, SignInButtonProps>(
           if (isAuthenticated) {
             await signout();
           } else {
-            await signin();
+            await signin(
+              `${location.pathname}${location.search}${location.hash}`,
+            );
           }
         } catch (err) {
           console.error("Authentication error:", err);
           // Don't prevent the default here as the auth library handles errors
         }
       },
-      [isAuthenticated, signout, signin, onClick],
+      [
+        isAuthenticated,
+        signout,
+        signin,
+        onClick,
+        location.pathname,
+        location.search,
+        location.hash,
+      ],
     );
 
     const isDisabled = disabled || isLoading;

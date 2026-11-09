@@ -1,8 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useAuth, useAuthCallback } from "@usehercules/auth/react";
 import { useConvexAuth, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api.js";
+import { useAuth } from "@/hooks/use-auth.ts";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import { Button } from "@/components/ui/button.tsx";
 import {
@@ -25,35 +25,95 @@ export default function AuthCallback({
   } = {},
 }: AuthCallbackProps): React.JSX.Element {
   const navigate = useNavigate();
-  const { user } = useAuth();
-  const { isAuthenticated: isConvexAuthenticated } = useConvexAuth();
+  const auth = useAuth();
+  const convexAuth = useConvexAuth();
   const updateCurrentUser = useMutation(api.users.updateCurrentUser);
-
-  const onSync = useCallback(async () => {
-    await updateCurrentUser();
-  }, [updateCurrentUser]);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const syncStarted = useRef(false);
 
   const navigateHome = useCallback(
     () => navigate("/", { replace: true }),
     [navigate],
   );
-
-  // Back to the page the user signed in from, which `signin()` round-trips
-  // through the OIDC state.
-  const returnTo = resolveReturnTo(user?.state);
+  const returnTo = resolveReturnTo(auth.user?.state);
   const navigateBack = useCallback(
     () => navigate(returnTo, { replace: true }),
     [navigate, returnTo],
   );
 
-  const { status, error, retry } = useAuthCallback({
-    isBackendAuthenticated: isConvexAuthenticated,
-    onSync,
-    onSuccess: navigateBack,
-    onNoAuthParams: navigateHome,
-  });
+  useEffect(() => {
+    if (
+      auth.isLoading ||
+      !auth.isAuthenticated ||
+      !convexAuth.isLoading
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setSyncError(
+        "Convex is still verifying your Keycloak token. Check its connection and the configured OIDC issuer and client audience.",
+      );
+    }, 20_000);
+    return () => window.clearTimeout(timeout);
+  }, [
+    auth.isAuthenticated,
+    auth.isLoading,
+    convexAuth.isLoading,
+  ]);
 
-  if (status === "error" && error) {
+  useEffect(() => {
+    if (auth.isLoading || auth.error) return;
+    if (!auth.isAuthenticated) {
+      navigateHome();
+      return;
+    }
+    if (convexAuth.isLoading) return;
+    if (!convexAuth.isAuthenticated) {
+      return;
+    }
+    if (syncStarted.current) return;
+    syncStarted.current = true;
+    void updateCurrentUser()
+      .then(navigateBack)
+      .catch((error: unknown) => {
+        syncStarted.current = false;
+        setSyncError(
+          error instanceof Error
+            ? error.message
+            : "Could not finish signing in",
+        );
+      });
+  }, [
+    auth.error,
+    auth.isAuthenticated,
+    auth.isLoading,
+    convexAuth.isAuthenticated,
+    convexAuth.isLoading,
+    navigateBack,
+    navigateHome,
+    updateCurrentUser,
+  ]);
+
+  const error =
+    auth.error?.message ??
+    syncError ??
+    (auth.isAuthenticated &&
+    !convexAuth.isLoading &&
+    !convexAuth.isAuthenticated
+      ? "Convex could not verify your Keycloak sign-in. Check the configured OIDC issuer and client audience."
+      : null);
+  const retry = () => {
+    setSyncError(null);
+    void auth.signin(returnTo).catch((signinError: unknown) => {
+      setSyncError(
+        signinError instanceof Error
+          ? signinError.message
+          : "Could not restart sign-in",
+      );
+    });
+  };
+
+  if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-svh gap-6 px-4">
         <div className="flex flex-col items-center gap-2 text-center">

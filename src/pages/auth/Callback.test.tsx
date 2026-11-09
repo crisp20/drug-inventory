@@ -1,39 +1,31 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import {
-  useAuthCallback,
-  type UseAuthCallbackResult,
-} from "@usehercules/auth/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AuthCallback from "./Callback.tsx";
 import { authCallbackMessages } from "./callback-messages.ts";
 
-const mocks = vi.hoisted(() => {
-  const callback: Pick<UseAuthCallbackResult, "status" | "error" | "retry"> = {
-    status: "processing-oauth",
-    error: null,
-    retry: vi.fn<() => Promise<void>>(),
-  };
+const mocks = vi.hoisted(() => ({
+  auth: {
+    isAuthenticated: false,
+    isLoading: true,
+    error: null as Error | null,
+    user: { state: undefined as unknown },
+    signin: vi.fn<() => Promise<void>>(),
+  },
+  convexAuth: {
+    isLoading: true,
+    isAuthenticated: false,
+  },
+  updateCurrentUser: vi.fn<() => Promise<null>>(),
+}));
 
-  return {
-    callback,
-    backendAuthenticated: false,
-    updateCurrentUser: vi.fn(),
-    userState: undefined as unknown,
-  };
-});
-
-vi.mock("@usehercules/auth/react", () => ({
-  useAuthCallback: vi.fn(() => mocks.callback),
-  useAuth: () => ({ user: { state: mocks.userState } }),
+vi.mock("@/hooks/use-auth.ts", () => ({
+  useAuth: () => mocks.auth,
 }));
 
 vi.mock("convex/react", () => ({
-  useConvexAuth: () => ({
-    isAuthenticated: mocks.backendAuthenticated,
-    isLoading: false,
-  }),
+  useConvexAuth: () => mocks.convexAuth,
   useMutation: () => mocks.updateCurrentUser,
 }));
 
@@ -52,12 +44,13 @@ function CallbackRoutes(
 }
 
 beforeEach(() => {
-  mocks.callback.status = "processing-oauth";
-  mocks.callback.error = null;
-  mocks.backendAuthenticated = false;
-  mocks.userState = undefined;
-  vi.mocked(mocks.callback.retry).mockReset().mockResolvedValue(undefined);
-  vi.mocked(useAuthCallback).mockClear();
+  mocks.auth.isAuthenticated = false;
+  mocks.auth.isLoading = true;
+  mocks.auth.error = null;
+  mocks.auth.user.state = undefined;
+  mocks.convexAuth.isLoading = true;
+  mocks.convexAuth.isAuthenticated = false;
+  mocks.auth.signin.mockReset().mockResolvedValue(undefined);
   mocks.updateCurrentUser.mockReset().mockResolvedValue(null);
 });
 
@@ -75,7 +68,7 @@ describe("AuthCallback", () => {
 
       expect(screen.getByText(loading)).toBeInTheDocument();
       expect(screen.getByRole("status", { name: loading })).toBeInTheDocument();
-      expect(mocks.callback.retry).not.toHaveBeenCalled();
+      expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
     },
   );
 
@@ -95,18 +88,6 @@ describe("AuthCallback", () => {
       retry: "Retry sign-in",
     },
     {
-      messages: {
-        errorTitle: undefined,
-        missingState: undefined,
-        returnHome: undefined,
-        tryAgain: undefined,
-      },
-      title: "Something went wrong",
-      guidance: /reopen the original link in your browser/,
-      home: "Return home",
-      retry: "Try again",
-    },
-    {
       messages: authCallbackMessages.de,
       title: "Etwas ist schiefgelaufen",
       guidance: /ursprünglichen Link erneut in Ihrem Browser/,
@@ -116,8 +97,8 @@ describe("AuthCallback", () => {
   ])(
     "explains missing browser state: $title",
     ({ messages, title, guidance, home, retry }) => {
-      mocks.callback.status = "error";
-      mocks.callback.error = "No matching state found in storage";
+      mocks.auth.isLoading = false;
+      mocks.auth.error = new Error("No matching state found in storage");
 
       render(<CallbackRoutes messages={messages} />);
 
@@ -125,108 +106,38 @@ describe("AuthCallback", () => {
       expect(screen.getByText(guidance)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: home })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: retry })).toBeInTheDocument();
-      expect(screen.queryByText(mocks.callback.error)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("No matching state found in storage"),
+      ).not.toBeInTheDocument();
       expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
-      expect(mocks.callback.retry).not.toHaveBeenCalled();
     },
   );
 
-  it("accepts app-supplied copy without changing the managed callback", () => {
-    const messages = {
-      loading: "Connexion en cours...",
-      errorTitle: "Connexion impossible",
-      missingState:
-        "Rouvrez le lien dans votre navigateur et reconnectez-vous.",
-      returnHome: "Accueil",
-      tryAgain: "Réessayer",
-    };
-    const { rerender } = render(<CallbackRoutes />);
-
-    rerender(<CallbackRoutes messages={messages} />);
-    expect(screen.getByText(messages.loading)).toBeInTheDocument();
-    expect(
-      screen.getByRole("status", { name: messages.loading }),
-    ).toBeInTheDocument();
-
-    mocks.callback.status = "error";
-    mocks.callback.error = "No matching state found in storage";
-    rerender(<CallbackRoutes messages={messages} />);
-
-    expect(screen.getByText(messages.errorTitle)).toBeInTheDocument();
-    expect(screen.getByText(messages.missingState)).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: messages.returnHome }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: messages.tryAgain }),
-    ).toBeInTheDocument();
-  });
-
-  it("preserves unrelated provider error details", () => {
-    mocks.callback.status = "error";
-    mocks.callback.error = "Your account has been disabled.";
-
-    render(<CallbackRoutes messages={authCallbackMessages.de} />);
-
-    expect(screen.getByText(mocks.callback.error)).toBeInTheDocument();
-    expect(
-      screen.queryByText(authCallbackMessages.de.missingState),
-    ).not.toBeInTheDocument();
-  });
-
-  it("keeps retry and home actions working with translated labels", async () => {
+  it("shows OIDC errors and retries sign-in", async () => {
     const user = userEvent.setup();
-    mocks.callback.status = "error";
-    mocks.callback.error = "No matching state found in storage";
-    render(<CallbackRoutes messages={authCallbackMessages.de} />);
+    mocks.auth.isLoading = false;
+    mocks.auth.error = new Error("Keycloak login failed");
 
-    await user.click(screen.getByRole("button", { name: "Erneut versuchen" }));
-    expect(mocks.callback.retry).toHaveBeenCalledOnce();
-
-    await user.click(screen.getByRole("button", { name: "Zur Startseite" }));
-    expect(screen.getByText("App home")).toBeInTheDocument();
-    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
-  });
-
-  it("preserves the backend authentication and sync callbacks", async () => {
-    const { rerender } = render(
-      <CallbackRoutes messages={authCallbackMessages.de} />,
-    );
-
-    expect(
-      vi.mocked(useAuthCallback).mock.lastCall?.[0]?.isBackendAuthenticated,
-    ).toBe(false);
-    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
-
-    mocks.backendAuthenticated = true;
-    rerender(<CallbackRoutes messages={authCallbackMessages.de} />);
-
-    const options = vi.mocked(useAuthCallback).mock.lastCall?.[0];
-    expect(options?.isBackendAuthenticated).toBe(true);
-    await options?.onSync?.();
-    expect(mocks.updateCurrentUser).toHaveBeenCalledExactlyOnceWith();
-  });
-
-  it.each(["onSuccess", "onNoAuthParams"] as const)(
-    "preserves home navigation for %s",
-    (callback) => {
-      render(<CallbackRoutes messages={authCallbackMessages.de} />);
-
-      act(() => vi.mocked(useAuthCallback).mock.lastCall?.[0]?.[callback]?.());
-
-      expect(screen.getByText("App home")).toBeInTheDocument();
-      expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
-      expect(mocks.callback.retry).not.toHaveBeenCalled();
-    },
-  );
-
-  it("returns to the page sign-in started from", () => {
-    mocks.userState = { returnTo: "/notes/42?tab=edit" };
     render(<CallbackRoutes />);
 
-    act(() => vi.mocked(useAuthCallback).mock.lastCall?.[0]?.onSuccess?.());
+    expect(screen.getByText("Keycloak login failed")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(mocks.auth.signin).toHaveBeenCalledWith("/");
+  });
 
-    expect(screen.getByText("Note page")).toBeInTheDocument();
+  it("syncs the authenticated user and returns to the original page", async () => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    mocks.auth.user.state = { returnTo: "/notes/42?tab=edit" };
+    mocks.convexAuth.isLoading = false;
+    mocks.convexAuth.isAuthenticated = true;
+
+    render(<CallbackRoutes />);
+
+    await waitFor(() =>
+      expect(mocks.updateCurrentUser).toHaveBeenCalledOnce(),
+    );
+    expect(await screen.findByText("Note page")).toBeInTheDocument();
   });
 
   it.each([
@@ -235,12 +146,93 @@ describe("AuthCallback", () => {
     "/\\evil.example",
     "/auth/callback?code=x",
     42,
-  ])("goes home instead of following an unsafe returnTo: %s", (returnTo) => {
-    mocks.userState = { returnTo };
+  ])("returns home instead of following unsafe return state: %s", async (to) => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    mocks.auth.user.state = { returnTo: to };
+    mocks.convexAuth.isLoading = false;
+    mocks.convexAuth.isAuthenticated = true;
+
     render(<CallbackRoutes />);
 
-    act(() => vi.mocked(useAuthCallback).mock.lastCall?.[0]?.onSuccess?.());
+    expect(await screen.findByText("App home")).toBeInTheDocument();
+  });
 
-    expect(screen.getByText("App home")).toBeInTheDocument();
+  it("shows an error when the Convex user sync fails", async () => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    mocks.convexAuth.isLoading = false;
+    mocks.convexAuth.isAuthenticated = true;
+    mocks.updateCurrentUser.mockRejectedValueOnce(
+      new Error("Could not verify the identity with Convex"),
+    );
+
+    render(<CallbackRoutes />);
+
+    expect(
+      await screen.findByText("Could not verify the identity with Convex"),
+    ).toBeInTheDocument();
+  });
+
+  it("navigates home when callback is opened without an OIDC session", async () => {
+    mocks.auth.isLoading = false;
+
+    render(<CallbackRoutes />);
+
+    expect(await screen.findByText("App home")).toBeInTheDocument();
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it("waits for Convex to confirm the Keycloak token before syncing the user", async () => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    const { rerender } = render(<CallbackRoutes />);
+
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+
+    mocks.convexAuth.isLoading = false;
+    mocks.convexAuth.isAuthenticated = true;
+    rerender(<CallbackRoutes />);
+
+    await waitFor(() =>
+      expect(mocks.updateCurrentUser).toHaveBeenCalledOnce(),
+    );
+  });
+
+  it("explains when Convex rejects the Keycloak token", async () => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    mocks.convexAuth.isLoading = false;
+    mocks.convexAuth.isAuthenticated = false;
+
+    render(<CallbackRoutes />);
+
+    expect(
+      await screen.findByText(
+        "Convex could not verify your Keycloak sign-in. Check the configured OIDC issuer and client audience.",
+      ),
+    ).toBeInTheDocument();
+    expect(mocks.updateCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it("shows guidance if Convex never finishes verifying the token", async () => {
+    mocks.auth.isLoading = false;
+    mocks.auth.isAuthenticated = true;
+    vi.useFakeTimers();
+    try {
+      render(<CallbackRoutes />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+
+      expect(
+        screen.getByText(
+          "Convex is still verifying your Keycloak token. Check its connection and the configured OIDC issuer and client audience.",
+        ),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
