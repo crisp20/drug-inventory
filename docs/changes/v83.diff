@@ -1,0 +1,111 @@
+diff --git a/convex/convex.config.ts b/convex/convex.config.ts
+index f86422d..360fe3f 100644
+--- a/convex/convex.config.ts
++++ b/convex/convex.config.ts
+@@ -6,6 +6,8 @@ const app = defineApp({
+     HERCULES_OIDC_AUTHORITY: v.string(),
+     HERCULES_OIDC_CLIENT_ID: v.string(),
+     HERCULES_API_KEY: v.string(),
++    // Comma-separated emails that are always active admins (e.g. "a@x.com, b@x.com")
++    OWNER_EMAILS: v.optional(v.string()),
+   },
+ });
+ 
+diff --git a/convex/lib/access.ts b/convex/lib/access.ts
+index c6fbd3b..258ffc2 100644
+--- a/convex/lib/access.ts
++++ b/convex/lib/access.ts
+@@ -1,12 +1,20 @@
+ import { ConvexError } from "convex/values";
+-import type { QueryCtx } from "../_generated/server";
++import { env, type QueryCtx } from "../_generated/server";
+ import type { Doc } from "../_generated/dataModel";
+ 
+-// The owner's account is always an active admin
+-export const OWNER_EMAILS = ["hubert@activecaregroup.com"];
++// Splits the OWNER_EMAILS secret (commas, semicolons or spaces) into lower-case emails
++export function parseOwnerEmails(raw: string | undefined): string[] {
++  return (raw ?? "")
++    .split(/[\s,;]+/)
++    .map((e) => e.trim().toLowerCase())
++    .filter((e) => e.length > 0);
++}
+ 
++// Owners come from the OWNER_EMAILS secret and are always active admins.
++// Read on every call so a changed secret applies without a code change.
+ export function isOwnerEmail(email: string | undefined): boolean {
+-  return !!email && OWNER_EMAILS.includes(email.trim().toLowerCase());
++  if (!email) return false;
++  return parseOwnerEmails(env.OWNER_EMAILS).includes(email.trim().toLowerCase());
+ }
+ 
+ export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
+diff --git a/convex/test.setup.ts b/convex/test.setup.ts
+index 8d992fb..917b499 100644
+--- a/convex/test.setup.ts
++++ b/convex/test.setup.ts
+@@ -1,4 +1,8 @@
+ /// <reference types="vite/client" />
++import { vi } from "vitest";
++
++// Tests sign in as this owner; real deployments set OWNER_EMAILS in Secrets
++vi.stubEnv("OWNER_EMAILS", "hubert@activecaregroup.com");
+ 
+ export const modules = import.meta.glob([
+   "./**/*.{js,mjs,cjs,ts,tsx,mts,cts,jsx}",
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index fd948fa..8d5d3be 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v82");
++    expect(CHANGE_ENTRIES[0].version).toBe("v83");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/convex/lib/access.test.ts b/convex/lib/access.test.ts
+new file mode 100644
+--- /dev/null
++++ b/convex/lib/access.test.ts
+@@ -0,0 +1,37 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { isOwnerEmail, parseOwnerEmails } from "./access";
++
++afterEach(() => {
++  vi.unstubAllEnvs();
++});
++
++describe("parseOwnerEmails", () => {
++  it("splits on commas, semicolons and spaces and lower-cases", () => {
++    expect(parseOwnerEmails(" A@x.com, b@x.com;c@x.com  d@x.com ")).toEqual([
++      "a@x.com",
++      "b@x.com",
++      "c@x.com",
++      "d@x.com",
++    ]);
++  });
++
++  it("returns no owners when the secret is missing or blank", () => {
++    expect(parseOwnerEmails(undefined)).toEqual([]);
++    expect(parseOwnerEmails(" , ")).toEqual([]);
++  });
++});
++
++describe("isOwnerEmail", () => {
++  it("matches any listed owner, ignoring case and spaces", () => {
++    vi.stubEnv("OWNER_EMAILS", "admin@acp.com, Boss@acp.com");
++    expect(isOwnerEmail(" BOSS@acp.com ")).toBe(true);
++    expect(isOwnerEmail("admin@acp.com")).toBe(true);
++    expect(isOwnerEmail("staff@acp.com")).toBe(false);
++  });
++
++  it("makes nobody an owner when the secret is not set", () => {
++    vi.stubEnv("OWNER_EMAILS", undefined);
++    expect(isOwnerEmail("hubert@activecaregroup.com")).toBe(false);
++    expect(isOwnerEmail(undefined)).toBe(false);
++  });
++});

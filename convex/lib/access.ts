@@ -1,12 +1,20 @@
 import { ConvexError } from "convex/values";
-import type { QueryCtx } from "../_generated/server";
+import { env, type QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 
-// The owner's account is always an active admin
-export const OWNER_EMAILS = ["hubert@activecaregroup.com"];
+// Splits the OWNER_EMAILS secret (commas, semicolons or spaces) into lower-case emails
+export function parseOwnerEmails(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(/[\s,;]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+}
 
+// Owners come from the OWNER_EMAILS secret and are always active admins.
+// Read on every call so a changed secret applies without a code change.
 export function isOwnerEmail(email: string | undefined): boolean {
-  return !!email && OWNER_EMAILS.includes(email.trim().toLowerCase());
+  if (!email) return false;
+  return parseOwnerEmails(env.OWNER_EMAILS).includes(email.trim().toLowerCase());
 }
 
 export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {

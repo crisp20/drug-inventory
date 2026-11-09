@@ -19,6 +19,39 @@ The database schema lives in `convex/schema.ts` and `convex/schema/*.ts`. Runnin
 
 ---
 
+## v83 · 2026-11-09 · Owner emails come from a secret
+
+**Summary**
+- The owner email is no longer written in the code. Owners are now set with the **OWNER_EMAILS** secret (Secrets tab, or `.env.local` / `npx convex env set` for a local copy).
+- Owners are always active admins and their account can't be changed by other admins, as before.
+- Several owners can be listed, separated by commas, e.g. `hubert@activecaregroup.com, admin@activecaregroup.com`.
+
+**Database**
+- None.
+
+**Logic**
+- `parseOwnerEmails` splits the secret on commas, semicolons or spaces, trims and lower-cases each email. `isOwnerEmail` reads the secret on every check, so changing it needs no code change.
+- If `OWNER_EMAILS` is not set, nobody is an owner. Existing admins stay admins (the role is saved on their account), but a brand-new database then has no way to get its first admin until the secret is set.
+- **Setup step** for a local copy: `npx convex env set OWNER_EMAILS "you@example.com"`, then sign in with that email.
+
+**Where**
+- `convex/convex.config.ts`: declares `OWNER_EMAILS` (optional string).
+- `convex/lib/access.ts`: owner list read from the secret instead of a fixed list.
+- `convex/test.setup.ts`: tests set `OWNER_EMAILS` to the test owner.
+- `convex/lib/access.test.ts` (new): parsing and matching tests.
+
+<!-- files:v83 -->
+<details><summary>All files changed (5) · code: docs/changes/v83.diff</summary>
+
+- `convex/convex.config.ts` +2 -0
+- `convex/lib/access.ts` +12 -4
+- `convex/test.setup.ts` +4 -0
+- `src/pages/changes/_lib/changes.test.ts` +1 -1
+- `convex/lib/access.test.ts` (new) +37 -0
+
+</details>
+<!-- /files -->
+
 ## v82 · 2026-11-07 · Import accepts 1 and 0 for DDA and LASA
 
 **Summary**
