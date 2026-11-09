@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-import { createTestUsers } from "./testUsers";
+
+const OWNER = { tokenIdentifier: "iss|owner", email: "hubert@activecaregroup.com", name: "Hubert" };
+const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
 
 const fileDrug = {
   drugId: "32",
@@ -18,7 +20,10 @@ const fileDrug = {
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const { owner, staff } = await createTestUsers(t);
+  const owner = t.withIdentity(OWNER);
+  const staff = t.withIdentity(STAFF);
+  await owner.mutation(api.users.updateCurrentUser, {});
+  await staff.mutation(api.users.updateCurrentUser, {});
   await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
   const store = () => t.run(async (ctx) => await ctx.storage.store(new Blob(["img"], { type: "image/jpeg" })));
   const fileExists = (id: string) =>

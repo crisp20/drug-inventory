@@ -7,6 +7,7 @@ import {
   FONT,
   loadPhoto,
   rotateAnticlockwise,
+  tagBox,
   toPrintedDots,
   wrapLines,
   type Ctx,
@@ -48,32 +49,6 @@ function drawTypeMarker(
     ctx.closePath();
   }
   ctx.fill();
-}
-
-// A thin box with centred bold text
-function tagBox(
-  ctx: Ctx,
-  text: string,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  size: number,
-) {
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "#000";
-  ctx.strokeRect(x, y, w, h);
-  ctx.font = `bold ${size}px ${FONT}`;
-  let s = size;
-  while (s > 10 && ctx.measureText(text).width > w - 8) {
-    s -= 1;
-    ctx.font = `bold ${s}px ${FONT}`;
-  }
-  ctx.fillStyle = "#000";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, x + w / 2, y + h / 2 + 1);
-  ctx.textAlign = "left";
 }
 
 function drawCompact(
@@ -136,6 +111,18 @@ export async function renderCompactLabel(
   data: LabelData,
   size: LabelSize,
 ): Promise<HTMLCanvasElement> {
+  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
+  return drawLandscape(size, (ctx, scale) =>
+    drawCompact(ctx, scale, data, photo),
+  );
+}
+
+// Draws a 480 x 320 landscape design onto the label (scaled and centred for bigger
+// labels), turns it to printed dots and returns it upright (portrait)
+export function drawLandscape(
+  size: LabelSize,
+  draw: (ctx: Ctx, scale: number) => void,
+): HTMLCanvasElement {
   const dots = labelDots(size);
   // Landscape drawing: the label's length runs across
   const canvas = document.createElement("canvas");
@@ -143,17 +130,15 @@ export async function renderCompactLabel(
   canvas.height = dots.width;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("This browser cannot draw labels");
-  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  // Bigger labels: scale the 60 x 40 design to fit and centre it
   const scale = Math.min(canvas.width / W, canvas.height / H);
   ctx.translate(
     Math.round((canvas.width - W * scale) / 2),
     Math.round((canvas.height - H * scale) / 2),
   );
   ctx.scale(scale, scale);
-  drawCompact(ctx, scale, data, photo);
+  draw(ctx, scale);
   toPrintedDots(ctx, canvas.width, canvas.height);
   return rotateAnticlockwise(canvas);
 }

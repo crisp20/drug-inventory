@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { cn } from "@/lib/utils.ts";
 import UndoMovementDialog from "./undo-movement-dialog.tsx";
+import { hasReprintableLabel } from "@/lib/label/stock-in-label.ts";
 import ReprintLabelDialog from "./reprint-label-dialog.tsx";
 
 const PAGE_SIZE = 25;
@@ -149,6 +150,7 @@ export default function MovementLog({
                   {formatPackageForm(m)}
                 </span>
                 {m.reason && <Badge variant="secondary">{m.reason}</Badge>}
+                {m.eight && <Badge variant="secondary">8</Badge>}
                 {m.undo && <Badge variant="destructive">Undone</Badge>}
               </div>
               <div className="truncate text-xs text-muted-foreground">
@@ -201,7 +203,7 @@ export default function MovementLog({
               <div className="font-medium text-foreground">{m.userName}</div>
               <div>{format(new Date(m.occurredAt), "d MMM yyyy")}</div>
               <div>{format(new Date(m.occurredAt), "h:mm a")}</div>
-              {m.canister && !m.undo && (
+              {hasReprintableLabel(m) && (
                 <Button
                   variant="ghost"
                   size="sm"

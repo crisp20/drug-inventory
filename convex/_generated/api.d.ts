@@ -9,11 +9,9 @@
  */
 
 import type * as activity from "../activity.js";
-import type * as auth from "../auth.js";
 import type * as drugImport from "../drugImport.js";
 import type * as drugPhotos from "../drugPhotos.js";
 import type * as drugs from "../drugs.js";
-import type * as http from "../http.js";
 import type * as lib_access from "../lib/access.js";
 import type * as lib_activity from "../lib/activity.js";
 import type * as lib_barcode from "../lib/barcode.js";
@@ -23,12 +21,11 @@ import type * as lib_drugPhotos from "../lib/drugPhotos.js";
 import type * as lib_drugs from "../lib/drugs.js";
 import type * as lib_expiry from "../lib/expiry.js";
 import type * as lib_gs1 from "../lib/gs1.js";
+import type * as lib_initials from "../lib/initials.js";
 import type * as lib_lasa from "../lib/lasa.js";
-import type * as lib_password from "../lib/password.js";
 import type * as lib_period from "../lib/period.js";
 import type * as lib_settings from "../lib/settings.js";
 import type * as lib_stock from "../lib/stock.js";
-import type * as lib_username from "../lib/username.js";
 import type * as schema_activity from "../schema/activity.js";
 import type * as schema_drugs from "../schema/drugs.js";
 import type * as schema_settings from "../schema/settings.js";
@@ -36,7 +33,6 @@ import type * as schema_stock from "../schema/stock.js";
 import type * as schema_users from "../schema/users.js";
 import type * as settings from "../settings.js";
 import type * as stock from "../stock.js";
-import type * as testUsers from "../testUsers.js";
 import type * as users from "../users.js";
 
 import type {
@@ -47,11 +43,9 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   activity: typeof activity;
-  auth: typeof auth;
   drugImport: typeof drugImport;
   drugPhotos: typeof drugPhotos;
   drugs: typeof drugs;
-  http: typeof http;
   "lib/access": typeof lib_access;
   "lib/activity": typeof lib_activity;
   "lib/barcode": typeof lib_barcode;
@@ -61,12 +55,11 @@ declare const fullApi: ApiFromModules<{
   "lib/drugs": typeof lib_drugs;
   "lib/expiry": typeof lib_expiry;
   "lib/gs1": typeof lib_gs1;
+  "lib/initials": typeof lib_initials;
   "lib/lasa": typeof lib_lasa;
-  "lib/password": typeof lib_password;
   "lib/period": typeof lib_period;
   "lib/settings": typeof lib_settings;
   "lib/stock": typeof lib_stock;
-  "lib/username": typeof lib_username;
   "schema/activity": typeof schema_activity;
   "schema/drugs": typeof schema_drugs;
   "schema/settings": typeof schema_settings;
@@ -74,7 +67,6 @@ declare const fullApi: ApiFromModules<{
   "schema/users": typeof schema_users;
   settings: typeof settings;
   stock: typeof stock;
-  testUsers: typeof testUsers;
   users: typeof users;
 }>;
 

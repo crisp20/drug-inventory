@@ -1,22 +1,78 @@
 import { ConvexError, v } from "convex/values";
+import { mutation, query } from "./_generated/server";
 import {
-  getAuthSessionId,
-  getAuthUserId,
-  invalidateSessions,
-  modifyAccountCredentials,
-} from "@convex-dev/auth/server";
-import { api } from "./_generated/api";
-import { action, mutation, query } from "./_generated/server";
-import { requireActiveUser, requireAdmin } from "./lib/access";
+  getSignedInUser,
+  isOwnerEmail,
+  requireActiveUser,
+  requireAdmin,
+} from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
-import { validatePasswordRequirements } from "./lib/password";
-import { userStatus } from "./schema/users";
+import {
+  isValidInitials,
+  MAX_INITIALS_LENGTH,
+  normalizeInitials,
+} from "./lib/initials";
+import { userRole, userStatus } from "./schema/users";
+
+export const updateCurrentUser = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new ConvexError({
+        code: "UNAUTHENTICATED",
+        message: "User not logged in",
+      });
+    }
+    const isOwner = isOwnerEmail(identity.email);
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", (q) =>
+        q.eq("tokenIdentifier", identity.tokenIdentifier),
+      )
+      .unique();
+    if (user !== null) {
+      if (isOwner && (user.role !== "admin" || user.status !== "active")) {
+        await ctx.db.patch("users", user._id, {
+          role: "admin",
+          status: "active",
+        });
+      } else if (!user.status || !user.role) {
+        await ctx.db.patch("users", user._id, {
+          role: user.role ?? "staff",
+          status: user.status ?? "pending",
+        });
+      }
+      return user._id;
+    }
+    // New people wait for admin approval, except the owner
+    const userId = await ctx.db.insert("users", {
+      name: identity.name,
+      email: identity.email,
+      tokenIdentifier: identity.tokenIdentifier,
+      role: isOwner ? "admin" : "staff",
+      status: isOwner ? "active" : "pending",
+    });
+    const name = identity.name ?? identity.email ?? "Unknown user";
+    await logActivity(
+      ctx,
+      { userRef: userId, userName: name },
+      {
+        category: "user",
+        action: "Signed up",
+        summary: `${name} signed up${isOwner ? "" : " (waiting for approval)"}`,
+        detail: identity.email,
+      },
+    );
+    return userId;
+  },
+});
 
 export const getCurrentUser = query({
   args: {},
   handler: async (ctx) => {
-    const userId = await getAuthUserId(ctx);
-    return userId ? await ctx.db.get("users", userId) : null;
+    return await getSignedInUser(ctx);
   },
 });
 
@@ -28,58 +84,6 @@ export const listByStatus = query({
       .query("users")
       .withIndex("by_status", (q) => q.eq("status", args.status))
       .take(200);
-  },
-});
-
-export const getPasswordResetTarget = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, { userId }) => {
-    const actor = await requireActiveUser(ctx);
-    if (actor._id !== userId && actor.role !== "admin") {
-      throw new ConvexError({
-        code: "FORBIDDEN",
-        message: "Only the Admin can reset another user's password",
-      });
-    }
-    const target = await ctx.db.get("users", userId);
-    if (!target || !target.email) {
-      throw new ConvexError({
-        code: "NOT_FOUND",
-        message: "User or username not found",
-      });
-    }
-    return { userId: target._id, email: target.email };
-  },
-});
-
-export const resetPassword = action({
-  args: {
-    userId: v.optional(v.id("users")),
-    newPassword: v.string(),
-  },
-  handler: async (ctx, { userId, newPassword }) => {
-    validatePasswordRequirements(newPassword);
-    const actorId = await getAuthUserId(ctx);
-    if (!actorId) {
-      throw new ConvexError({
-        code: "UNAUTHENTICATED",
-        message: "Please sign in",
-      });
-    }
-    const target = await ctx.runQuery(api.users.getPasswordResetTarget, {
-      userId: userId ?? actorId,
-    });
-    await modifyAccountCredentials(ctx, {
-      provider: "password",
-      account: { id: target.email, secret: newPassword },
-    });
-    const currentSessionId = await getAuthSessionId(ctx);
-    await invalidateSessions(ctx, {
-      userId: target.userId,
-      except:
-        target.userId === actorId && currentSessionId ? [currentSessionId] : [],
-    });
-    return null;
   },
 });
 
@@ -103,17 +107,17 @@ export const listPeople = query({
 });
 
 export const updateAccess = mutation({
-  args: { userId: v.id("users"), status: userStatus },
+  args: { userId: v.id("users"), role: userRole, status: userStatus },
   handler: async (ctx, args) => {
     const admin = await requireAdmin(ctx);
     const target = await ctx.db.get("users", args.userId);
     if (!target) {
       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
     }
-    if (target.role === "admin") {
+    if (isOwnerEmail(target.email)) {
       throw new ConvexError({
         code: "FORBIDDEN",
-        message: "The admin account cannot be changed",
+        message: "The owner account cannot be changed",
       });
     }
     if (target._id === admin._id) {
@@ -123,9 +127,11 @@ export const updateAccess = mutation({
       });
     }
     await ctx.db.patch("users", args.userId, {
+      role: args.role,
       status: args.status,
     });
     const changes = [
+      { field: "Role", before: target.role ?? "staff", after: args.role },
       {
         field: "Status",
         before: target.status ?? "pending",
@@ -147,6 +153,42 @@ export const updateAccess = mutation({
         changes,
       });
     }
+    return null;
+  },
+});
+
+// Admin: initials printed on this person's labels ("" goes back to the name's initials)
+export const setInitials = mutation({
+  args: { userId: v.id("users"), initials: v.string() },
+  handler: async (ctx, { userId, initials }) => {
+    const admin = await requireAdmin(ctx);
+    const target = await ctx.db.get("users", userId);
+    if (!target) {
+      throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
+    }
+    const next = normalizeInitials(initials);
+    if (next !== "" && !isValidInitials(next)) {
+      throw new ConvexError({
+        code: "BAD_REQUEST",
+        message: `Initials must be 1 to ${MAX_INITIALS_LENGTH} letters or numbers`,
+      });
+    }
+    const before = target.initials ?? "";
+    if (before === next) return null;
+    await ctx.db.patch("users", userId, { initials: next || undefined });
+    await logActivity(ctx, actorOf(admin), {
+      category: "user",
+      action: "Access changed",
+      summary: `Changed label initials for ${displayName(target)}`,
+      detail: target.email,
+      changes: [
+        {
+          field: "Label initials",
+          before: before || "(from name)",
+          after: next || "(from name)",
+        },
+      ],
+    });
     return null;
   },
 });

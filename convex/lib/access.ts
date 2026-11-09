@@ -1,11 +1,29 @@
 import { ConvexError } from "convex/values";
-import { getAuthUserId } from "@convex-dev/auth/server";
-import type { QueryCtx } from "../_generated/server";
+import { env, type QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 
+// Splits the OWNER_EMAILS secret (commas, semicolons or spaces) into lower-case emails
+export function parseOwnerEmails(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(/[\s,;]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+}
+
+// Owners come from the OWNER_EMAILS secret and are always active admins.
+// Read on every call so a changed secret applies without a code change.
+export function isOwnerEmail(email: string | undefined): boolean {
+  if (!email) return false;
+  return parseOwnerEmails(env.OWNER_EMAILS).includes(email.trim().toLowerCase());
+}
+
 export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
-  const userId = await getAuthUserId(ctx);
-  return userId ? await ctx.db.get("users", userId) : null;
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) return null;
+  return await ctx.db
+    .query("users")
+    .withIndex("by_token", (q) => q.eq("tokenIdentifier", identity.tokenIdentifier))
+    .unique();
 }
 
 export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
@@ -26,7 +44,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
 export async function requireAdmin(ctx: QueryCtx): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
   if (user.role !== "admin") {
-    throw new ConvexError({ code: "FORBIDDEN", message: "Only the admin can do this" });
+    throw new ConvexError({ code: "FORBIDDEN", message: "Only admins can do this" });
   }
   return user;
 }

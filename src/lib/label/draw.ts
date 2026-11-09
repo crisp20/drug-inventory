@@ -8,7 +8,7 @@ export type Ctx = CanvasRenderingContext2D;
 
 // Loads the photo as a local copy, so the canvas can still be read for printing.
 // A photo that can't be loaded is left off rather than stopping the label.
-async function loadImage(url: string): Promise<HTMLImageElement | null> {
+export async function loadImage(url: string): Promise<HTMLImageElement | null> {
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -193,6 +193,32 @@ export function rotateAnticlockwise(
   ctx.rotate(-Math.PI / 2);
   ctx.drawImage(canvas, 0, 0);
   return out;
+}
+
+// A thin box with centred bold text (Drug ID, OS, DDA, 8 tags)
+export function tagBox(
+  ctx: Ctx,
+  text: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  size: number,
+) {
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#000";
+  ctx.strokeRect(x, y, w, h);
+  ctx.font = `bold ${size}px ${FONT}`;
+  let s = size;
+  while (s > 10 && ctx.measureText(text).width > w - 8) {
+    s -= 1;
+    ctx.font = `bold ${s}px ${FONT}`;
+  }
+  ctx.fillStyle = "#000";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, x + w / 2, y + h / 2 + 1);
+  ctx.textAlign = "left";
 }
 
 export function boxedText(

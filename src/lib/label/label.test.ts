@@ -20,6 +20,7 @@ import {
   labelScale,
   loadLabelOrientation,
   saveLabelOrientation,
+  sheetOffset,
 } from "./label-sizes.ts";
 import {
   canisterQrText,
@@ -145,6 +146,16 @@ describe("label sizes", () => {
     expect(labelScale(LABEL_SIZES["52x110"]).scale).toBeCloseTo(1.3);
   });
 
+  it("places the 40 x 60 design 14 mm from the left, centred, on 54 x 70", () => {
+    const size = LABEL_SIZES["54x70"];
+    expect(labelDots(size)).toEqual({ width: 432, height: 560 });
+    // 13 mm across; (70 - 60) / 2 = 5 mm down
+    expect(sheetOffset(size)).toEqual({ x: 104, y: 40 });
+    // The design (320 dots wide) leaves 1 mm (8 dots) clear of the far edge
+    expect(104 + 320).toBe(432 - 8);
+    expect(sheetOffset(LABEL_SIZES["40x60"])).toBeNull();
+  });
+
   it("keeps every section inside the label", () => {
     for (const size of Object.values(LABEL_SIZES)) {
       const { length } = labelScale(size);
@@ -154,6 +165,7 @@ describe("label sizes", () => {
   });
 
   it("only accepts known sizes", () => {
+    expect(isLabelSizeId("54x70")).toBe(true);
     expect(isLabelSizeId("52x110")).toBe(true);
     expect(isLabelSizeId("99x99")).toBe(false);
     expect(isLabelSizeId(null)).toBe(false);

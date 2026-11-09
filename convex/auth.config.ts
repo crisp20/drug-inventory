@@ -4,8 +4,8 @@ import { env } from "./_generated/server";
 export default {
   providers: [
     {
-      domain: env.CONVEX_SITE_URL,
-      applicationID: "convex",
+      domain: env.OIDC_AUTHORITY,
+      applicationID: env.OIDC_CLIENT_ID,
     },
   ],
 } satisfies AuthConfig;

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Navigate } from "react-router-dom";
-import { MoreHorizontal, Pill, UserCheck, UserX, Users } from "lucide-react";
+import { Pill, UserCheck, UserX, Users } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import type { Doc } from "@/convex/_generated/dataModel.d.ts";
@@ -14,6 +14,13 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty.tsx";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
@@ -21,19 +28,10 @@ import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { useConfirm } from "@/hooks/use-confirm.ts";
 import { errorMessage } from "@/lib/errors.ts";
-import {
-  ResetPasswordDialog,
-  ResetPasswordMenuItem,
-} from "@/components/reset-password-menu-item.tsx";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu.tsx";
+import InitialsField from "./_components/initials-field.tsx";
 
 type Status = "pending" | "active" | "disabled";
+type Role = "admin" | "staff";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -44,7 +42,7 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
     try {
       await setAccess({ userId: user._id, enabled });
       toast.success(
-        `Canister features ${enabled ? "on" : "off"} for ${user.name ?? "this user"}`,
+        `Canister features ${enabled ? "on" : "off"} for ${user.name ?? user.email ?? "this user"}`,
       );
     } catch (e) {
       toast.error(errorMessage(e, "Could not update canister access"));
@@ -73,14 +71,15 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
 }
 
 function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
-  const [resetPasswordOpen, setResetPasswordOpen] = useState(false);
   const updateAccess = useMutation(api.users.updateAccess);
+  const role: Role = user.role ?? "staff";
 
-  const save = async (status: Status, done: string) => {
+  const save = async (next: { role?: Role; status?: Status }, done: string) => {
     try {
       await updateAccess({
         userId: user._id,
-        status,
+        role: next.role ?? role,
+        status: next.status ?? user.status ?? "pending",
       });
       toast.success(done);
     } catch (e) {
@@ -93,95 +92,80 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
     const rejecting = user.status === "pending";
     const ok = await confirm({
       title: rejecting
-        ? `Reject ${user.name ?? "this user"}?`
-        : `Remove access for ${user.name ?? "this user"}?`,
+        ? `Reject ${user.name ?? user.email ?? "this user"}?`
+        : `Remove access for ${user.name ?? user.email ?? "this user"}?`,
       description:
         "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
       confirmLabel: rejecting ? "Reject" : "Remove access",
       destructive: true,
     });
     if (ok)
-      await save("disabled", rejecting ? "User rejected" : "Access removed");
+      await save(
+        { status: "disabled" },
+        rejecting ? "User rejected" : "Access removed",
+      );
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center">
-      <div className="min-w-0 flex-1">
+    <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
+      {/* Name and email get their own line so the controls never squeeze them out */}
+      <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="truncate font-semibold">
-            {user.name ?? "Unnamed"}
+          <span className="font-semibold break-words">
+            {user.name ?? user.email ?? "Unnamed"}
           </span>
-          {isSelf && <Badge variant="secondary">Admin</Badge>}
-          {!isSelf && (
-            <Badge variant="outline">
-              {user.role === "admin" ? "Admin" : "Staff"}
-            </Badge>
-          )}
+          {isSelf && <Badge variant="secondary">You</Badge>}
         </div>
-        <div className="truncate text-sm text-muted-foreground">
-          {user.email ?? "No email"}
-        </div>
+        {user.name && (
+          <div className="text-sm break-all text-muted-foreground">
+            {user.email ?? "No email"}
+          </div>
+        )}
       </div>
-      {user.status === "active" && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="outline"
-              size="icon"
-              aria-label={`Actions for ${user.name ?? user.email ?? "user"}`}
+      <div className="flex flex-wrap items-center gap-2">
+        {user.status === "active" && <InitialsField user={user} />}
+        {user.status === "active" && <CanisterAccessToggle user={user} />}
+        {!isSelf && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={role}
+              onValueChange={(v) =>
+                void save(
+                  { role: v === "admin" ? "admin" : "staff" },
+                  "Role updated",
+                )
+              }
             >
-              <MoreHorizontal />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            <CanisterAccessToggle user={user} />
-            <DropdownMenuSeparator />
-            <ResetPasswordMenuItem
-              onSelect={() => setResetPasswordOpen(true)}
-            />
-            {!isSelf && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => void removeAccess()}
-                >
-                  <UserX />
-                  Remove access
-                </DropdownMenuItem>
-              </>
+              <SelectTrigger className="w-28" aria-label="Role">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="staff">Staff</SelectItem>
+                <SelectItem value="admin">Admin</SelectItem>
+              </SelectContent>
+            </Select>
+            {user.status !== "active" && (
+              <Button
+                size="sm"
+                onClick={() => void save({ status: "active" }, "User approved")}
+              >
+                <UserCheck /> Approve
+              </Button>
             )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-      {user.status === "active" && (
-        <ResetPasswordDialog
-          open={resetPasswordOpen}
-          onOpenChange={setResetPasswordOpen}
-          userId={user._id}
-          userLabel={user.name ?? user.email ?? "this user"}
-        />
-      )}
-      {!isSelf && user.status !== "active" && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => void save("active", "User approved")}
-          >
-            <UserCheck /> Approve
-          </Button>
-          {user.status === "pending" && (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-destructive"
-              onClick={() => void removeAccess()}
-            >
-              <UserX /> Reject
-            </Button>
-          )}
-        </div>
-      )}
+            {user.status !== "disabled" && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive"
+                onClick={() => void removeAccess()}
+              >
+                <UserX />{" "}
+                {user.status === "pending" ? "Reject" : "Remove access"}
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -235,7 +219,7 @@ export default function UsersPage() {
     <div className="mx-auto max-w-4xl p-4 md:p-8">
       <PageHeader
         title="Users"
-        description="Approve new staff and manage access to inventory."
+        description="Approve new staff and choose who can manage inventory."
       />
       <Tabs
         value={tab}

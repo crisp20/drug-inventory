@@ -1,6 +1,7 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import AppLayout from "./components/app-layout.tsx";
 import { DefaultProviders } from "./components/providers/default.tsx";
+import AuthCallback from "./pages/auth/Callback.tsx";
 import ChangesPage from "./pages/changes/page.tsx";
 import Index from "./pages/Index.tsx";
 import LogPage from "./pages/log/page.tsx";
@@ -15,6 +16,7 @@ export default function App() {
     <DefaultProviders>
       <BrowserRouter>
         <Routes>
+          <Route path="/auth/callback" element={<AuthCallback />} />
           <Route element={<AppLayout />}>
             <Route path="/" element={<Index />} />
             <Route path="/stock-in" element={<StockInPage />} />

@@ -1,0 +1,46 @@
+diff --git a/src/lib/label/label-sizes.ts b/src/lib/label/label-sizes.ts
+index 5c68b10..b61f4ad 100644
+--- a/src/lib/label/label-sizes.ts
++++ b/src/lib/label/label-sizes.ts
+@@ -63,7 +63,8 @@ export const LABEL_SIZES: Record<LabelSizeId, LabelSize> = {
+     name: "54 × 70 mm",
+     widthMm: 54,
+     heightMm: 70,
+-    sheet: { content: "40x60", leftMm: 14 },
++    // 13 mm (not 14) leaves ~1 mm clear of the pre-printed bottom strip
++    sheet: { content: "40x60", leftMm: 13 },
+     topEnd: 125,
+     middleEnd: 365,
+     photoW: 100,
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index 4b34512..cb51ebc 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -149,10 +149,10 @@ describe("label sizes", () => {
+   it("places the 40 x 60 design 14 mm from the left, centred, on 54 x 70", () => {
+     const size = LABEL_SIZES["54x70"];
+     expect(labelDots(size)).toEqual({ width: 432, height: 560 });
+-    // 14 mm across; (70 - 60) / 2 = 5 mm down
+-    expect(sheetOffset(size)).toEqual({ x: 112, y: 40 });
+-    // The design (320 dots wide) fits beside the strip
+-    expect(112 + 320).toBeLessThanOrEqual(432);
++    // 13 mm across; (70 - 60) / 2 = 5 mm down
++    expect(sheetOffset(size)).toEqual({ x: 104, y: 40 });
++    // The design (320 dots wide) leaves 1 mm (8 dots) clear of the far edge
++    expect(104 + 320).toBe(432 - 8);
+     expect(sheetOffset(LABEL_SIZES["40x60"])).toBeNull();
+   });
+ 
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 7aedaad..db647e2 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v78");
++    expect(CHANGE_ENTRIES[0].version).toBe("v79");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,

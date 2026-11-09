@@ -44,6 +44,13 @@ export function movementFormSchema(kind: MovementKind) {
       reason:
         kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
       canisterOn: z.boolean(),
+      // Stock In labels: the "8" box (only used when the entry gets labels)
+      eight: z.boolean(),
+      // Medicine Label chosen for a package form that has a barcode
+      // (those without one always get it)
+      labelsOn: z.boolean(),
+      // Medicine Bag Labels chosen (15 numbers each, any package form)
+      bagLabelsOn: z.boolean(),
       batch: z.string().trim(),
       expiry: z.string(),
       // GS1 code used even though its product didn't match (set by the scan box)

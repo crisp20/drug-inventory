@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
 
 describe("change log", () => {
   it("reads every version, newest first, without the generated file lists", () => {
-    expect(CHANGE_ENTRIES[0].version).toBe("v71");
+    expect(CHANGE_ENTRIES[0].version).toBe("v83");
     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
       false,

@@ -25,6 +25,7 @@ import {
   printCanvasWindow,
 } from "@/lib/label/print-label.ts";
 import { renderLabel } from "@/lib/label/render-label.ts";
+import { markPreprinted } from "@/lib/label/sheet.ts";
 import {
   isLabelOrientation,
   isLabelSizeId,
@@ -46,21 +47,7 @@ import {
   type LabelDesignId,
 } from "@/lib/label/label-designs.ts";
 import { errorMessage } from "@/lib/errors.ts";
-
-// Preview boxes keep each label's shape (40x60 and 52x110) in either direction
-const PREVIEW_CLASS: Record<LabelSizeId, Record<LabelOrientation, string>> = {
-  "40x60": {
-    portrait: "h-[300px] w-[200px]",
-    landscape: "h-[200px] w-[300px]",
-  },
-  "52x110": {
-    portrait: "h-[330px] w-[156px]",
-    landscape: "h-[156px] w-[330px]",
-  },
-};
-
-const TOGGLE_ITEM_CLASS =
-  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+import { PREVIEW_CLASS, TOGGLE_ITEM_CLASS } from "@/lib/label/preview-class.ts";
 
 type Status =
   | { state: "drawing" }
@@ -189,7 +176,12 @@ function LabelPrinter({
       if (cancelled) return;
       const canvas = orientCanvas(drawn, orientation);
       canvasRef.current = canvas;
-      setPreview(canvas.toDataURL("image/png"));
+      setPreview(
+        orientCanvas(
+          markPreprinted(drawn, LABEL_SIZES[sizeId]),
+          orientation,
+        ).toDataURL("image/png"),
+      );
       if (autoPrinted.current || !printerConnected()) {
         setStatus({ state: "ready" });
         return;

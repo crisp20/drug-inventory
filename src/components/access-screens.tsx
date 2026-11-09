@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { Barcode, ClipboardList, Clock, PackageCheck, ShieldCheck } from "lucide-react";
 import { SignInButton } from "@/components/ui/signin.tsx";
+import { useAuth } from "@/hooks/use-auth.ts";
 import BrandLogo, { LOGO_URL } from "./brand-logo.tsx";
 
 const FEATURES = [
@@ -85,13 +86,8 @@ export function SignedOutScreen() {
   );
 }
 
-export function AwaitingApprovalScreen({
-  disabled,
-  email,
-}: {
-  disabled: boolean;
-  email?: string;
-}) {
+export function AwaitingApprovalScreen({ disabled }: { disabled: boolean }) {
+  const { user } = useAuth();
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <div className="w-full max-w-md space-y-6 rounded-2xl border bg-card p-8 text-center shadow-sm">
@@ -106,7 +102,7 @@ export function AwaitingApprovalScreen({
           <p className="text-muted-foreground">
             {disabled
               ? "Your account no longer has access. Contact an admin if this is a mistake."
-              : `An admin needs to approve ${email ?? "your account"} before you can use the system.`}
+              : `An admin needs to approve ${user?.profile.email ?? "your account"} before you can use the system.`}
           </p>
         </div>
         <SignInButton variant="secondary" className="w-full" />

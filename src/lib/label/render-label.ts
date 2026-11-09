@@ -13,6 +13,7 @@ import {
   type Ctx,
 } from "./draw.ts";
 import { renderCompactLabel } from "./render-compact.ts";
+import { renderOnSheet } from "./sheet.ts";
 import type { LabelDesignId } from "./label-designs.ts";
 import {
   BASE_WIDTH,
@@ -214,7 +215,9 @@ export async function renderLabel(
   size: LabelSize,
   design: LabelDesignId = "full",
 ): Promise<HTMLCanvasElement> {
-  return design === "compact"
-    ? renderCompactLabel(data, size)
-    : renderFullLabel(data, size);
+  return renderOnSheet(size, (s) =>
+    design === "compact"
+      ? renderCompactLabel(data, s)
+      : renderFullLabel(data, s),
+  );
 }

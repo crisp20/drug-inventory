@@ -172,6 +172,14 @@ describe("Dangerous Drug (DDA) column", () => {
     expect(read("DDA", ["maybe"]).problems[0].message).toContain("Dangerous Drug (DDA)");
   });
 
+  it("reads 1 as Yes and 0 as No, including Excel number cells", () => {
+    expect(read("dda", ["1"]).drugs[0].dda).toBe(true);
+    expect(read("dda", ["0"]).drugs[0].dda).toBe(false);
+    expect(read("dda", ["1.0"]).drugs[0].dda).toBe(true);
+    expect(read("dda", ["0.00"]).drugs[0].dda).toBe(false);
+    expect(read("dda", ["2"]).problems[0].message).toContain("not Yes or No");
+  });
+
   it("marks without asking but asks before unmarking", () => {
     const base = { name: "A", brandName: "B", manufacturer: "M", pieceName: "TABLET", packages: [] };
     const file = { ...read("DDA", ["Yes"]).drugs[0], packages: [] };

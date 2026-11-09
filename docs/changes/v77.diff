@@ -1,0 +1,169 @@
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index ba13594..beb3838 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -193,6 +193,7 @@ export default function MovementForm({
+       brandName: drug.brandName,
+       name: drug.name,
+       packageForm: formatPackageForm(pkg),
++      baseUnit: pkg.baseUnit,
+       dangerousDrug: !!drug.dda,
+       eight: values.eight === true,
+       initials: userInitials(currentUser),
+diff --git a/src/lib/label/draw.ts b/src/lib/label/draw.ts
+index 47a35ca..3914044 100644
+--- a/src/lib/label/draw.ts
++++ b/src/lib/label/draw.ts
+@@ -8,7 +8,7 @@ export type Ctx = CanvasRenderingContext2D;
+ 
+ // Loads the photo as a local copy, so the canvas can still be read for printing.
+ // A photo that can't be loaded is left off rather than stopping the label.
+-async function loadImage(url: string): Promise<HTMLImageElement | null> {
++export async function loadImage(url: string): Promise<HTMLImageElement | null> {
+   try {
+     const res = await fetch(url);
+     if (!res.ok) return null;
+diff --git a/src/lib/label/render-stock-in.ts b/src/lib/label/render-stock-in.ts
+index c32ad4d..fb1d58b 100644
+--- a/src/lib/label/render-stock-in.ts
++++ b/src/lib/label/render-stock-in.ts
+@@ -10,6 +10,7 @@ import {
+   type Ctx,
+ } from "./draw.ts";
+ import { drawLandscape } from "./render-compact.ts";
++import { loadPackageIcon } from "./package-icons.ts";
+ import type { LabelSize } from "./label-sizes.ts";
+ import {
+   stockInQrText,
+@@ -67,6 +68,7 @@ function drawStockIn(
+   scale: number,
+   data: StockInLabelData,
+   photo: HTMLCanvasElement | null,
++  icon: HTMLCanvasElement | null,
+ ) {
+   const textW = W - LEFT * 2;
+   // Brand name over up to two lines, then the drug name in bold
+@@ -87,8 +89,10 @@ function drawStockIn(
+     fitText(ctx, t, LEFT, 146 + i * 26, 230, 20, true, 11),
+   );
+ 
+-  // Package icon and package form, above the QR code
+-  drawPackageIcon(ctx, 254, 136, 54, 44);
++  // Package icon and package form, above the QR code. Uses the chosen form's
++  // icon; the drawn box is kept for when it can't load
++  if (icon) drawPhotoInBox(ctx, icon, 256, 132, 54, 50);
++  else drawPackageIcon(ctx, 254, 136, 54, 44);
+   fitText(ctx, data.packageForm, 320, 162, W - 320 - 6, 28, true, 14);
+ 
+   // Tablet photo
+@@ -107,8 +111,11 @@ export async function renderStockInLabel(
+   data: StockInLabelData,
+   size: LabelSize,
+ ): Promise<HTMLCanvasElement> {
+-  const photo = data.imageUrl ? await loadPhoto(data.imageUrl) : null;
++  const [photo, icon] = await Promise.all([
++    data.imageUrl ? loadPhoto(data.imageUrl) : Promise.resolve(null),
++    loadPackageIcon(data.baseUnit),
++  ]);
+   return drawLandscape(size, (ctx, scale) =>
+-    drawStockIn(ctx, scale, data, photo),
++    drawStockIn(ctx, scale, data, photo, icon),
+   );
+ }
+diff --git a/src/lib/label/stock-in-label.test.ts b/src/lib/label/stock-in-label.test.ts
+index ecffd56..e142925 100644
+--- a/src/lib/label/stock-in-label.test.ts
++++ b/src/lib/label/stock-in-label.test.ts
+@@ -86,6 +86,7 @@ describe("Stock In label", () => {
+     );
+     expect(label).toMatchObject({
+       packageForm: "100/Box x1",
++      baseUnit: "Box",
+       initials: "HBS",
+       eight: true,
+       dangerousDrug: true,
+diff --git a/src/lib/label/stock-in-label.ts b/src/lib/label/stock-in-label.ts
+index 59d1e89..6b6b9ff 100644
+--- a/src/lib/label/stock-in-label.ts
++++ b/src/lib/label/stock-in-label.ts
+@@ -11,6 +11,8 @@ export type StockInLabelData = {
+   name: string;
+   // e.g. "100/Box x1"
+   packageForm: string;
++  // Picks the package icon (Box, Bottle, Strip or Bag)
++  baseUnit: BaseUnit;
+   // From the medicine's DDA mark
+   dangerousDrug: boolean;
+   // The "8" box ticked at Stock In
+@@ -91,6 +93,7 @@ export function stockInLabelFromMovement(
+     brandName: m.brandName,
+     name: m.drugName,
+     packageForm: formatPackageForm(m),
++    baseUnit: m.baseUnit,
+     dangerousDrug,
+     eight: m.eight === true,
+     initials: m.userInitials || initialsOf(m.userName),
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 25992f4..267e91d 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v76");
++    expect(CHANGE_ENTRIES[0].version).toBe("v77");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/src/lib/label/package-icons.ts b/src/lib/label/package-icons.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/package-icons.ts
+@@ -0,0 +1,45 @@
++import type { BaseUnit } from "@/convex/lib/barcode.ts";
++import { loadImage } from "./draw.ts";
++
++// The owner's package-form icons (Files & Media), one per base unit
++export const PACKAGE_ICON_URLS: Record<BaseUnit, string> = {
++  Box: "https://hercules-cdn.com/file_ARbATTHCXeV95i4gR4GgxSrs",
++  Bottle: "https://hercules-cdn.com/file_BfPp5dKg8yjFRrh3SNYtCYOW",
++  Strip: "https://hercules-cdn.com/file_QYb3HsffMGTbMyy5C3cXTNWn",
++  Bag: "https://hercules-cdn.com/file_PjtiQptAbBe3jxSwRhHiU2e0",
++};
++
++// Icons are scaled up before drawing so the lines stay smooth on the label
++const ICON_SCALE = 4;
++
++// Solid black-on-white copy of the icon: the printer prints black only, and the
++// purple lines would otherwise come out as a grey dither pattern
++export async function loadPackageIcon(
++  unit: BaseUnit,
++): Promise<HTMLCanvasElement | null> {
++  const img = await loadImage(PACKAGE_ICON_URLS[unit]);
++  if (!img) return null;
++  const w = img.width * ICON_SCALE;
++  const h = img.height * ICON_SCALE;
++  const canvas = document.createElement("canvas");
++  canvas.width = w;
++  canvas.height = h;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) return null;
++  ctx.imageSmoothingEnabled = true;
++  ctx.drawImage(img, 0, 0, w, h);
++  const pixels = ctx.getImageData(0, 0, w, h);
++  const d = pixels.data;
++  for (let i = 0; i < d.length; i += 4) {
++    // Ink = visible and not near-white (handles transparent or white backgrounds)
++    const brightness = (d[i] + d[i + 1] + d[i + 2]) / 3;
++    const ink = d[i + 3] > 110 && brightness < 215;
++    const v = ink ? 0 : 255;
++    d[i] = v;
++    d[i + 1] = v;
++    d[i + 2] = v;
++    d[i + 3] = 255;
++  }
++  ctx.putImageData(pixels, 0, 0);
++  return canvas;
++}

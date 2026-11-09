@@ -1,0 +1,504 @@
+diff --git a/src/components/stock/label-print-dialog.tsx b/src/components/stock/label-print-dialog.tsx
+index 6389fcb..38d2413 100644
+--- a/src/components/stock/label-print-dialog.tsx
++++ b/src/components/stock/label-print-dialog.tsx
+@@ -25,6 +25,7 @@ import {
+   printCanvasWindow,
+ } from "@/lib/label/print-label.ts";
+ import { renderLabel } from "@/lib/label/render-label.ts";
++import { markPreprinted } from "@/lib/label/sheet.ts";
+ import {
+   isLabelOrientation,
+   isLabelSizeId,
+@@ -46,21 +47,7 @@ import {
+   type LabelDesignId,
+ } from "@/lib/label/label-designs.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+-
+-// Preview boxes keep each label's shape (40x60 and 52x110) in either direction
+-const PREVIEW_CLASS: Record<LabelSizeId, Record<LabelOrientation, string>> = {
+-  "40x60": {
+-    portrait: "h-[300px] w-[200px]",
+-    landscape: "h-[200px] w-[300px]",
+-  },
+-  "52x110": {
+-    portrait: "h-[330px] w-[156px]",
+-    landscape: "h-[156px] w-[330px]",
+-  },
+-};
+-
+-const TOGGLE_ITEM_CLASS =
+-  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
++import { PREVIEW_CLASS, TOGGLE_ITEM_CLASS } from "@/lib/label/preview-class.ts";
+ 
+ type Status =
+   | { state: "drawing" }
+@@ -189,7 +176,12 @@ function LabelPrinter({
+       if (cancelled) return;
+       const canvas = orientCanvas(drawn, orientation);
+       canvasRef.current = canvas;
+-      setPreview(canvas.toDataURL("image/png"));
++      setPreview(
++        orientCanvas(
++          markPreprinted(drawn, LABEL_SIZES[sizeId]),
++          orientation,
++        ).toDataURL("image/png"),
++      );
+       if (autoPrinted.current || !printerConnected()) {
+         setStatus({ state: "ready" });
+         return;
+diff --git a/src/components/stock/stock-in-label-dialog.tsx b/src/components/stock/stock-in-label-dialog.tsx
+index 54d2505..70bb446 100644
+--- a/src/components/stock/stock-in-label-dialog.tsx
++++ b/src/components/stock/stock-in-label-dialog.tsx
+@@ -29,11 +29,16 @@ import {
+ } from "@/lib/label/bluetooth-printer.ts";
+ import {
+   isLabelOrientation,
++  isLabelSizeId,
+   LABEL_ORIENTATIONS,
+   LABEL_SIZES,
+   loadLabelOrientation,
++  loadStockInLabelSize,
+   saveLabelOrientation,
++  saveStockInLabelSize,
++  STOCK_IN_LABEL_SIZES,
+   type LabelOrientation,
++  type LabelSizeId,
+ } from "@/lib/label/label-sizes.ts";
+ import {
+   orientCanvas,
+@@ -41,21 +46,14 @@ import {
+   printCanvasWindow,
+ } from "@/lib/label/print-label.ts";
+ import { renderStockInLabel } from "@/lib/label/render-stock-in.ts";
++import { markPreprinted } from "@/lib/label/sheet.ts";
++import { PREVIEW_CLASS, TOGGLE_ITEM_CLASS } from "@/lib/label/preview-class.ts";
+ import {
+   MAX_LABEL_COPIES,
+   type StockInLabelData,
+ } from "@/lib/label/stock-in-label.ts";
+ import { errorMessage } from "@/lib/errors.ts";
+ 
+-// Stock In labels are always 40 x 60 mm
+-const SIZE = LABEL_SIZES["40x60"];
+-const PREVIEW_CLASS: Record<LabelOrientation, string> = {
+-  portrait: "h-[300px] w-[200px]",
+-  landscape: "h-[200px] w-[300px]",
+-};
+-const TOGGLE_ITEM_CLASS =
+-  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+-
+ type Status =
+   | { state: "drawing" }
+   | { state: "ready" }
+@@ -134,8 +132,10 @@ function StockInLabelPrinter({
+   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const [preview, setPreview] = useState<string | null>(null);
+   const [status, setStatus] = useState<Status>({ state: "drawing" });
++  const [sizeId, setSizeId] = useState<LabelSizeId>(loadStockInLabelSize);
++  const size = LABEL_SIZES[sizeId];
+   const [orientation, setOrientation] = useState<LabelOrientation>(() =>
+-    loadLabelOrientation(SIZE.id),
++    loadLabelOrientation(sizeId),
+   );
+   // Kept as typed text so the box can be cleared while typing
+   const [copiesText, setCopiesText] = useState(
+@@ -144,27 +144,46 @@ function StockInLabelPrinter({
+   const copies = clampCopies(Number(copiesText));
+   const canBluetooth = bluetoothSupported();
+ 
+-  const changeOrientation = (value: string) => {
+-    if (!isLabelOrientation(value) || value === orientation) return;
+-    saveLabelOrientation(SIZE.id, value);
++  const redraw = () => {
+     setPreview(null);
+     setStatus({ state: "drawing" });
++  };
++
++  const changeSize = (value: string) => {
++    if (!isLabelSizeId(value) || value === sizeId) return;
++    saveStockInLabelSize(value);
++    redraw();
++    setSizeId(value);
++    // Each size keeps its own direction
++    setOrientation(loadLabelOrientation(value));
++  };
++
++  const changeOrientation = (value: string) => {
++    if (!isLabelOrientation(value) || value === orientation) return;
++    saveLabelOrientation(sizeId, value);
++    redraw();
+     setOrientation(value);
+   };
+ 
+   useEffect(() => {
+     let cancelled = false;
+-    void renderStockInLabel(data, SIZE).then((drawn) => {
++    const labelSize = LABEL_SIZES[sizeId];
++    void renderStockInLabel(data, labelSize).then((drawn) => {
+       if (cancelled) return;
+       const canvas = orientCanvas(drawn, orientation);
+       canvasRef.current = canvas;
+-      setPreview(canvas.toDataURL("image/png"));
++      // The preview also outlines the pre-printed logo strip; the print never does
++      setPreview(
++        orientCanvas(markPreprinted(drawn, labelSize), orientation).toDataURL(
++          "image/png",
++        ),
++      );
+       setStatus({ state: "ready" });
+     });
+     return () => {
+       cancelled = true;
+     };
+-  }, [data, orientation]);
++  }, [data, sizeId, orientation]);
+ 
+   const printBluetooth = async () => {
+     const canvas = canvasRef.current;
+@@ -215,10 +234,27 @@ function StockInLabelPrinter({
+               ? "Printing…"
+               : onSave
+                 ? "Not saved yet. The Stock In is saved when you print. Use Edit to change the entry."
+-                : `40 × 60 mm label. ${canBluetooth ? "Connect the HPRT printer by Bluetooth, or use the print window." : "Use the print window with the printer paired to this device."}`}
++                : `${size.name} label. ${canBluetooth ? "Connect the HPRT printer by Bluetooth, or use the print window." : "Use the print window with the printer paired to this device."}`}
+         </DialogDescription>
+       </DialogHeader>
+ 
++      <div className="flex items-center justify-between gap-3">
++        <span className="text-sm font-medium">Label size</span>
++        <ToggleGroup
++          type="single"
++          variant="outline"
++          value={sizeId}
++          onValueChange={changeSize}
++          disabled={status.state === "printing"}
++        >
++          {STOCK_IN_LABEL_SIZES.map((id) => (
++            <ToggleGroupItem key={id} value={id} className={TOGGLE_ITEM_CLASS}>
++              {LABEL_SIZES[id].name}
++            </ToggleGroupItem>
++          ))}
++        </ToggleGroup>
++      </div>
++
+       <div className="flex items-center justify-between gap-3">
+         <label htmlFor="label-copies" className="text-sm font-medium">
+           Number of labels
+@@ -282,12 +318,12 @@ function StockInLabelPrinter({
+         {preview ? (
+           <img
+             src={preview}
+-            alt={`Stock In label preview, ${orientation}`}
+-            className={`${PREVIEW_CLASS[orientation]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
++            alt={`Stock In label preview, ${size.name}, ${orientation}`}
++            className={`${PREVIEW_CLASS[sizeId][orientation]} rounded-sm bg-white shadow-sm [image-rendering:pixelated]`}
+           />
+         ) : (
+           <div
+-            className={`${PREVIEW_CLASS[orientation]} flex items-center justify-center`}
++            className={`${PREVIEW_CLASS[sizeId][orientation]} flex items-center justify-center`}
+           >
+             <Spinner />
+           </div>
+diff --git a/src/lib/label/label-designs.ts b/src/lib/label/label-designs.ts
+index 7ea0f3c..858614f 100644
+--- a/src/lib/label/label-designs.ts
++++ b/src/lib/label/label-designs.ts
+@@ -13,6 +13,7 @@ export const LABEL_DESIGNS: { id: LabelDesignId; name: string }[] = [
+ export const DEFAULT_DESIGN: Record<LabelSizeId, LabelDesignId> = {
+   "40x60": "compact",
+   "52x110": "full",
++  "54x70": "compact",
+ };
+ 
+ export function isLabelDesignId(value: unknown): value is LabelDesignId {
+diff --git a/src/lib/label/label-sizes.ts b/src/lib/label/label-sizes.ts
+index 7ba55d1..5c68b10 100644
+--- a/src/lib/label/label-sizes.ts
++++ b/src/lib/label/label-sizes.ts
+@@ -2,13 +2,18 @@
+ // Layout numbers are in "base" units: the 40mm design is 320 units wide, and bigger
+ // labels are drawn at a scale so the same 320-unit design fills their width.
+ 
+-export type LabelSizeId = "40x60" | "52x110";
++export type LabelSizeId = "40x60" | "52x110" | "54x70";
++
++// A label with a pre-printed strip (the ACP logo): the design of a smaller size
++// is printed inside it, `leftMm` from the left and centred along the length
++export type LabelSheet = { content: LabelSizeId; leftMm: number };
+ 
+ export type LabelSize = {
+   id: LabelSizeId;
+   name: string;
+   widthMm: number;
+   heightMm: number;
++  sheet?: LabelSheet;
+   // Where the fill record ends and the canister face ends, in base units
+   topEnd: number;
+   middleEnd: number;
+@@ -51,10 +56,60 @@ export const LABEL_SIZES: Record<LabelSizeId, LabelSize> = {
+     faceQr: 110,
+     tagQr: 105,
+   },
++  // Pre-printed ACP logo strip down the left; prints the 40 x 60 design beside it.
++  // The layout numbers below are the 40 x 60 ones, since that design is what prints.
++  "54x70": {
++    id: "54x70",
++    name: "54 × 70 mm",
++    widthMm: 54,
++    heightMm: 70,
++    sheet: { content: "40x60", leftMm: 14 },
++    topEnd: 125,
++    middleEnd: 365,
++    photoW: 100,
++    photoH: 80,
++    photoAcross: 58,
++    faceQr: 78,
++    tagQr: 72,
++  },
+ };
+ 
+ export const DEFAULT_LABEL_SIZE: LabelSizeId = "40x60";
+ 
++// Stock In labels come in the plain 40 x 60 or the ACP 54 x 70 with the logo strip
++export const STOCK_IN_LABEL_SIZES: LabelSizeId[] = ["40x60", "54x70"];
++
++const STOCK_IN_KEY = "acp-stock-in-label-size";
++
++export function loadStockInLabelSize(): LabelSizeId {
++  try {
++    const saved = localStorage.getItem(STOCK_IN_KEY);
++    return isLabelSizeId(saved) && STOCK_IN_LABEL_SIZES.includes(saved)
++      ? saved
++      : DEFAULT_LABEL_SIZE;
++  } catch {
++    return DEFAULT_LABEL_SIZE;
++  }
++}
++
++export function saveStockInLabelSize(id: LabelSizeId): void {
++  try {
++    localStorage.setItem(STOCK_IN_KEY, id);
++  } catch {
++    // Private mode: the choice just isn't remembered
++  }
++}
++
++// Where the printed design sits on a sheet label, in printer dots
++export function sheetOffset(size: LabelSize): { x: number; y: number } | null {
++  if (!size.sheet) return null;
++  const content = LABEL_SIZES[size.sheet.content];
++  return {
++    x: Math.round(size.sheet.leftMm * DOTS_PER_MM),
++    y: Math.round(((size.heightMm - content.heightMm) / 2) * DOTS_PER_MM),
++  };
++}
++
+ export function isLabelSizeId(value: unknown): value is LabelSizeId {
+   return typeof value === "string" && value in LABEL_SIZES;
+ }
+@@ -106,6 +161,8 @@ export const LABEL_ORIENTATIONS: { id: LabelOrientation; name: string }[] = [
+ export const DEFAULT_ORIENTATION: Record<LabelSizeId, LabelOrientation> = {
+   "40x60": "landscape",
+   "52x110": "portrait",
++  // Prints upright from the printer, like the ACP sample
++  "54x70": "portrait",
+ };
+ 
+ export function isLabelOrientation(value: unknown): value is LabelOrientation {
+diff --git a/src/lib/label/label.test.ts b/src/lib/label/label.test.ts
+index aa7f232..4b34512 100644
+--- a/src/lib/label/label.test.ts
++++ b/src/lib/label/label.test.ts
+@@ -20,6 +20,7 @@ import {
+   labelScale,
+   loadLabelOrientation,
+   saveLabelOrientation,
++  sheetOffset,
+ } from "./label-sizes.ts";
+ import {
+   canisterQrText,
+@@ -145,6 +146,16 @@ describe("label sizes", () => {
+     expect(labelScale(LABEL_SIZES["52x110"]).scale).toBeCloseTo(1.3);
+   });
+ 
++  it("places the 40 x 60 design 14 mm from the left, centred, on 54 x 70", () => {
++    const size = LABEL_SIZES["54x70"];
++    expect(labelDots(size)).toEqual({ width: 432, height: 560 });
++    // 14 mm across; (70 - 60) / 2 = 5 mm down
++    expect(sheetOffset(size)).toEqual({ x: 112, y: 40 });
++    // The design (320 dots wide) fits beside the strip
++    expect(112 + 320).toBeLessThanOrEqual(432);
++    expect(sheetOffset(LABEL_SIZES["40x60"])).toBeNull();
++  });
++
+   it("keeps every section inside the label", () => {
+     for (const size of Object.values(LABEL_SIZES)) {
+       const { length } = labelScale(size);
+@@ -154,6 +165,7 @@ describe("label sizes", () => {
+   });
+ 
+   it("only accepts known sizes", () => {
++    expect(isLabelSizeId("54x70")).toBe(true);
+     expect(isLabelSizeId("52x110")).toBe(true);
+     expect(isLabelSizeId("99x99")).toBe(false);
+     expect(isLabelSizeId(null)).toBe(false);
+diff --git a/src/lib/label/render-label.ts b/src/lib/label/render-label.ts
+index 48b131c..d06a4ca 100644
+--- a/src/lib/label/render-label.ts
++++ b/src/lib/label/render-label.ts
+@@ -13,6 +13,7 @@ import {
+   type Ctx,
+ } from "./draw.ts";
+ import { renderCompactLabel } from "./render-compact.ts";
++import { renderOnSheet } from "./sheet.ts";
+ import type { LabelDesignId } from "./label-designs.ts";
+ import {
+   BASE_WIDTH,
+@@ -214,7 +215,9 @@ export async function renderLabel(
+   size: LabelSize,
+   design: LabelDesignId = "full",
+ ): Promise<HTMLCanvasElement> {
+-  return design === "compact"
+-    ? renderCompactLabel(data, size)
+-    : renderFullLabel(data, size);
++  return renderOnSheet(size, (s) =>
++    design === "compact"
++      ? renderCompactLabel(data, s)
++      : renderFullLabel(data, s),
++  );
+ }
+diff --git a/src/lib/label/render-stock-in.ts b/src/lib/label/render-stock-in.ts
+index fb1d58b..c414ecc 100644
+--- a/src/lib/label/render-stock-in.ts
++++ b/src/lib/label/render-stock-in.ts
+@@ -11,6 +11,7 @@ import {
+ } from "./draw.ts";
+ import { drawLandscape } from "./render-compact.ts";
+ import { loadPackageIcon } from "./package-icons.ts";
++import { renderOnSheet } from "./sheet.ts";
+ import type { LabelSize } from "./label-sizes.ts";
+ import {
+   stockInQrText,
+@@ -115,7 +116,9 @@ export async function renderStockInLabel(
+     data.imageUrl ? loadPhoto(data.imageUrl) : Promise.resolve(null),
+     loadPackageIcon(data.baseUnit),
+   ]);
+-  return drawLandscape(size, (ctx, scale) =>
+-    drawStockIn(ctx, scale, data, photo, icon),
++  return renderOnSheet(size, async (s) =>
++    drawLandscape(s, (ctx, scale) =>
++      drawStockIn(ctx, scale, data, photo, icon),
++    ),
+   );
+ }
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 267e91d..7aedaad 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v77");
++    expect(CHANGE_ENTRIES[0].version).toBe("v78");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
+
+diff --git a/src/lib/label/preview-class.ts b/src/lib/label/preview-class.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/preview-class.ts
+@@ -0,0 +1,23 @@
++import type { LabelOrientation, LabelSizeId } from "./label-sizes.ts";
++
++// Preview boxes keep each label's shape in either direction
++export const PREVIEW_CLASS: Record<
++  LabelSizeId,
++  Record<LabelOrientation, string>
++> = {
++  "40x60": {
++    portrait: "h-[300px] w-[200px]",
++    landscape: "h-[200px] w-[300px]",
++  },
++  "52x110": {
++    portrait: "h-[330px] w-[156px]",
++    landscape: "h-[156px] w-[330px]",
++  },
++  "54x70": {
++    portrait: "h-[300px] w-[231px]",
++    landscape: "h-[231px] w-[300px]",
++  },
++};
++
++export const TOGGLE_ITEM_CLASS =
++  "cursor-pointer data-[state=on]:bg-primary data-[state=on]:text-primary-foreground";
+diff --git a/src/lib/label/sheet.ts b/src/lib/label/sheet.ts
+new file mode 100644
+--- /dev/null
++++ b/src/lib/label/sheet.ts
+@@ -0,0 +1,61 @@
++import { FONT } from "./draw.ts";
++import {
++  LABEL_SIZES,
++  labelDots,
++  sheetOffset,
++  type LabelSize,
++} from "./label-sizes.ts";
++
++function blankCanvas(width: number, height: number) {
++  const canvas = document.createElement("canvas");
++  canvas.width = width;
++  canvas.height = height;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) throw new Error("This browser cannot draw labels");
++  return { canvas, ctx };
++}
++
++// Draws the label upright (portrait). Sheet labels (54 x 70) get the smaller
++// design placed beside the pre-printed strip, which is left blank.
++export async function renderOnSheet(
++  size: LabelSize,
++  render: (size: LabelSize) => Promise<HTMLCanvasElement>,
++): Promise<HTMLCanvasElement> {
++  const offset = sheetOffset(size);
++  if (!size.sheet || !offset) return render(size);
++  const inner = await render(LABEL_SIZES[size.sheet.content]);
++  const dots = labelDots(size);
++  const { canvas, ctx } = blankCanvas(dots.width, dots.height);
++  ctx.fillStyle = "#fff";
++  ctx.fillRect(0, 0, canvas.width, canvas.height);
++  ctx.drawImage(inner, offset.x, offset.y);
++  return canvas;
++}
++
++// Preview only: a copy with a dashed outline where the pre-printed ACP strip is,
++// so staff can see how the label lines up. Never sent to the printer.
++export function markPreprinted(
++  canvas: HTMLCanvasElement,
++  size: LabelSize,
++): HTMLCanvasElement {
++  const offset = sheetOffset(size);
++  if (!offset) return canvas;
++  const { canvas: out, ctx } = blankCanvas(canvas.width, canvas.height);
++  ctx.drawImage(canvas, 0, 0);
++  const pad = 6;
++  ctx.strokeStyle = "#a3a3a3";
++  ctx.lineWidth = 2;
++  ctx.setLineDash([8, 6]);
++  ctx.strokeRect(pad, pad, offset.x - pad * 2, out.height - pad * 2);
++  // Reads bottom to top, like the strip on the real label
++  ctx.save();
++  ctx.translate(offset.x / 2, out.height / 2);
++  ctx.rotate(-Math.PI / 2);
++  ctx.fillStyle = "#a3a3a3";
++  ctx.font = `20px ${FONT}`;
++  ctx.textAlign = "center";
++  ctx.textBaseline = "middle";
++  ctx.fillText("ACP logo (pre-printed)", 0, 0);
++  ctx.restore();
++  return out;
++}

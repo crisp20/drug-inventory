@@ -65,7 +65,9 @@ function Hint({ title, description }: { title: string; description: string }) {
 function focusQuantity() {
   let tries = 0;
   const attempt = () => {
-    const input = document.querySelector<HTMLInputElement>('input[name="quantity"]');
+    const input = document.querySelector<HTMLInputElement>(
+      'input[name="quantity"]',
+    );
     if (input) {
       input.focus();
       input.select();
@@ -100,7 +102,8 @@ export default function StockDrugFinder({ children }: Props) {
 
   // Look Alike, Sound Alike drugs stay locked until staff confirm they checked the pictures
   const [confirmedDrug, setConfirmedDrug] = useState<string | null>(null);
-  const needsWarning = !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
+  const needsWarning =
+    !!selection?.drug.lasa && confirmedDrug !== selection.drug._id;
   const usable = needsWarning ? null : selection;
 
   const confirmDiscard = useConfirmDiscard();

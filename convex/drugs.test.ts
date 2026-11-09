@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-import { createTestUsers } from "./testUsers";
+
+const OWNER = { tokenIdentifier: "iss|owner", email: "Hubert@ActiveCareGroup.com", name: "Hubert" };
+const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
 
 const drug = {
   drugId: "PCM500",
@@ -18,12 +20,15 @@ const drug = {
 
 async function setup() {
   const t = convexTest(schema, modules);
-  const { owner, staff } = await createTestUsers(t);
+  const owner = t.withIdentity(OWNER);
+  const staff = t.withIdentity(STAFF);
+  await owner.mutation(api.users.updateCurrentUser, {});
+  await staff.mutation(api.users.updateCurrentUser, {});
   return { t, owner, staff };
 }
 
 describe("access", () => {
-  it("keeps the admin active and new users pending", async () => {
+  it("makes the owner an active admin and new users pending", async () => {
     const { owner, staff } = await setup();
     expect(await owner.query(api.users.getCurrentUser, {})).toMatchObject({ role: "admin", status: "active" });
     expect(await staff.query(api.users.getCurrentUser, {})).toMatchObject({ role: "staff", status: "pending" });
@@ -38,11 +43,11 @@ describe("access", () => {
     const { owner, staff } = await setup();
     await owner.mutation(api.drugs.create, drug);
     const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
-    await owner.mutation(api.users.updateAccess, { userId: pending._id, status: "active" });
+    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
 
     const found = await staff.query(api.drugs.search, { term: "(01)09312345678907" });
     expect(found).toHaveLength(1);
-    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/Admin/);
+    await expect(staff.mutation(api.drugs.create, { ...drug, drugId: "X2" })).rejects.toThrow(/admins/);
   });
 });
 
@@ -192,7 +197,7 @@ describe("Dangerous Drug (DDA)", () => {
   it("only lets admins mark a drug DDA", async () => {
     const { owner, staff } = await setup();
     const [pending] = await owner.query(api.users.listByStatus, { status: "pending" });
-    await owner.mutation(api.users.updateAccess, { userId: pending._id, status: "active" });
+    await owner.mutation(api.users.updateAccess, { userId: pending._id, role: "staff", status: "active" });
     await expect(staff.mutation(api.drugs.create, { ...drug, dda: true })).rejects.toThrow(/admins/);
   });
 });

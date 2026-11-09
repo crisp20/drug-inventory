@@ -1,0 +1,494 @@
+diff --git a/convex/lib/activity.ts b/convex/lib/activity.ts
+index c731aa6..fa4d43f 100644
+--- a/convex/lib/activity.ts
++++ b/convex/lib/activity.ts
+@@ -72,7 +72,13 @@ export async function logActivity(ctx: MutationCtx, actor: Actor, e: Entry) {
+ 
+ type DrugFields = Pick<
+   Doc<"drugs">,
+-  "drugId" | "name" | "brandName" | "manufacturer" | "pieceName" | "specifications" | "remarks"
++  | "drugId"
++  | "name"
++  | "brandName"
++  | "manufacturer"
++  | "pieceName"
++  | "specifications"
++  | "remarks"
+ >;
+ 
+ const DRUG_FIELDS: ReadonlyArray<[keyof DrugFields, string]> = [
+@@ -112,18 +118,32 @@ export function diffLasa(
+   const changes: Change[] = [];
+   const yesNo = (b: boolean | undefined) => (b ? "Yes" : "No");
+   if (!!beforeMark !== !!afterMark) {
+-    changes.push({ field: "Look Alike, Sound Alike", before: yesNo(beforeMark), after: yesNo(afterMark) });
++    changes.push({
++      field: "Look Alike, Sound Alike",
++      before: yesNo(beforeMark),
++      after: yesNo(afterMark),
++    });
+   }
+   const old = links.before.join("; ");
+   const now = links.after.join("; ");
+-  if (old !== now) changes.push({ field: "Look-alike drugs", before: old, after: now });
++  if (old !== now)
++    changes.push({ field: "Look-alike drugs", before: old, after: now });
+   return changes;
+ }
+ 
+ // The Dangerous Drug (DDA) mark, as an activity change
+-export function diffDda(beforeMark: boolean | undefined, afterMark: boolean | undefined): Change[] {
++export function diffDda(
++  beforeMark: boolean | undefined,
++  afterMark: boolean | undefined,
++): Change[] {
+   if (!!beforeMark === !!afterMark) return [];
+-  return [{ field: "Dangerous Drug (DDA)", before: beforeMark ? "Yes" : "No", after: afterMark ? "Yes" : "No" }];
++  return [
++    {
++      field: "Dangerous Drug (DDA)",
++      before: beforeMark ? "Yes" : "No",
++      after: afterMark ? "Yes" : "No",
++    },
++  ];
+ }
+ 
+ type PackageLike = Pick<
+@@ -190,9 +210,15 @@ function pictureDetail(added: number, removed: number) {
+ 
+ type DrugSave = {
+   drug: Pick<Doc<"drugs">, "_id" | "drugId" | "name">;
+-  before: (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean }) | null;
++  before:
++    | (DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean })
++    | null;
+   beforePackages: SavedPackage[];
+-  after: DrugFields & { imageId?: Id<"_storage">; lasa?: boolean; dda?: boolean };
++  after: DrugFields & {
++    imageId?: Id<"_storage">;
++    lasa?: boolean;
++    dda?: boolean;
++  };
+   afterPackages: PackageInput[];
+   // The import only sends this when unmarking removed links
+   lookAlikes?: LookAlikeChange;
+@@ -307,7 +333,11 @@ export async function logDrugImport(
+   const { drug, before, after } = s;
+   const changes = [
+     ...diffDrugFields(before, after),
+-    ...diffLasa(before?.lasa, after.lasa, s.lookAlikes ?? { before: [], after: [] }),
++    ...diffLasa(
++      before?.lasa,
++      after.lasa,
++      s.lookAlikes ?? { before: [], after: [] },
++    ),
+     ...diffDda(before?.dda, after.dda),
+   ];
+   const byId = new Map(s.beforePackages.map((p) => [p._id, p]));
+@@ -378,6 +408,7 @@ export async function logMovement(ctx: MutationCtx, m: Doc<"stockMovements">) {
+         `Stock ${m.stockBefore} → ${m.stockAfter}`,
+         m.reason ?? "",
+         m.canister ? formatCanister(m.canister) : formatBatchExpiry(m),
++        m.labels ? "Labels printed" : "",
+         m.eight ? "8 box ticked" : "",
+         formatMismatchedScan(m.mismatchedScan),
+         m.notes,
+diff --git a/convex/schema/stock.ts b/convex/schema/stock.ts
+index df29fb6..75831ee 100644
+--- a/convex/schema/stock.ts
++++ b/convex/schema/stock.ts
+@@ -46,8 +46,11 @@ export const stockMovementsTable = defineTable({
+       type: v.number(),
+     }),
+   ),
+-  // Stock In of a package form without a barcode: the "8" box was ticked for its labels
++  // Stock In with labels: the "8" box was ticked for its labels
+   eight: v.optional(v.boolean()),
++  // Stock In of a package form WITH a barcode where the person chose to print labels
++  // (package forms without a barcode always get labels)
++  labels: v.optional(v.boolean()),
+   userRef: v.id("users"),
+   userName: v.string(),
+   // Initials of the person at the time, so reprinted labels match the originals
+diff --git a/convex/stock.test.ts b/convex/stock.test.ts
+index d4bd34f..54b53ef 100644
+--- a/convex/stock.test.ts
++++ b/convex/stock.test.ts
+@@ -460,6 +460,31 @@ describe("Stock In labels (8 box and initials)", () => {
+     const byPkg = new Map(log.page.map((m) => [m.packageRef, m]));
+     expect(byPkg.get(noBarcode)!.eight).toBe(true);
+     expect(byPkg.get(packageId)!.eight).toBeUndefined();
++    expect(byPkg.get(packageId)!.labels).toBeUndefined();
++  });
++
++  it("keeps labels and the 8 mark when labels are chosen for a barcoded form", async () => {
++    const { owner, staff, packageId, noBarcode } = await addNoBarcodeForm();
++    await staff.mutation(api.stock.recordIn, {
++      packageId,
++      ...entry,
++      labels: true,
++      eight: true,
++    });
++    // Barcode-less forms always get labels, so "labels" isn't saved for them
++    await staff.mutation(api.stock.recordIn, {
++      packageId: noBarcode,
++      ...entry,
++      labels: true,
++    });
++    const log = await owner.query(api.stock.listMovements, {
++      kind: "in",
++      paginationOpts: page,
++    });
++    const byPkg = new Map(log.page.map((m) => [m.packageRef, m]));
++    expect(byPkg.get(packageId)!.labels).toBe(true);
++    expect(byPkg.get(packageId)!.eight).toBe(true);
++    expect(byPkg.get(noBarcode)!.labels).toBeUndefined();
+   });
+ 
+   it("saves the person's initials, using the admin-set ones when given", async () => {
+diff --git a/convex/stock.ts b/convex/stock.ts
+index 99a719d..8520243 100644
+--- a/convex/stock.ts
++++ b/convex/stock.ts
+@@ -40,7 +40,7 @@ async function recordMovement(
+   canister?: CanisterInput,
+   batchExpiry: BatchExpiry = {},
+   mismatchedScan?: string,
+-  eight?: boolean,
++  labelOptions: { eight?: boolean; labels?: boolean } = {},
+ ) {
+   const user = await requireActiveUser(ctx);
+   const input = cleanMovementInput(raw);
+@@ -57,6 +57,11 @@ async function recordMovement(
+       message: "This drug no longer exists",
+     });
+ 
++  // Package forms without a barcode always get Stock In labels; others only when chosen
++  const hasBarcode = !!pkg.barcode.trim();
++  const chosenLabels =
++    kind === "in" && hasBarcode && labelOptions.labels === true;
++  const getsLabels = kind === "in" && (!hasBarcode || chosenLabels);
+   const stockAfter = nextStock(pkg.stock, kind, input.quantity);
+   await ctx.db.patch("drugPackages", pkg._id, { stock: stockAfter });
+   const movementId = await ctx.db.insert("stockMovements", {
+@@ -80,8 +85,9 @@ async function recordMovement(
+     expiry: batchExpiry.expiry,
+     mismatchedScan,
+     canister,
+-    // Only package forms without a barcode get Stock In labels, so only they keep the 8 mark
+-    eight: eight && kind === "in" && !pkg.barcode ? true : undefined,
++    // Only entries that get Stock In labels keep the 8 mark
++    eight: getsLabels && labelOptions.eight === true ? true : undefined,
++    labels: chosenLabels ? true : undefined,
+     userRef: user._id,
+     userName: user.name ?? user.email ?? "Unknown user",
+     userInitials: userInitials(user) || undefined,
+@@ -99,12 +105,14 @@ export const recordIn = mutation({
+     batch: v.optional(v.string()),
+     expiry: v.optional(v.string()),
+     mismatchedScan: v.optional(v.string()),
+-    // The "8" box, only kept for package forms without a barcode (they get labels)
++    // The "8" box, only kept when the entry gets labels
+     eight: v.optional(v.boolean()),
++    // Labels chosen for a package form that has a barcode
++    labels: v.optional(v.boolean()),
+   },
+   handler: async (
+     ctx,
+-    { packageId, batch, expiry, mismatchedScan, eight, ...rest },
++    { packageId, batch, expiry, mismatchedScan, eight, labels, ...rest },
+   ) => {
+     return await recordMovement(
+       ctx,
+@@ -115,7 +123,7 @@ export const recordIn = mutation({
+       undefined,
+       cleanBatchExpiry({ batch, expiry }),
+       cleanMismatchedScan(mismatchedScan),
+-      eight,
++      { eight, labels },
+     );
+   },
+ });
+diff --git a/src/components/stock/movement-form-schema.ts b/src/components/stock/movement-form-schema.ts
+index 54c5da8..1ece4c3 100644
+--- a/src/components/stock/movement-form-schema.ts
++++ b/src/components/stock/movement-form-schema.ts
+@@ -44,8 +44,10 @@ export function movementFormSchema(kind: MovementKind) {
+       reason:
+         kind === "out" ? reason.min(1, "Choose or type a reason") : reason,
+       canisterOn: z.boolean(),
+-      // Stock In labels: the "8" box (only used for package forms without a barcode)
++      // Stock In labels: the "8" box (only used when the entry gets labels)
+       eight: z.boolean(),
++      // Stock In labels chosen for a package form that has a barcode
++      labelsOn: z.boolean(),
+       batch: z.string().trim(),
+       expiry: z.string(),
+       // GS1 code used even though its product didn't match (set by the scan box)
+diff --git a/src/components/stock/movement-form.tsx b/src/components/stock/movement-form.tsx
+index 85a15a1..2072911 100644
+--- a/src/components/stock/movement-form.tsx
++++ b/src/components/stock/movement-form.tsx
+@@ -131,6 +131,7 @@ export default function MovementForm({
+       reason: kind === "out" ? DEFAULT_STOCK_OUT_REASON : "",
+       canisterOn: false,
+       eight: false,
++      labelsOn: false,
+       batch: scanned?.batch ?? "",
+       expiry: scannedExpired ? "" : (scanned?.expiry ?? ""),
+       mismatchedScan: "",
+@@ -154,8 +155,11 @@ export default function MovementForm({
+   // Label waiting to print after a canister Stock Out was saved
+   const [label, setLabel] = useState<LabelData | null>(null);
+   const currentUser = useCurrentUser();
+-  // Stock In of a package form without a barcode needs labels
+-  const needsLabels = kind === "in" && !pkg.barcode.trim();
++  // Stock In of a package form without a barcode always needs labels;
++  // with a barcode, only when the person ticks "Print labels"
++  const hasBarcode = !!pkg.barcode.trim();
++  const needsLabels =
++    kind === "in" && (!hasBarcode || watched.labelsOn === true);
+   const [stockInLabel, setStockInLabel] = useState<{
+     data: StockInLabelData;
+     copies: number;
+@@ -213,6 +217,7 @@ export default function MovementForm({
+     canisterQty,
+     canisterType,
+     eight,
++    labelsOn,
+     ...values
+   }: MovementFormValues) => {
+     // Large amounts are often a barcode scanned into the quantity box, so ask again
+@@ -266,6 +271,7 @@ export default function MovementForm({
+               expiry: expiry || undefined,
+               mismatchedScan: mismatchedScan || undefined,
+               eight: needsLabels && eight ? true : undefined,
++              labels: hasBarcode && labelsOn ? true : undefined,
+             })
+           : await recordOut({
+               ...args,
+@@ -385,10 +391,11 @@ export default function MovementForm({
+           required={canisterEnabled && canisterOn}
+         />
+ 
+-        {needsLabels && (
++        {kind === "in" && (
+           <StockInLabelSection
+             control={form.control}
+             dangerousDrug={!!drug.dda}
++            hasBarcode={hasBarcode}
+             onPrint={() =>
+               setStockInLabel({
+                 data: buildStockInLabel(),
+diff --git a/src/components/stock/stock-in-label-section.tsx b/src/components/stock/stock-in-label-section.tsx
+index 2e87ca3..845d22f 100644
+--- a/src/components/stock/stock-in-label-section.tsx
++++ b/src/components/stock/stock-in-label-section.tsx
+@@ -1,4 +1,4 @@
+-import type { Control } from "react-hook-form";
++import { useWatch, type Control } from "react-hook-form";
+ import { Printer } from "lucide-react";
+ import { Button } from "@/components/ui/button.tsx";
+ import { Checkbox } from "@/components/ui/checkbox.tsx";
+@@ -17,61 +17,97 @@ import type {
+ type Props = {
+   control: Control<MovementFormInput, unknown, MovementFormValues>;
+   dangerousDrug: boolean;
++  // Package forms with a barcode don't need labels, but can opt in
++  hasBarcode: boolean;
+   onPrint: () => void;
+ };
+ 
+-// Stock In of a package form without a barcode: the "8" tick box and a
+-// print button for its labels (a print window also opens after saving)
++type FieldName = "eight" | "labelsOn";
++
++function TickBox({
++  control,
++  name,
++  children,
++}: {
++  control: Props["control"];
++  name: FieldName;
++  children: React.ReactNode;
++}) {
++  return (
++    <FormField
++      control={control}
++      name={name}
++      render={({ field }) => (
++        <FormItem className="flex items-center gap-3 rounded-lg bg-background px-3 py-2.5">
++          <FormControl>
++            <Checkbox
++              checked={field.value === true}
++              onCheckedChange={(on) => field.onChange(on === true)}
++              className="size-5 cursor-pointer"
++            />
++          </FormControl>
++          <FormLabel className="flex cursor-pointer items-center gap-2">
++            {children}
++          </FormLabel>
++        </FormItem>
++      )}
++    />
++  );
++}
++
++// Stock In labels: always for package forms without a barcode, and optional
++// (a "Print labels" tick box) for those with one. A print window opens after saving.
+ export default function StockInLabelSection({
+   control,
+   dangerousDrug,
++  hasBarcode,
+   onPrint,
+ }: Props) {
++  const labelsOn = useWatch({ control, name: "labelsOn" }) === true;
++  const showLabels = !hasBarcode || labelsOn;
+   return (
+     <div className="space-y-3 rounded-xl border border-primary/25 bg-primary/5 p-4">
+-      <div className="flex items-start justify-between gap-3">
+-        <div className="min-w-0">
+-          <div className="flex items-center gap-2 font-semibold">
+-            <Printer className="size-4 text-primary" /> Labels
+-            {dangerousDrug && <DdaBadge />}
++      {hasBarcode && (
++        <TickBox control={control} name="labelsOn">
++          <Printer className="size-4 text-primary" /> Print labels
++          {dangerousDrug && <DdaBadge />}
++        </TickBox>
++      )}
++      {showLabels && (
++        <>
++          <div className="flex items-start justify-between gap-3">
++            <div className="min-w-0">
++              {!hasBarcode && (
++                <div className="flex items-center gap-2 font-semibold">
++                  <Printer className="size-4 text-primary" /> Labels
++                  {dangerousDrug && <DdaBadge />}
++                </div>
++              )}
++              <p className="text-xs text-muted-foreground">
++                {hasBarcode
++                  ? "Labels are optional for this package form. The print window opens after you record the Stock In."
++                  : "This package form has no barcode, so it needs labels. The print window opens after you record the Stock In."}
++              </p>
++            </div>
++            <Button
++              type="button"
++              size="sm"
++              variant="secondary"
++              className="shrink-0"
++              onClick={onPrint}
++            >
++              <Printer /> Print label
++            </Button>
+           </div>
+-          <p className="text-xs text-muted-foreground">
+-            This package form has no barcode, so it needs labels. The print
+-            window opens after you record the Stock In.
+-          </p>
+-        </div>
+-        <Button
+-          type="button"
+-          size="sm"
+-          variant="secondary"
+-          className="shrink-0"
+-          onClick={onPrint}
+-        >
+-          <Printer /> Print label
+-        </Button>
+-      </div>
+-      <FormField
+-        control={control}
+-        name="eight"
+-        render={({ field }) => (
+-          <FormItem className="flex items-center gap-3 rounded-lg bg-background px-3 py-2.5">
+-            <FormControl>
+-              <Checkbox
+-                checked={field.value === true}
+-                onCheckedChange={(on) => field.onChange(on === true)}
+-                className="size-5 cursor-pointer"
+-              />
+-            </FormControl>
+-            <FormLabel className="flex cursor-pointer items-center gap-2">
+-              Print
+-              <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-sm border-2 border-foreground px-1 text-sm font-bold">
+-                8
+-              </span>
+-              on the labels
+-            </FormLabel>
+-          </FormItem>
+-        )}
+-      />
++          <TickBox control={control} name="eight">
++            Print
++            <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-sm border-2 border-foreground px-1 text-sm font-bold">
++              8
++            </span>
++            on the labels
++          </TickBox>
++        </>
++      )}
+     </div>
+   );
+ }
+diff --git a/src/lib/label/stock-in-label.test.ts b/src/lib/label/stock-in-label.test.ts
+index b5c93a9..ecffd56 100644
+--- a/src/lib/label/stock-in-label.test.ts
++++ b/src/lib/label/stock-in-label.test.ts
+@@ -107,8 +107,15 @@ describe("Stock In label", () => {
+     ).toBe("ML");
+   });
+ 
+-  it("offers reprints only for canister fills and barcode-less Stock Ins", () => {
++  it("offers reprints for canister fills and Stock Ins that got labels", () => {
+     expect(hasReprintableLabel({ kind: "in", barcode: "" })).toBe(true);
++    expect(
++      hasReprintableLabel({
++        kind: "in",
++        barcode: "9312345678907",
++        labels: true,
++      }),
++    ).toBe(true);
+     expect(hasReprintableLabel({ kind: "in", barcode: "9312345678907" })).toBe(
+       false,
+     );
+diff --git a/src/lib/label/stock-in-label.ts b/src/lib/label/stock-in-label.ts
+index fc1c9ae..59d1e89 100644
+--- a/src/lib/label/stock-in-label.ts
++++ b/src/lib/label/stock-in-label.ts
+@@ -65,15 +65,18 @@ export type StockInReprintSource = {
+   expiry?: string;
+ };
+ 
+-// Entries that have a label to reprint: canister Stock Outs, and Stock Ins of
+-// package forms without a barcode
++// Entries that have a label to reprint: canister Stock Outs, Stock Ins of
++// package forms without a barcode, and Stock Ins where labels were chosen
+ export function hasReprintableLabel(m: {
+   kind: "in" | "out";
+   barcode: string;
+   canister?: unknown;
++  labels?: boolean;
+   undo?: unknown;
+ }): boolean {
+-  return !m.undo && (!!m.canister || (m.kind === "in" && !m.barcode.trim()));
++  if (m.undo) return false;
++  if (m.canister) return true;
++  return m.kind === "in" && (!m.barcode.trim() || m.labels === true);
+ }
+ 
+ // Rebuilds an earlier Stock In label with the original initials and 8 mark.
+diff --git a/src/pages/changes/_lib/changes.test.ts b/src/pages/changes/_lib/changes.test.ts
+index 8ab7f09..79bcf91 100644
+--- a/src/pages/changes/_lib/changes.test.ts
++++ b/src/pages/changes/_lib/changes.test.ts
+@@ -3,7 +3,7 @@ import { CHANGE_ENTRIES, hasDiff, loadDiff, parseDiff } from "./changes.ts";
+ 
+ describe("change log", () => {
+   it("reads every version, newest first, without the generated file lists", () => {
+-    expect(CHANGE_ENTRIES[0].version).toBe("v73");
++    expect(CHANGE_ENTRIES[0].version).toBe("v74");
+     expect(CHANGE_ENTRIES.at(-1)?.version).toBe("v1");
+     expect(CHANGE_ENTRIES.some((e) => e.body.includes("<!-- files"))).toBe(
+       false,
