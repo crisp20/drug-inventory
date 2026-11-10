@@ -12,6 +12,12 @@ const mocks = vi.hoisted(() => ({
   fetchAccessToken: undefined as
     | ((args: { forceRefreshToken: boolean }) => Promise<string | null>)
     | undefined,
+  convexAuth: undefined as
+    | {
+        isLoading: boolean;
+        isAuthenticated: boolean;
+      }
+    | undefined,
 }));
 
 vi.mock("react-oidc-context", () => ({
@@ -26,12 +32,16 @@ vi.mock("convex/react", () => ({
   }: {
     children: React.ReactNode;
     useAuth: () => {
+      isLoading: boolean;
+      isAuthenticated: boolean;
       fetchAccessToken: (args: {
         forceRefreshToken: boolean;
       }) => Promise<string | null>;
     };
   }) => {
-    mocks.fetchAccessToken = useAuth().fetchAccessToken;
+    const auth = useAuth();
+    mocks.convexAuth = auth;
+    mocks.fetchAccessToken = auth.fetchAccessToken;
     return children;
   },
 }));
@@ -43,6 +53,7 @@ describe("ConvexProvider", () => {
       .mockReset()
       .mockResolvedValue({ id_token: "refreshed-id-token" });
     mocks.fetchAccessToken = undefined;
+    mocks.convexAuth = undefined;
   });
 
   it("keeps the token fetcher stable as the OIDC user is refreshed", async () => {
@@ -72,5 +83,24 @@ describe("ConvexProvider", () => {
       "refreshed-id-token",
     );
     expect(mocks.oidcAuth.signinSilent).toHaveBeenCalledOnce();
+  });
+
+  it("does not report Convex auth as loading during silent token renewal", () => {
+    const { rerender } = render(
+      <ConvexProvider>
+        <div />
+      </ConvexProvider>,
+    );
+    expect(mocks.convexAuth?.isLoading).toBe(false);
+
+    mocks.oidcAuth.isLoading = true;
+    rerender(
+      <ConvexProvider>
+        <div />
+      </ConvexProvider>,
+    );
+
+    expect(mocks.convexAuth?.isLoading).toBe(false);
+    expect(mocks.convexAuth?.isAuthenticated).toBe(true);
   });
 });

@@ -29,7 +29,11 @@ function useOidcConvexAuth() {
   );
 
   return useMemo(
-    () => ({ isLoading, isAuthenticated, fetchAccessToken }),
+    () => ({
+      isLoading: isLoading && !isAuthenticated,
+      isAuthenticated,
+      fetchAccessToken,
+    }),
     [isLoading, isAuthenticated, fetchAccessToken],
   );
 }
