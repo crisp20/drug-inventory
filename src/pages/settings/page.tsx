@@ -15,15 +15,15 @@ import { Spinner } from "@/components/ui/spinner.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import IdleRefreshSetting from "./_components/idle-refresh-setting.tsx";
 
 export default function SettingsPage() {
   const me = useCurrentUser();
-  const { isAdmin } = useKeycloakRoles();
+  const { hasRole } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || !isAdmin) return <Navigate to="/" replace />;
+  if (!me || !hasRole(RoleCatelog.settings)) return <Navigate to="/" replace />;
   return (
     <div className="mx-auto max-w-2xl p-4 md:p-8">
       <PageHeader

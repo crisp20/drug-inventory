@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireActiveUser, requireAdmin } from "./lib/access";
+import { requireActiveUser, requireRole, RoleCatelog } from "./lib/access";
 import { userInitials } from "./lib/initials";
 import { logMovement, logUndo } from "./lib/activity";
 import {
@@ -198,7 +198,7 @@ export const recordOut = mutation({
 export const undoMovement = mutation({
   args: { movementId: v.id("stockMovements"), reason: v.string() },
   handler: async (ctx, { movementId, reason }) => {
-    const admin = await requireAdmin(ctx);
+    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
     const cleaned = cleanReason(reason);
     const movement = await ctx.db.get("stockMovements", movementId);
     if (!movement)

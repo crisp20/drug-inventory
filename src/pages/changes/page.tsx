@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import DiffDialog from "./_components/diff-dialog.tsx";
 import { CHANGE_ENTRIES, hasDiff } from "./_lib/changes.ts";
 
@@ -20,7 +20,7 @@ function changesDatabase(body: string): boolean {
 
 export default function ChangesPage() {
   const me = useCurrentUser();
-  const { isAdmin } = useKeycloakRoles();
+  const { hasRole } = useKeycloakRoles();
   const [open, setOpen] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const entries = useMemo(() => {
@@ -32,7 +32,7 @@ export default function ChangesPage() {
   }, [search]);
 
   if (me === undefined) return null;
-  if (!me || !isAdmin) return <Navigate to="/" replace />;
+  if (!me || !hasRole(RoleCatelog.changes)) return <Navigate to="/" replace />;
   const openTitle = CHANGE_ENTRIES.find((e) => e.version === open)?.title ?? "";
 
   return (

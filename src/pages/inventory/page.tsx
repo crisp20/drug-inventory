@@ -25,7 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import DrugSearchInput from "@/components/drug-search-input.tsx";
 import PageHeader from "@/components/page-header.tsx";
-import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { useDebounce } from "@/hooks/use-debounce.ts";
 import type { DrugWithDetails } from "@/lib/drug-types.ts";
 import { errorMessage } from "@/lib/errors.ts";
@@ -197,7 +197,7 @@ function SearchResults({
 }
 
 export default function InventoryPage() {
-  const { isAdmin } = useKeycloakRoles();
+  const { hasRole } = useKeycloakRoles();
   const convex = useConvex();
   const [search, setSearch] = useState("");
   const [term] = useDebounce(search.trim(), 250);
@@ -245,7 +245,7 @@ export default function InventoryPage() {
         title="Inventory"
         description="Every drug, barcode and package form with its stock on hand."
         actions={
-          isAdmin && (
+          hasRole(RoleCatelog.inventory_manage) && (
             <>
               <Button variant="secondary" onClick={() => setImportOpen(true)}>
                 <Upload /> Import file
@@ -291,7 +291,7 @@ export default function InventoryPage() {
           <SearchResults term={term} filter={filter} onSelect={openDrug} />
         ) : (
           <AllDrugs
-            isAdmin={isAdmin}
+            isAdmin={hasRole(RoleCatelog.inventory_manage)}
             filter={filter}
             onAdd={openAdd}
             onSelect={openDrug}
@@ -314,7 +314,7 @@ export default function InventoryPage() {
       />
       <DrugDetailSheet
         drug={shown}
-        isAdmin={isAdmin}
+        isAdmin={hasRole(RoleCatelog.inventory_manage)}
         onClose={() => setSelected(null)}
         onEdit={(d) => {
           setEditing(d);
@@ -326,10 +326,10 @@ export default function InventoryPage() {
         onOpenChange={setFormOpen}
         drug={editing}
       />
-      {isAdmin && (
+      {hasRole(RoleCatelog.inventory_manage) && (
         <ImportDialog open={importOpen} onOpenChange={setImportOpen} />
       )}
-      {isAdmin && (
+      {hasRole(RoleCatelog.inventory_manage) && (
         <PhotoImportDialog open={photosOpen} onOpenChange={setPhotosOpen} />
       )}
     </div>

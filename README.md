@@ -41,12 +41,12 @@ once with Keycloak to create a new profile.
 
 # Keycloak access and roles
 
-Assign the Keycloak client roles `access` and `admin` to users through Keycloak
+Assign the Keycloak client roles `access` to users through Keycloak
 groups. The ID token must include the `drug_inventory_roles` claim or the
 standard Keycloak `resource_access.drug-inventory.roles` claim. Users need
-`access` to use the application; users with `admin` can also open Users, Log,
-Settings, and Changes and use admin-only controls. Configure admin groups to
-grant both `access` and `admin`.
+`access` to use the application.
+
+For greater privileges, assign the roles `changes`, `logs`, `settings`, `users`, or `inventory_manage` to gain certain rights. Alternatively, assign the `admin` role to gain all of the aforementioned roles.
 
 The Users page does not grant application roles. Assign or remove roles in
 Keycloak; changes take effect after the user's token is refreshed. User profile

@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalMutation, query } from "./_generated/server";
-import { requireAdmin } from "./lib/access";
+import { requireRole, RoleCatelog } from "./lib/access";
 import { logMovement, logUndo } from "./lib/activity";
 import { withinPeriod } from "./lib/period";
 import { activityCategory } from "./schema/activity";
@@ -22,7 +22,7 @@ export const list = query({
     ctx,
     { category, drugId, userId, since, until, paginationOpts },
   ) => {
-    await requireAdmin(ctx);
+    await requireRole(ctx,RoleCatelog.logs);
     const table = ctx.db.query("activityLog");
     const scoped = drugId
       ? table.withIndex("by_drug_and_occurredAt", (q) =>

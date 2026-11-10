@@ -16,7 +16,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
-import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { cn } from "@/lib/utils.ts";
 import UndoMovementDialog from "./undo-movement-dialog.tsx";
 import { hasReprintableLabel } from "@/lib/label/stock-in-label.ts";
@@ -43,9 +43,9 @@ type Props = Common &
   (
     | { kind: MovementKind; filter?: MovementLogFilter }
     | {
-        kind?: undefined;
-        filter: Extract<MovementLogFilter, { type: "package" }>;
-      }
+      kind?: undefined;
+      filter: Extract<MovementLogFilter, { type: "package" }>;
+    }
   );
 
 const KIND_LABEL: Record<MovementKind, string> = {
@@ -65,7 +65,7 @@ export default function MovementLog({
     { kind, filter, ...extra },
     { initialNumItems: PAGE_SIZE },
   );
-  const { isAdmin } = useKeycloakRoles();
+  const { hasRole } = useKeycloakRoles();
   const [undoing, setUndoing] = useState<Doc<"stockMovements"> | null>(null);
   const [reprinting, setReprinting] = useState<Doc<"stockMovements"> | null>(
     null,
@@ -174,7 +174,7 @@ export default function MovementLog({
                   {[
                     m.batch && `Batch ${m.batch}`,
                     m.expiry &&
-                      `Exp ${format(new Date(`${m.expiry}T00:00:00`), "d MMM yyyy")}`,
+                    `Exp ${format(new Date(`${m.expiry}T00:00:00`), "d MMM yyyy")}`,
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -212,7 +212,7 @@ export default function MovementLog({
                   Reprint label
                 </Button>
               )}
-              {isAdmin && !m.undo && (
+              {hasRole(RoleCatelog.logs) && !m.undo && (
                 <Button
                   variant="ghost"
                   size="sm"

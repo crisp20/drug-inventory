@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireAdmin } from "./lib/access";
+import { requireRole, RoleCatelog } from "./lib/access";
 import { SYSTEM_ACTOR, actorOf, logDrugDelete, logDrugImport, type Actor } from "./lib/activity";
 import { normalizeBarcode } from "./lib/barcode";
 import {
@@ -138,7 +138,7 @@ function toExisting(drug: Doc<"drugs">, packages: Doc<"drugPackages">[]) {
 export const checkBatch = query({
   args: { drugs: v.array(importDrugArg) },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    await requireRole(ctx, RoleCatelog.inventory_manage);
     assertBatch(args.drugs.length);
     return await Promise.all(
       args.drugs.map(async (d) => {
@@ -163,7 +163,7 @@ export const checkBatch = query({
 export const barcodeOwner = query({
   args: { barcode: v.string(), drugId: v.string() },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    await requireRole(ctx, RoleCatelog.inventory_manage);
     if (!args.barcode.trim()) return null;
     const own = await findDrug(ctx, args.drugId);
     const [clash] = await findClashes(ctx, [{ barcode: args.barcode, qtyPerUnit: 1, baseUnit: "Box", unitCount: 1 }], own?._id);
@@ -175,7 +175,7 @@ export const barcodeOwner = query({
 export const listForImport = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    await requireRole(ctx, RoleCatelog.inventory_manage);
     const result = await ctx.db.query("drugs").withIndex("by_drugId").paginate(args.paginationOpts);
     return {
       ...result,
@@ -200,7 +200,7 @@ export const listForImport = query({
 export const listForExport = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    await requireRole(ctx, RoleCatelog.inventory_manage);
     const result = await ctx.db.query("drugs").withIndex("by_drugId").paginate(args.paginationOpts);
     return {
       ...result,
@@ -386,7 +386,7 @@ export const applyBatch = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx);
+    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
     assertBatch(args.items.length);
     let applied = 0;
     const failures: { drugId: string; name: string; message: string }[] = [];
@@ -406,7 +406,7 @@ export const applyBatch = mutation({
 export const removeBatch = mutation({
   args: { ids: v.array(v.id("drugs")) },
   handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx);
+    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
     assertBatch(args.ids.length);
     let removed = 0;
     for (const id of args.ids) {

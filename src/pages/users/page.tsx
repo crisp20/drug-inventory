@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
 
@@ -119,9 +119,9 @@ function UserList({ selfId }: { selfId: string }) {
 
 export default function UsersPage() {
   const me = useCurrentUser();
-  const { isAdmin } = useKeycloakRoles();
+  const { hasRole } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || !isAdmin) return <Navigate to="/" replace />;
+  if (!me || !hasRole(RoleCatelog.users)) return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">
