@@ -1,21 +1,7 @@
 import { ConvexError } from "convex/values";
-import { env, type QueryCtx } from "../_generated/server";
+import type { QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
-
-// Splits the OWNER_EMAILS secret (commas, semicolons or spaces) into lower-case emails
-export function parseOwnerEmails(raw: string | undefined): string[] {
-  return (raw ?? "")
-    .split(/[\s,;]+/)
-    .map((e) => e.trim().toLowerCase())
-    .filter((e) => e.length > 0);
-}
-
-// Owners come from the OWNER_EMAILS secret and are always active admins.
-// Read on every call so a changed secret applies without a code change.
-export function isOwnerEmail(email: string | undefined): boolean {
-  if (!email) return false;
-  return parseOwnerEmails(env.OWNER_EMAILS).includes(email.trim().toLowerCase());
-}
+import { keycloakRolesFromClaims } from "./keycloakRoles";
 
 export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
   const identity = await ctx.auth.getUserIdentity();
@@ -29,13 +15,22 @@ export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | nul
 export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
-    throw new ConvexError({ code: "UNAUTHENTICATED", message: "Please sign in" });
+    throw new ConvexError({ 
+      code: "UNAUTHENTICATED", 
+      message: "Please sign in"
+    });
   }
-  const user = await getSignedInUser(ctx);
-  if (!user || user.status !== "active") {
+  if (!keycloakRolesFromClaims(identity).includes("access")) {
     throw new ConvexError({
       code: "FORBIDDEN",
-      message: "Your account is waiting for admin approval",
+      message: "Your account does not have access rights. Contact your administrator to be granted the required Keycloak role."
+    });
+  }
+  const user = await getSignedInUser(ctx);
+  if (!user) {
+    throw new ConvexError({
+      code: "FORBIDDEN",
+      message: "Your user profile is not available. Please sign in again.",
     });
   }
   return user;
@@ -43,8 +38,12 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
 
 export async function requireAdmin(ctx: QueryCtx): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
-  if (user.role !== "admin") {
-    throw new ConvexError({ code: "FORBIDDEN", message: "Only admins can do this" });
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity || !keycloakRolesFromClaims(identity).includes("admin")) {
+    throw new ConvexError({
+      code: "FORBIDDEN",
+      message: "Only admins can do this",
+    });
   }
   return user;
 }

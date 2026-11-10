@@ -15,9 +15,14 @@ import { toast } from "sonner";
 import { SignInButton } from "@/components/ui/signin.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { useUnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
 import { cn } from "@/lib/utils.ts";
-import { AwaitingApprovalScreen, SignedOutScreen } from "./access-screens.tsx";
+import {
+  AccessRequiredScreen,
+  ProfileUnavailableScreen,
+  SignedOutScreen,
+} from "./access-screens.tsx";
 import BrandLogo from "./brand-logo.tsx";
 import RefreshReminder from "./refresh-reminder.tsx";
 import { RootErrorBoundary } from "./root-error-boundary.tsx";
@@ -95,11 +100,11 @@ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
 
 function Shell() {
   const user = useCurrentUser();
+  const { roles, hasAccess, isAdmin } = useKeycloakRoles();
+  if (!hasAccess) return <AccessRequiredScreen />;
   if (user === undefined) return <FullPageSkeleton />;
-  if (!user || user.status !== "active") {
-    return <AwaitingApprovalScreen disabled={user?.status === "disabled"} />;
-  }
-  const items = NAV.filter((n) => !n.adminOnly || user.role === "admin");
+  if (!user) return <ProfileUnavailableScreen />;
+  const items = NAV.filter((n) => !n.adminOnly || isAdmin);
 
   return (
     <div className="flex h-screen bg-background">
@@ -116,7 +121,18 @@ function Shell() {
             <div className="truncate text-sm font-semibold">
               {user.name ?? user.email}
             </div>
-            <div className="text-xs capitalize opacity-70">{user.role}</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {roles
+                .filter((role) => role !== "access")
+                .map((role) => (
+                  <span
+                    key={role}
+                    className="rounded bg-sidebar-accent px-1.5 py-0.5 text-xs capitalize"
+                  >
+                    {role}
+                  </span>
+                ))}
+            </div>
           </div>
           <SignInButton
             variant="ghost"

@@ -37,8 +37,18 @@ The Keycloak client secret is not used by this browser-based public client.
 
 After changing an identity provider, existing app profiles may not be found:
 the app keys a profile by the OIDC issuer and subject. Users may need to sign in
-once with Keycloak and be approved again by an administrator.
+once with Keycloak to create a new profile.
 
-# Ownership
+# Keycloak access and roles
 
-The `OWNER_EMAILS` env var configures the owner of the application, who are irrevokable admins.
+Assign the Keycloak client roles `access` and `admin` to users through Keycloak
+groups. The ID token must include the `drug_inventory_roles` claim or the
+standard Keycloak `resource_access.drug-inventory.roles` claim. Users need
+`access` to use the application; users with `admin` can also open Users, Log,
+Settings, and Changes and use admin-only controls. Configure admin groups to
+grant both `access` and `admin`.
+
+The Users page does not grant application roles. Assign or remove roles in
+Keycloak; changes take effect after the user's token is refreshed. User profile
+records retain optional legacy role/status fields for existing database rows,
+but those fields no longer control authorization.

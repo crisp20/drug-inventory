@@ -9,11 +9,13 @@ const OWNER = {
   tokenIdentifier: "iss|owner",
   email: "hubert@activecaregroup.com",
   name: "Hubert",
+  drug_inventory_roles: ["access", "admin"],
 };
 const STAFF = {
   tokenIdentifier: "iss|staff",
   email: "staff@example.com",
   name: "Sam",
+  drug_inventory_roles: ["access"],
 };
 
 async function setup() {
@@ -22,14 +24,6 @@ async function setup() {
   const staff = t.withIdentity(STAFF);
   await owner.mutation(api.users.updateCurrentUser, {});
   await staff.mutation(api.users.updateCurrentUser, {});
-  const [pending] = await owner.query(api.users.listByStatus, {
-    status: "pending",
-  });
-  await owner.mutation(api.users.updateAccess, {
-    userId: pending._id,
-    role: "staff",
-    status: "active",
-  });
   return { owner, staff };
 }
 

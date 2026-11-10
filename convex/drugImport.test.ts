@@ -4,8 +4,18 @@ import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
-const OWNER = { tokenIdentifier: "iss|owner", email: "hubert@activecaregroup.com", name: "Hubert" };
-const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
+const OWNER = {
+  tokenIdentifier: "iss|owner",
+  email: "hubert@activecaregroup.com",
+  name: "Hubert",
+  drug_inventory_roles: ["access", "admin"],
+};
+const STAFF = {
+  tokenIdentifier: "iss|staff",
+  email: "staff@example.com",
+  name: "Sam",
+  drug_inventory_roles: ["access"],
+};
 
 const fileDrug = {
   drugId: "32",
@@ -15,7 +25,14 @@ const fileDrug = {
   pieceName: "TABLET",
   dosageForm: "TABLET",
   row: 2,
-  packages: [{ barcode: "4046222740115", qtyPerUnit: 100, baseUnit: "Box" as const, unitCount: 1 }],
+  packages: [
+    {
+      barcode: "4046222740115",
+      qtyPerUnit: 100,
+      baseUnit: "Box" as const,
+      unitCount: 1,
+    },
+  ],
 };
 
 async function setup() {
@@ -30,14 +47,20 @@ async function setup() {
 describe("drug import", () => {
   it("is admin only", async () => {
     const { staff } = await setup();
-    await expect(staff.query(api.drugImport.checkBatch, { drugs: [fileDrug] })).rejects.toThrow();
-    await expect(staff.mutation(api.drugImport.applyBatch, { items: [] })).rejects.toThrow();
+    await expect(
+      staff.query(api.drugImport.checkBatch, { drugs: [fileDrug] }),
+    ).rejects.toThrow();
+    await expect(
+      staff.mutation(api.drugImport.applyBatch, { items: [] }),
+    ).rejects.toThrow();
   });
 
   it("can import a drug that has no package form", async () => {
     const { owner } = await setup();
     const bare = { ...fileDrug, drugId: "2", name: "Vit K4 Tab", packages: [] };
-    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: bare, action: "create" }] });
+    const res = await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: bare, action: "create" }],
+    });
     expect(res.failures).toEqual([]);
     const [saved] = await owner.query(api.drugs.search, { term: "Vit K4" });
     expect(saved.packages).toEqual([]);
@@ -45,9 +68,13 @@ describe("drug import", () => {
 
   it("creates new drugs, then reports a conflict and keeps stock when using the file", async () => {
     const { owner } = await setup();
-    const [first] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
+    const [first] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [fileDrug],
+    });
     expect(first.status).toBe("new");
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: fileDrug, action: "create" }],
+    });
 
     const [saved] = await owner.query(api.drugs.search, { term: "32" });
     await owner.mutation(api.drugs.update, {
@@ -68,11 +95,17 @@ describe("drug import", () => {
       })),
     });
 
-    const [again] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
+    const [again] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [fileDrug],
+    });
     expect(again.status).toBe("conflict");
-    expect(again.diff?.fields).toEqual([{ label: "Brand name", current: "Edited", file: "PK-Merz" }]);
+    expect(again.diff?.fields).toEqual([
+      { label: "Brand name", current: "Edited", file: "PK-Merz" },
+    ]);
 
-    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "update" }] });
+    const res = await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: fileDrug, action: "update" }],
+    });
     expect(res).toMatchObject({ applied: 1, failures: [] });
     const [updated] = await owner.query(api.drugs.search, { term: "32" });
     expect(updated.brandName).toBe("PK-Merz");
@@ -82,44 +115,92 @@ describe("drug import", () => {
   it("notes-only update changes Specifications/Remarks and nothing else", async () => {
     const { owner } = await setup();
     await owner.mutation(api.drugImport.applyBatch, {
-      items: [{ drug: { ...fileDrug, remarks: "Old remark" }, action: "create" }],
+      items: [
+        { drug: { ...fileDrug, remarks: "Old remark" }, action: "create" },
+      ],
     });
-    const fromFile = { ...fileDrug, brandName: "Changed", specifications: "Scored", remarks: "" };
-    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [fromFile] });
+    const fromFile = {
+      ...fileDrug,
+      brandName: "Changed",
+      specifications: "Scored",
+      remarks: "",
+    };
+    const [check] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [fromFile],
+    });
     expect(check.status).toBe("conflict");
-    expect(check.diff?.notes.map((n) => [n.key, n.auto])).toEqual([["specifications", true], ["remarks", false]]);
+    expect(check.diff?.notes.map((n) => [n.key, n.auto])).toEqual([
+      ["specifications", true],
+      ["remarks", false],
+    ]);
 
     // Keep the saved remark and brand; fill Specifications
     await owner.mutation(api.drugImport.applyBatch, {
       items: [{ drug: { ...fromFile, remarks: undefined }, action: "notes" }],
     });
     const [saved] = await owner.query(api.drugs.search, { term: "32" });
-    expect(saved).toMatchObject({ brandName: "PK-Merz", specifications: "Scored", remarks: "Old remark" });
+    expect(saved).toMatchObject({
+      brandName: "PK-Merz",
+      specifications: "Scored",
+      remarks: "Old remark",
+    });
 
     // Use the file's blank remark: clears it
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fromFile, action: "notes" }] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: fromFile, action: "notes" }],
+    });
     const [cleared] = await owner.query(api.drugs.search, { term: "32" });
     expect(cleared.remarks).toBeUndefined();
   });
 
   it("adds the package form without a barcode already used by another drug", async () => {
     const { owner } = await setup();
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
-    const other = { ...fileDrug, drugId: "33", packages: [...fileDrug.packages, { ...fileDrug.packages[0], barcode: "", qtyPerUnit: 10, baseUnit: "Strip" as const }] };
-    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [other] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: fileDrug, action: "create" }],
+    });
+    const other = {
+      ...fileDrug,
+      drugId: "33",
+      packages: [
+        ...fileDrug.packages,
+        {
+          ...fileDrug.packages[0],
+          barcode: "",
+          qtyPerUnit: 10,
+          baseUnit: "Strip" as const,
+        },
+      ],
+    };
+    const [check] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [other],
+    });
     expect(check.clashes).toHaveLength(1);
     expect(check.clashes[0]).toMatchObject({
       otherDrugId: "32",
       otherBrand: "PK-Merz",
       otherManufacturer: "JACOBSON",
-      otherPackage: { qtyPerUnit: 100, baseUnit: "Box", unitCount: 1, stock: 0 },
+      otherPackage: {
+        qtyPerUnit: 100,
+        baseUnit: "Box",
+        unitCount: 1,
+        stock: 0,
+      },
       otherImageUrl: null,
     });
-    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: other, action: "create" }] });
-    expect(res.skipped).toEqual([{ drugId: "33", name: other.name, barcodes: ["4046222740115"] }]);
+    const res = await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: other, action: "create" }],
+    });
+    expect(res.skipped).toEqual([
+      { drugId: "33", name: other.name, barcodes: ["4046222740115"] },
+    ]);
     const [created] = await owner.query(api.drugs.search, { term: "33" });
-    expect(created.packages.map((p) => [p.barcode, p.qtyPerUnit, p.baseUnit])).toEqual(
-      expect.arrayContaining([["", 100, "Box"], ["", 10, "Strip"]]),
+    expect(
+      created.packages.map((p) => [p.barcode, p.qtyPerUnit, p.baseUnit]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["", 100, "Box"],
+        ["", 10, "Strip"],
+      ]),
     );
     expect(created.packages).toHaveLength(2);
     // The barcode stays with the first drug
@@ -129,23 +210,49 @@ describe("drug import", () => {
 
   it("saves a changed barcode given for a clash", async () => {
     const { owner } = await setup();
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
-    const changed = { ...fileDrug, drugId: "34", packages: [{ ...fileDrug.packages[0], barcode: "4891234567890" }] };
-    const res = await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: changed, action: "create" }] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: fileDrug, action: "create" }],
+    });
+    const changed = {
+      ...fileDrug,
+      drugId: "34",
+      packages: [{ ...fileDrug.packages[0], barcode: "4891234567890" }],
+    };
+    const res = await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: changed, action: "create" }],
+    });
     expect(res.skipped).toEqual([]);
-    const [created] = await owner.query(api.drugs.search, { term: "4891234567890" });
+    const [created] = await owner.query(api.drugs.search, {
+      term: "4891234567890",
+    });
     expect(created.drugId).toBe("34");
   });
 
   it("merges two clashing barcodes with the same form into one form", async () => {
     const { owner } = await setup();
     const owners = [
-      { ...fileDrug, drugId: "50", packages: [{ ...fileDrug.packages[0], barcode: "1111111111116" }] },
-      { ...fileDrug, drugId: "51", packages: [{ ...fileDrug.packages[0], barcode: "2222222222222" }] },
+      {
+        ...fileDrug,
+        drugId: "50",
+        packages: [{ ...fileDrug.packages[0], barcode: "1111111111116" }],
+      },
+      {
+        ...fileDrug,
+        drugId: "51",
+        packages: [{ ...fileDrug.packages[0], barcode: "2222222222222" }],
+      },
     ];
-    await owner.mutation(api.drugImport.applyBatch, { items: owners.map((drug) => ({ drug, action: "create" as const })) });
-    const both = { ...fileDrug, drugId: "52", packages: owners.map((o) => o.packages[0]) };
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: both, action: "create" }] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: owners.map((drug) => ({ drug, action: "create" as const })),
+    });
+    const both = {
+      ...fileDrug,
+      drugId: "52",
+      packages: owners.map((o) => o.packages[0]),
+    };
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: both, action: "create" }],
+    });
     const [created] = await owner.query(api.drugs.search, { term: "52" });
     expect(created.packages).toHaveLength(1);
     expect(created.packages[0].barcode).toBe("");
@@ -156,7 +263,10 @@ describe("drug import", () => {
     await owner.mutation(api.drugImport.applyBatch, {
       items: [
         { drug: { ...fileDrug, lasa: true }, action: "create" },
-        { drug: { ...fileDrug, drugId: "40", name: "Amiodarone", packages: [] }, action: "create" },
+        {
+          drug: { ...fileDrug, drugId: "40", name: "Amiodarone", packages: [] },
+          action: "create",
+        },
       ],
     });
     const [marked] = await owner.query(api.drugs.search, { term: "32" });
@@ -184,12 +294,18 @@ describe("drug import", () => {
         stock: p.stock,
       })),
     });
-    const [same] = await owner.query(api.drugImport.checkBatch, { drugs: [fileDrug] });
+    const [same] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [fileDrug],
+    });
     expect(same.status).toBe("same");
 
-    const [check] = await owner.query(api.drugImport.checkBatch, { drugs: [{ ...fileDrug, lasa: false }] });
+    const [check] = await owner.query(api.drugImport.checkBatch, {
+      drugs: [{ ...fileDrug, lasa: false }],
+    });
     expect(check.status).toBe("conflict");
-    await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: { ...fileDrug, lasa: false }, action: "notes" }] });
+    await owner.mutation(api.drugImport.applyBatch, {
+      items: [{ drug: { ...fileDrug, lasa: false }, action: "notes" }],
+    });
     const after = await owner.query(api.drugs.get, { id: marked._id });
     expect(after?.lasa).toBeUndefined();
     expect(after?.lookAlikes).toEqual([]);

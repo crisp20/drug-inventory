@@ -1,18 +1,12 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import {
-  getSignedInUser,
-  isOwnerEmail,
-  requireActiveUser,
-  requireAdmin,
-} from "./lib/access";
+import { getSignedInUser, requireActiveUser, requireAdmin } from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
 import {
   isValidInitials,
   MAX_INITIALS_LENGTH,
   normalizeInitials,
 } from "./lib/initials";
-import { userRole, userStatus } from "./schema/users";
 
 export const updateCurrentUser = mutation({
   args: {},
@@ -24,35 +18,18 @@ export const updateCurrentUser = mutation({
         message: "User not logged in",
       });
     }
-    const isOwner = isOwnerEmail(identity.email);
-
     const user = await ctx.db
       .query("users")
       .withIndex("by_token", (q) =>
         q.eq("tokenIdentifier", identity.tokenIdentifier),
       )
       .unique();
-    if (user !== null) {
-      if (isOwner && (user.role !== "admin" || user.status !== "active")) {
-        await ctx.db.patch("users", user._id, {
-          role: "admin",
-          status: "active",
-        });
-      } else if (!user.status || !user.role) {
-        await ctx.db.patch("users", user._id, {
-          role: user.role ?? "staff",
-          status: user.status ?? "pending",
-        });
-      }
-      return user._id;
-    }
-    // New people wait for admin approval, except the owner
+    if (user !== null) return user._id;
+
     const userId = await ctx.db.insert("users", {
       name: identity.name,
       email: identity.email,
       tokenIdentifier: identity.tokenIdentifier,
-      role: isOwner ? "admin" : "staff",
-      status: isOwner ? "active" : "pending",
     });
     const name = identity.name ?? identity.email ?? "Unknown user";
     await logActivity(
@@ -61,7 +38,7 @@ export const updateCurrentUser = mutation({
       {
         category: "user",
         action: "Signed up",
-        summary: `${name} signed up${isOwner ? "" : " (waiting for approval)"}`,
+        summary: `${name} signed in`,
         detail: identity.email,
       },
     );
@@ -76,14 +53,18 @@ export const getCurrentUser = query({
   },
 });
 
-export const listByStatus = query({
-  args: { status: userStatus },
-  handler: async (ctx, args) => {
+export const listAll = query({
+  args: {},
+  handler: async (ctx) => {
     await requireAdmin(ctx);
     return await ctx.db
       .query("users")
-      .withIndex("by_status", (q) => q.eq("status", args.status))
-      .take(200);
+      .take(200)
+      .then((users) =>
+        users.sort((a, b) =>
+          (a.name ?? a.email ?? "").localeCompare(b.name ?? b.email ?? ""),
+        ),
+      );
   },
 });
 
@@ -92,68 +73,9 @@ export const listPeople = query({
   args: {},
   handler: async (ctx) => {
     await requireActiveUser(ctx);
-    const [active, disabled] = await Promise.all(
-      (["active", "disabled"] as const).map((status) =>
-        ctx.db
-          .query("users")
-          .withIndex("by_status", (q) => q.eq("status", status))
-          .take(200),
-      ),
-    );
-    return [...active, ...disabled]
+    return (await ctx.db.query("users").take(200))
       .map((u) => ({ _id: u._id, name: u.name ?? u.email ?? "Unknown user" }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  },
-});
-
-export const updateAccess = mutation({
-  args: { userId: v.id("users"), role: userRole, status: userStatus },
-  handler: async (ctx, args) => {
-    const admin = await requireAdmin(ctx);
-    const target = await ctx.db.get("users", args.userId);
-    if (!target) {
-      throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
-    }
-    if (isOwnerEmail(target.email)) {
-      throw new ConvexError({
-        code: "FORBIDDEN",
-        message: "The owner account cannot be changed",
-      });
-    }
-    if (target._id === admin._id) {
-      throw new ConvexError({
-        code: "BAD_REQUEST",
-        message: "You cannot change your own access",
-      });
-    }
-    await ctx.db.patch("users", args.userId, {
-      role: args.role,
-      status: args.status,
-    });
-    const changes = [
-      { field: "Role", before: target.role ?? "staff", after: args.role },
-      {
-        field: "Status",
-        before: target.status ?? "pending",
-        after: args.status,
-      },
-    ].filter((c) => c.before !== c.after);
-    if (changes.length > 0) {
-      const approved = target.status === "pending" && args.status === "active";
-      const action = approved
-        ? "Approved"
-        : args.status === "disabled" && target.status !== "disabled"
-          ? "Disabled"
-          : "Access changed";
-      await logActivity(ctx, actorOf(admin), {
-        category: "user",
-        action,
-        summary: `${action}: ${displayName(target)}`,
-        detail: target.email,
-        changes,
-      });
-    }
-    return null;
   },
 });
 

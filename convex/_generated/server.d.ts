@@ -32,7 +32,6 @@ type Env = {
   readonly CONVEX_SITE_URL: string;
   readonly OIDC_AUTHORITY: string;
   readonly OIDC_CLIENT_ID: string;
-  readonly OWNER_EMAILS: string | undefined;
 };
 
 /**

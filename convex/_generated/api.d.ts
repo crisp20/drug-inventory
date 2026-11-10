@@ -22,6 +22,7 @@ import type * as lib_drugs from "../lib/drugs.js";
 import type * as lib_expiry from "../lib/expiry.js";
 import type * as lib_gs1 from "../lib/gs1.js";
 import type * as lib_initials from "../lib/initials.js";
+import type * as lib_keycloakRoles from "../lib/keycloakRoles.js";
 import type * as lib_lasa from "../lib/lasa.js";
 import type * as lib_period from "../lib/period.js";
 import type * as lib_settings from "../lib/settings.js";
@@ -56,6 +57,7 @@ declare const fullApi: ApiFromModules<{
   "lib/expiry": typeof lib_expiry;
   "lib/gs1": typeof lib_gs1;
   "lib/initials": typeof lib_initials;
+  "lib/keycloakRoles": typeof lib_keycloakRoles;
   "lib/lasa": typeof lib_lasa;
   "lib/period": typeof lib_period;
   "lib/settings": typeof lib_settings;

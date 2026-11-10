@@ -8,11 +8,13 @@ const OWNER = {
   tokenIdentifier: "iss|owner",
   email: "hubert@activecaregroup.com",
   name: "Hubert",
+  drug_inventory_roles: ["access", "admin"],
 };
 const STAFF = {
   tokenIdentifier: "iss|staff",
   email: "staff@example.com",
   name: "Sam",
+  drug_inventory_roles: ["access"],
 };
 
 const drug = {
@@ -33,25 +35,25 @@ const drug = {
   ],
 };
 
-async function setup({ approveStaff = true } = {}) {
+async function setup() {
   const t = convexTest(schema, modules);
   const owner = t.withIdentity(OWNER);
   const staff = t.withIdentity(STAFF);
   await owner.mutation(api.users.updateCurrentUser, {});
   await staff.mutation(api.users.updateCurrentUser, {});
-  if (approveStaff) {
-    const [pending] = await owner.query(api.users.listByStatus, {
-      status: "pending",
-    });
-    await owner.mutation(api.users.updateAccess, {
-      userId: pending._id,
-      role: "staff",
-      status: "active",
-    });
-  }
+  const staffUser = (await owner.query(api.users.listAll, {})).find(
+    (user) => user.name === STAFF.name,
+  )!;
   const drugRef = await owner.mutation(api.drugs.create, drug);
   const created = await owner.query(api.drugs.get, { id: drugRef });
-  return { owner, staff, packageId: created!.packages[0]._id, drugRef };
+  return {
+    owner,
+    staff,
+    t,
+    staffId: staffUser._id,
+    packageId: created!.packages[0]._id,
+    drugRef,
+  };
 }
 
 const entry = { quantity: 4, notes: " Invoice 88 " };
@@ -87,11 +89,16 @@ describe("Stock In", () => {
     });
   });
 
-  it("blocks users who are not approved", async () => {
-    const { staff, packageId } = await setup({ approveStaff: false });
+  it("blocks users without the Keycloak access role", async () => {
+    const { t, packageId } = await setup();
+    const noAccess = t.withIdentity({
+      tokenIdentifier: "iss|no-access",
+      email: "no-access@example.com",
+    });
+    await noAccess.mutation(api.users.updateCurrentUser, {});
     await expect(
-      staff.mutation(api.stock.recordIn, { packageId, ...entry }),
-    ).rejects.toThrow(/approval/);
+      noAccess.mutation(api.stock.recordIn, { packageId, ...entry }),
+    ).rejects.toThrow(/access rights/);
   });
 
   it("rejects invalid quantities and leaves stock unchanged", async () => {
@@ -214,13 +221,6 @@ describe("Stock Out", () => {
     await expect(
       owner.mutation(api.stock.recordOut, { packageId, ...out, reason: "  " }),
     ).rejects.toThrow(/Reason/);
-  });
-
-  it("blocks users who are not approved", async () => {
-    const { staff, packageId } = await setup({ approveStaff: false });
-    await expect(
-      staff.mutation(api.stock.recordOut, { packageId, ...out }),
-    ).rejects.toThrow(/approval/);
   });
 });
 
@@ -509,7 +509,7 @@ describe("Stock In labels (8 box and initials)", () => {
     const { owner, staff, packageId } = await setup();
     await staff.mutation(api.stock.recordIn, { packageId, ...entry });
     const [pending] = await owner
-      .query(api.users.listByStatus, { status: "active" })
+      .query(api.users.listAll, {})
       .then((u) => u.filter((x) => x.name === "Sam"));
     await owner.mutation(api.users.setInitials, {
       userId: pending._id,
@@ -525,9 +525,9 @@ describe("Stock In labels (8 box and initials)", () => {
 
   it("only lets admins set initials, and checks them", async () => {
     const { owner, staff } = await setup();
-    const [sam] = (
-      await owner.query(api.users.listByStatus, { status: "active" })
-    ).filter((x) => x.name === "Sam");
+    const [sam] = (await owner.query(api.users.listAll, {})).filter(
+      (x) => x.name === "Sam",
+    );
     await expect(
       staff.mutation(api.users.setInitials, {
         userId: sam._id,
@@ -548,9 +548,9 @@ describe("Stock In labels (8 box and initials)", () => {
       userId: sam._id,
       initials: "",
     });
-    const [after] = (
-      await owner.query(api.users.listByStatus, { status: "active" })
-    ).filter((x) => x.name === "Sam");
+    const [after] = (await owner.query(api.users.listAll, {})).filter(
+      (x) => x.name === "Sam",
+    );
     expect(after.initials).toBeUndefined();
   });
 });

@@ -12,7 +12,7 @@ export const usersTable = defineTable({
   tokenIdentifier: v.string(),
   name: v.optional(v.string()),
   email: v.optional(v.string()),
-  // Optional so rows created before roles existed still validate; treated as staff/pending
+  // Legacy fields retained for existing rows; authorization comes from Keycloak token roles.
   role: v.optional(userRole),
   status: v.optional(userStatus),
   // Early access to canister features before they are rolled out to everyone

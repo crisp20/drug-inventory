@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import ActivityEntry from "./_components/activity-entry.tsx";
 import LogFilterBar from "./_components/log-filter-bar.tsx";
@@ -30,8 +31,9 @@ const PAGE = 50;
 
 export default function LogPage() {
   const me = useCurrentUser();
+  const { isAdmin } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
+  if (!me || !isAdmin) return <Navigate to="/" replace />;
   return <LogView />;
 }
 

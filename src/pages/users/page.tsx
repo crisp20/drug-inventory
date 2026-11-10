@@ -1,12 +1,10 @@
-import { useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { Navigate } from "react-router-dom";
-import { Pill, UserCheck, UserX, Users } from "lucide-react";
+import { Pill, Users } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import type { Doc } from "@/convex/_generated/dataModel.d.ts";
 import { Badge } from "@/components/ui/badge.tsx";
-import { Button } from "@/components/ui/button.tsx";
 import {
   Empty,
   EmptyDescription,
@@ -14,24 +12,13 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty.tsx";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { useConfirm } from "@/hooks/use-confirm.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
-
-type Status = "pending" | "active" | "disabled";
-type Role = "admin" | "staff";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -71,41 +58,6 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
 }
 
 function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
-  const updateAccess = useMutation(api.users.updateAccess);
-  const role: Role = user.role ?? "staff";
-
-  const save = async (next: { role?: Role; status?: Status }, done: string) => {
-    try {
-      await updateAccess({
-        userId: user._id,
-        role: next.role ?? role,
-        status: next.status ?? user.status ?? "pending",
-      });
-      toast.success(done);
-    } catch (e) {
-      toast.error(errorMessage(e, "Could not update user"));
-    }
-  };
-
-  const confirm = useConfirm();
-  const removeAccess = async () => {
-    const rejecting = user.status === "pending";
-    const ok = await confirm({
-      title: rejecting
-        ? `Reject ${user.name ?? user.email ?? "this user"}?`
-        : `Remove access for ${user.name ?? user.email ?? "this user"}?`,
-      description:
-        "They will no longer be able to use the app. You can approve them again later from the Removed tab.",
-      confirmLabel: rejecting ? "Reject" : "Remove access",
-      destructive: true,
-    });
-    if (ok)
-      await save(
-        { status: "disabled" },
-        rejecting ? "User rejected" : "Access removed",
-      );
-  };
-
   return (
     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
       {/* Name and email get their own line so the controls never squeeze them out */}
@@ -123,55 +75,15 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
         )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        {user.status === "active" && <InitialsField user={user} />}
-        {user.status === "active" && <CanisterAccessToggle user={user} />}
-        {!isSelf && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Select
-              value={role}
-              onValueChange={(v) =>
-                void save(
-                  { role: v === "admin" ? "admin" : "staff" },
-                  "Role updated",
-                )
-              }
-            >
-              <SelectTrigger className="w-28" aria-label="Role">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="staff">Staff</SelectItem>
-                <SelectItem value="admin">Admin</SelectItem>
-              </SelectContent>
-            </Select>
-            {user.status !== "active" && (
-              <Button
-                size="sm"
-                onClick={() => void save({ status: "active" }, "User approved")}
-              >
-                <UserCheck /> Approve
-              </Button>
-            )}
-            {user.status !== "disabled" && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="text-destructive"
-                onClick={() => void removeAccess()}
-              >
-                <UserX />{" "}
-                {user.status === "pending" ? "Reject" : "Remove access"}
-              </Button>
-            )}
-          </div>
-        )}
+        <InitialsField user={user} />
+        <CanisterAccessToggle user={user} />
       </div>
     </div>
   );
 }
 
-function UserList({ status, selfId }: { status: Status; selfId: string }) {
-  const users = useQuery(api.users.listByStatus, { status });
+function UserList({ selfId }: { selfId: string }) {
+  const users = useQuery(api.users.listAll, {});
   if (users === undefined) {
     return (
       <div className="space-y-3">
@@ -188,13 +100,9 @@ function UserList({ status, selfId }: { status: Status; selfId: string }) {
           <EmptyMedia variant="icon">
             <Users />
           </EmptyMedia>
-          <EmptyTitle>
-            No {status === "active" ? "active" : status} users
-          </EmptyTitle>
+          <EmptyTitle>No users yet</EmptyTitle>
           <EmptyDescription>
-            {status === "pending"
-              ? "New people appear here after they sign in for the first time."
-              : "Nobody here right now."}
+            Users appear here after they sign in for the first time.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -211,30 +119,17 @@ function UserList({ status, selfId }: { status: Status; selfId: string }) {
 
 export default function UsersPage() {
   const me = useCurrentUser();
-  const [tab, setTab] = useState<Status>("pending");
+  const { isAdmin } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || me.role !== "admin") return <Navigate to="/" replace />;
+  if (!me || !isAdmin) return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">
       <PageHeader
         title="Users"
-        description="Approve new staff and choose who can manage inventory."
+        description="Manage user-specific label initials and canister feature access. Assign access and admin roles in Keycloak."
       />
-      <Tabs
-        value={tab}
-        onValueChange={(v) =>
-          setTab(v === "active" || v === "disabled" ? v : "pending")
-        }
-        className="space-y-4"
-      >
-        <TabsList>
-          <TabsTrigger value="pending">Waiting approval</TabsTrigger>
-          <TabsTrigger value="active">Active</TabsTrigger>
-          <TabsTrigger value="disabled">Removed</TabsTrigger>
-        </TabsList>
-        <UserList status={tab} selfId={me._id} />
-      </Tabs>
+      <UserList selfId={me._id} />
     </div>
   );
 }

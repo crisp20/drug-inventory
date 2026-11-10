@@ -4,8 +4,18 @@ import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
-const OWNER = { tokenIdentifier: "iss|owner", email: "hubert@activecaregroup.com", name: "Hubert" };
-const STAFF = { tokenIdentifier: "iss|staff", email: "staff@example.com", name: "Sam" };
+const OWNER = {
+  tokenIdentifier: "iss|owner",
+  email: "hubert@activecaregroup.com",
+  name: "Hubert",
+  drug_inventory_roles: ["access", "admin"],
+};
+const STAFF = {
+  tokenIdentifier: "iss|staff",
+  email: "staff@example.com",
+  name: "Sam",
+  drug_inventory_roles: ["access"],
+};
 
 const fileDrug = {
   drugId: "32",
@@ -15,7 +25,14 @@ const fileDrug = {
   pieceName: "TABLET",
   dosageForm: "TABLET",
   row: 2,
-  packages: [{ barcode: "4046222740115", qtyPerUnit: 100, baseUnit: "Box" as const, unitCount: 1 }],
+  packages: [
+    {
+      barcode: "4046222740115",
+      qtyPerUnit: 100,
+      baseUnit: "Box" as const,
+      unitCount: 1,
+    },
+  ],
 };
 
 async function setup() {
@@ -24,8 +41,14 @@ async function setup() {
   const staff = t.withIdentity(STAFF);
   await owner.mutation(api.users.updateCurrentUser, {});
   await staff.mutation(api.users.updateCurrentUser, {});
-  await owner.mutation(api.drugImport.applyBatch, { items: [{ drug: fileDrug, action: "create" }] });
-  const store = () => t.run(async (ctx) => await ctx.storage.store(new Blob(["img"], { type: "image/jpeg" })));
+  await owner.mutation(api.drugImport.applyBatch, {
+    items: [{ drug: fileDrug, action: "create" }],
+  });
+  const store = () =>
+    t.run(
+      async (ctx) =>
+        await ctx.storage.store(new Blob(["img"], { type: "image/jpeg" })),
+    );
   const fileExists = (id: string) =>
     t.run(async (ctx) => {
       const nid = ctx.db.system.normalizeId("_storage", id);
@@ -38,19 +61,31 @@ describe("drug photos", () => {
   it("is admin only", async () => {
     const { staff, store } = await setup();
     const storageId = await store();
-    await expect(staff.query(api.drugPhotos.checkPhotos, { drugIds: ["32"] })).rejects.toThrow();
-    await expect(staff.mutation(api.drugPhotos.setPhotos, { items: [{ drugId: "32", storageId }] })).rejects.toThrow();
+    await expect(
+      staff.query(api.drugPhotos.checkPhotos, { drugIds: ["32"] }),
+    ).rejects.toThrow();
+    await expect(
+      staff.mutation(api.drugPhotos.setPhotos, {
+        items: [{ drugId: "32", storageId }],
+      }),
+    ).rejects.toThrow();
   });
 
   it("matches by Drug ID, replaces the old picture and removes unmatched uploads", async () => {
     const { owner, store, fileExists } = await setup();
-    const [found, missing] = await owner.query(api.drugPhotos.checkPhotos, { drugIds: ["32", "999"] });
+    const [found, missing] = await owner.query(api.drugPhotos.checkPhotos, {
+      drugIds: ["32", "999"],
+    });
     expect(found).toMatchObject({ found: true, hasPhoto: false });
     expect(missing.found).toBe(false);
 
     const first = await store();
-    await owner.mutation(api.drugPhotos.setPhotos, { items: [{ drugId: "32", storageId: first }] });
-    const [withPhoto] = await owner.query(api.drugPhotos.checkPhotos, { drugIds: ["32"] });
+    await owner.mutation(api.drugPhotos.setPhotos, {
+      items: [{ drugId: "32", storageId: first }],
+    });
+    const [withPhoto] = await owner.query(api.drugPhotos.checkPhotos, {
+      drugIds: ["32"],
+    });
     expect(withPhoto.hasPhoto).toBe(true);
     expect(withPhoto.photoUrl).toEqual(expect.any(String));
     const second = await store();

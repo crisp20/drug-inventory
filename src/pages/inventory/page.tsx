@@ -25,7 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import DrugSearchInput from "@/components/drug-search-input.tsx";
 import PageHeader from "@/components/page-header.tsx";
-import { useCurrentUser } from "@/hooks/use-current-user.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { useDebounce } from "@/hooks/use-debounce.ts";
 import type { DrugWithDetails } from "@/lib/drug-types.ts";
 import { errorMessage } from "@/lib/errors.ts";
@@ -197,8 +197,7 @@ function SearchResults({
 }
 
 export default function InventoryPage() {
-  const user = useCurrentUser();
-  const isAdmin = user?.role === "admin";
+  const { isAdmin } = useKeycloakRoles();
   const convex = useConvex();
   const [search, setSearch] = useState("");
   const [term] = useDebounce(search.trim(), 250);
