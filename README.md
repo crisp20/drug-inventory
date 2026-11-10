@@ -7,16 +7,16 @@ client:
 # .env.local
 VITE_OIDC_AUTHORITY=http://localhost:8080/realms/<realm>
 VITE_OIDC_CLIENT_ID=<client-id>
-VITE_OIDC_REDIRECT_URI=http://localhost:5173/auth/callback
+VITE_OIDC_REDIRECT_URI=http://localhost:5273/auth/callback
 VITE_CONVEX_URL=http://localhost:3210
 ```
 
 In Keycloak, create a public client with Standard Flow enabled and PKCE using
 `S256`. Set the client's URLs separately:
 
-- **Valid Redirect URIs:** `http://localhost:5173/auth/callback`
-- **Valid Post Logout Redirect URIs:** `http://localhost:5173`
-- **Web Origins:** `http://localhost:5173`
+- **Valid Redirect URIs:** `http://localhost:5273/auth/callback`
+- **Valid Post Logout Redirect URIs:** `http://localhost:5273`
+- **Web Origins:** `http://localhost:5273`
 
 The Keycloak ID token must contain `email` and `name`, and its `aud` claim must
 include the client ID. The app passes this ID token (not the access token) to
