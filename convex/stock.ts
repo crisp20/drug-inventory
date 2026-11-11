@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireActiveUser, requireRole } from "./lib/access";
+import { requireActiveAndHasAccess, requireRole } from "./lib/access";
 import { userInitials } from "./lib/initials";
 import { logMovement, logUndo } from "./lib/activity";
 import {
@@ -43,7 +43,7 @@ async function recordMovement(
   mismatchedScan?: string,
   labelOptions: { eight?: boolean; labels?: boolean; bagLabels?: boolean } = {},
 ) {
-  const user = await requireActiveUser(ctx);
+  const user = await requireActiveAndHasAccess(ctx);
   const input = cleanMovementInput(raw);
   const pkg = await ctx.db.get("drugPackages", packageId);
   if (!pkg)
@@ -167,7 +167,7 @@ export const recordOut = mutation({
   ) => {
     let cleanedCanister: CanisterInput | undefined;
     if (canister) {
-      const user = await requireActiveUser(ctx);
+      const user = await requireActiveAndHasAccess(ctx);
       const settings = await ctx.db.query("settings").first();
       if (!canUseCanister(user, settings?.canisterForEveryone ?? false)) {
         throw new ConvexError({
@@ -262,7 +262,7 @@ export const listMovements = query({
     ctx,
     { kind, filter, since, until, userId, reason, paginationOpts },
   ) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const table = ctx.db.query("stockMovements");
     let scoped;
     if (kind === undefined) {

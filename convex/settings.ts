@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { requireActiveUser, requireRole } from "./lib/access";
+import { requireActiveAndHasAccess, requireRole } from "./lib/access";
 import { actorOf, logActivity } from "./lib/activity";
 import {
   cleanExpiryWarningMonths,
@@ -18,7 +18,7 @@ import { KeycloakClientRole } from "./lib/keycloakRoles";
 export const get = query({
   args: {},
   handler: async (ctx) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const row = await ctx.db.query("settings").first();
     return {
       largeQuantityThreshold:

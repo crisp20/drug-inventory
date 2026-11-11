@@ -1,6 +1,6 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { getSignedInUser, requireActiveUser, requireRole } from "./lib/access";
+import { getUser, requireActiveAndHasAccess, requireRole } from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
 import {
   isValidInitials,
@@ -50,7 +50,7 @@ export const updateCurrentUser = mutation({
 export const getCurrentUser = query({
   args: {},
   handler: async (ctx) => {
-    return await getSignedInUser(ctx);
+    return await getUser(ctx);
   },
 });
 
@@ -73,7 +73,7 @@ export const listAll = query({
 export const listPeople = query({
   args: {},
   handler: async (ctx) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     return (await ctx.db.query("users").take(200))
       .map((u) => ({ _id: u._id, name: u.name ?? u.email ?? "Unknown user" }))
       .sort((a, b) => a.name.localeCompare(b.name));

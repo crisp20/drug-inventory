@@ -3,7 +3,11 @@ import type { QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 import { getKeycloakClientRoles, KeycloakClientRole } from "./keycloakRoles";
 
-export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
+/**
+ * 
+ * @returns the `User` document associated with the current authenticated account, or `null` if none are found
+ */
+export async function getUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) return null;
   return await ctx.db
@@ -12,7 +16,11 @@ export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | nul
     .unique();
 }
 
-export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
+/**
+ * Requires the account to have the `KeycloakClientRole.access` role.
+ * @returns the `User` document associated with the current authenticated account
+ */
+export async function requireActiveAndHasAccess(ctx: QueryCtx): Promise<Doc<"users">> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new ConvexError({
@@ -26,7 +34,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
       message: "Your account does not have access rights. Contact your administrator to be granted the required Keycloak role."
     });
   }
-  const user = await getSignedInUser(ctx);
+  const user = await getUser(ctx);
   if (!user) {
     throw new ConvexError({
       code: "FORBIDDEN",
@@ -36,8 +44,19 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
   return user;
 }
 
+/**
+ * Requires the account to have the `role` role.
+ * @param role the required role
+ * @returns the `User` document associated with the current authenticated account
+ */
 export async function requireRole(ctx: QueryCtx, role: KeycloakClientRole): Promise<Doc<"users">> {
-  const user = await requireActiveUser(ctx);
+  const user = await getUser(ctx);
+  if (!user) {
+    throw new ConvexError({
+      code: "FORBIDDEN",
+      message: "Your user profile is not available. Please sign in again.",
+    });
+  }
   const identity = await ctx.auth.getUserIdentity();
   if (!identity || !getKeycloakClientRoles(identity).includes(role)) {
     throw new ConvexError({

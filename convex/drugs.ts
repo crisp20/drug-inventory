@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireActiveUser, requireRole } from "./lib/access";
+import { requireActiveAndHasAccess, requireRole } from "./lib/access";
 import { actorOf, logDrugDelete, logDrugSave } from "./lib/activity";
 import { normalizeBarcode, toStoredBarcode } from "./lib/barcode";
 import {
@@ -78,7 +78,7 @@ export const generateUploadUrl = mutation({
 export const list = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const result = await ctx.db
       .query("drugs")
       .withIndex("by_name")
@@ -95,7 +95,7 @@ export const list = query({
 export const listLasa = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const result = await ctx.db
       .query("drugs")
       .withIndex("by_lasa_and_name", (q) => q.eq("lasa", true))
@@ -112,7 +112,7 @@ export const listLasa = query({
 export const listDda = query({
   args: { paginationOpts: paginationOptsValidator },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const result = await ctx.db
       .query("drugs")
       .withIndex("by_dda_and_name", (q) => q.eq("dda", true))
@@ -129,7 +129,7 @@ export const listDda = query({
 export const search = query({
   args: { term: v.string() },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const term = args.term.trim();
     if (!term) return [];
 
@@ -176,7 +176,7 @@ export const search = query({
 export const get = query({
   args: { id: v.string() },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const id = ctx.db.normalizeId("drugs", args.id);
     if (!id) return null;
     const drug = await ctx.db.get("drugs", id);
@@ -189,7 +189,7 @@ export const get = query({
 export const lasaCompare = query({
   args: { id: v.string() },
   handler: async (ctx, args) => {
-    await requireActiveUser(ctx);
+    await requireActiveAndHasAccess(ctx);
     const id = ctx.db.normalizeId("drugs", args.id);
     const drug = id ? await ctx.db.get("drugs", id) : null;
     if (!drug) return null;
