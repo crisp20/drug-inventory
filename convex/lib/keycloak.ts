@@ -1,6 +1,5 @@
 import { ConvexError } from "convex/values";
 import { env } from "../_generated/server";
-import { getKeycloakClientRoles } from "./keycloakRoles";
 import { isNumber, isRecord, isString } from "./typing";
 
 // helpers to navigate the techincal parts of the request
