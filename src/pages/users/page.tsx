@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { Navigate } from "react-router-dom";
 import { Pill, Users } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +20,8 @@ import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
 import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
+import { useEffect, useState } from "react";
+import type { RoleGroup } from "@/convex/lib/keycloak.ts";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -58,7 +60,7 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   );
 }
 
-function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
+function UserRow({ user, isSelf, roleGroups }: { user: Doc<"users">; isSelf: boolean, roleGroups: RoleGroup[] }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
       {/* Name and email get their own line so the controls never squeeze them out */}
@@ -85,6 +87,24 @@ function UserRow({ user, isSelf }: { user: Doc<"users">; isSelf: boolean }) {
 
 function UserList({ selfId }: { selfId: string }) {
   const users = useQuery(api.users.listAll, {});
+  const getManagedGroupsAndMembers = useAction(api.keycloak.getManagedGroupsAndMembers);
+
+  const [roleGroups, setRoleGroups] = useState<RoleGroup[]>([]);
+  const [roleLoadError, setRoleLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // initialize possible roles
+    getManagedGroupsAndMembers()
+      .then(({ roleGroups }) => {
+        if (roleGroups) {
+          setRoleGroups(roleGroups);
+        }
+      })
+      .catch((error: unknown) => {
+        setRoleLoadError(errorMessage(error, "Could not load Keycloak role assignments"));
+      });
+  }, [])
+
   if (users === undefined) {
     return (
       <div className="space-y-3">
@@ -109,12 +129,20 @@ function UserList({ selfId }: { selfId: string }) {
       </Empty>
     );
   }
+
   return (
-    <div className="space-y-3">
-      {users.map((u) => (
-        <UserRow key={u._id} user={u} isSelf={u._id === selfId} />
-      ))}
-    </div>
+    <>
+      {roleLoadError &&
+        <p role="alert" className="mb-3 text-sm text-destructive">
+          {roleLoadError}
+        </p>
+      }
+      <div className="space-y-3">
+        {users.map((u) => (
+          <UserRow key={u._id} user={u} isSelf={u._id === selfId} roleGroups={roleGroups} />
+        ))}
+      </div>
+    </>
   );
 }
 

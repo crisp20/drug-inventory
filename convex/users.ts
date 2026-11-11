@@ -29,6 +29,7 @@ export const updateCurrentUser = mutation({
 
     const userId = await ctx.db.insert("users", {
       name: identity.name,
+      keycloakUserId: identity.subject,
       email: identity.email,
       tokenIdentifier: identity.tokenIdentifier,
     });

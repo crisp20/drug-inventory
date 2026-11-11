@@ -1,6 +1,4 @@
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord, isString } from "./typing";
 
 export function getKeycloakClientRoles(claims: unknown): string[] {
   const key = 'clientRoles';
@@ -10,7 +8,7 @@ export function getKeycloakClientRoles(claims: unknown): string[] {
   if (!Array.isArray(claims[key])) {
     return [];
   }
-  const uniqueRoles = [...new Set(claims[key].filter((role): role is string => typeof role === 'string'))];
+  const uniqueRoles = [...new Set(claims[key].filter(isString))];
   return uniqueRoles;
 }
 

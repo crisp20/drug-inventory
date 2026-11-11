@@ -10,6 +10,7 @@ export const userStatus = v.union(
 
 export const usersTable = defineTable({
   tokenIdentifier: v.string(),
+  keycloakUserId: v.string(),
   name: v.optional(v.string()),
   email: v.optional(v.string()),
   // Legacy fields retained for existing rows; authorization comes from Keycloak token roles.
