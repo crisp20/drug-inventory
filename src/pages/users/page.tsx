@@ -1,6 +1,6 @@
 import { useAction, useMutation, useQuery } from "convex/react";
 import { Navigate } from "react-router-dom";
-import { Pill, Users } from "lucide-react";
+import { ChevronDown, Crown, KeyRound, Pill, Users } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/convex/_generated/api.js";
 import type { Doc } from "@/convex/_generated/dataModel.d.ts";
@@ -19,9 +19,18 @@ import { useCurrentUser } from "@/hooks/use-current-user.ts";
 import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
-import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
+import { authorityRank, KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 import { useEffect, useState } from "react";
 import type { RoleGroup } from "@/convex/lib/keycloak.ts";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu.tsx";
+import { Button } from "@/components/ui/button.tsx";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -60,7 +69,71 @@ function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   );
 }
 
-function UserRow({ user, isSelf, roleGroups }: { user: Doc<"users">; isSelf: boolean, roleGroups: RoleGroup[] }) {
+function RoleGroupMenu({
+  user,
+  roleGroups,
+  isSelf,
+  selfAuthorityRank
+}: {
+  user: Doc<"users">;
+  roleGroups: RoleGroup[];
+  isSelf: boolean;
+  selfAuthorityRank: number;
+}) {
+
+  const userAuthorityRank: number = roleGroups.filter(({ members }) => members.includes(user.keycloakUserId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={roleGroups.length === 0}
+          aria-label={`Keycloak group roles for ${user.name ?? user.email ?? "user"}`}
+        >
+          <KeyRound />
+          Role Groups
+          <ChevronDown />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuLabel>Role Groups</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {roleGroups.map((group) => (
+          <DropdownMenuCheckboxItem
+            key={group.id}
+            checked={group.members.includes(user.keycloakUserId)}
+            disabled={
+              // this user has more authority than self, not allowed to modify
+              selfAuthorityRank <= userAuthorityRank ||
+              // this user is self, not allowed to modify
+              isSelf ||
+              // this role has more authority than self, not allowed to modify
+              selfAuthorityRank <= group.clientRoles.map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
+            }
+            title={group.path}
+            aria-label={`${group.path}: ${group.clientRoles.join(", ") || "no client roles"}`}
+          >
+            <span>{group.clientRoles.join(", ") || "No client roles"}</span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function UserRow({
+  user,
+  isSelf,
+  selfAuthorityRank,
+  roleGroups,
+}: {
+  user: Doc<"users">;
+  isSelf: boolean;
+  selfAuthorityRank: number
+  roleGroups: RoleGroup[];
+}) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
       {/* Name and email get their own line so the controls never squeeze them out */}
@@ -79,31 +152,39 @@ function UserRow({ user, isSelf, roleGroups }: { user: Doc<"users">; isSelf: boo
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <InitialsField user={user} />
+        <RoleGroupMenu user={user} roleGroups={roleGroups} isSelf={isSelf} selfAuthorityRank={selfAuthorityRank} />
         <CanisterAccessToggle user={user} />
       </div>
     </div>
   );
 }
 
-function UserList({ selfId }: { selfId: string }) {
+function UserList({ userKeycloakId }: { userKeycloakId: string }) {
   const users = useQuery(api.users.listAll, {});
-  const getManagedGroupsAndMembers = useAction(api.keycloak.getManagedGroupsAndMembers);
+  const getManagedGroupsAndMembers = useAction(
+    api.keycloak.getManagedGroupsAndMembers,
+  );
 
   const [roleGroups, setRoleGroups] = useState<RoleGroup[]>([]);
   const [roleLoadError, setRoleLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    // initialize possible roles
+    let active = true;
     getManagedGroupsAndMembers()
       .then(({ roleGroups }) => {
-        if (roleGroups) {
-          setRoleGroups(roleGroups);
-        }
+        if (active) setRoleGroups(roleGroups);
       })
       .catch((error: unknown) => {
-        setRoleLoadError(errorMessage(error, "Could not load Keycloak role assignments"));
+        if (active) {
+          setRoleLoadError(
+            errorMessage(error, "Could not load Keycloak role assignments"),
+          );
+        }
       });
-  }, [])
+    return () => {
+      active = false;
+    };
+  }, [getManagedGroupsAndMembers]);
 
   if (users === undefined) {
     return (
@@ -132,14 +213,20 @@ function UserList({ selfId }: { selfId: string }) {
 
   return (
     <>
-      {roleLoadError &&
+      {roleLoadError && (
         <p role="alert" className="mb-3 text-sm text-destructive">
           {roleLoadError}
         </p>
-      }
+      )}
       <div className="space-y-3">
         {users.map((u) => (
-          <UserRow key={u._id} user={u} isSelf={u._id === selfId} roleGroups={roleGroups} />
+          <UserRow
+            key={u._id}
+            user={u}
+            isSelf={u.keycloakUserId == userKeycloakId}
+            selfAuthorityRank={roleGroups.filter(({ members }) => members.includes(userKeycloakId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)}
+            roleGroups={roleGroups}
+          />
         ))}
       </div>
     </>
@@ -150,7 +237,8 @@ export default function UsersPage() {
   const me = useCurrentUser();
   const { hasRole } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || !hasRole(KeycloakClientRole.users)) return <Navigate to="/" replace />;
+  if (!me || !hasRole(KeycloakClientRole.users))
+    return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">
@@ -158,7 +246,7 @@ export default function UsersPage() {
         title="Users"
         description="Manage user-specific label initials and canister feature access. Assign access and admin roles in Keycloak."
       />
-      <UserList selfId={me._id} />
+      <UserList userKeycloakId={me.keycloakUserId} />
     </div>
   );
 }

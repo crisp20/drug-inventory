@@ -21,3 +21,13 @@ export const enum KeycloakClientRole {
   users = 'users',
   inventory_manage = 'inventory_manage',
 }
+
+export function authorityRank(role: string): number {
+  if (role == `${KeycloakClientRole.admin}`) {
+    return 2;
+  }
+  if (role == `${KeycloakClientRole.users}`) {
+    return 1;
+  }
+  return 0;
+}
