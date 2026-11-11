@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireActiveUser, requireRole, RoleCatelog } from "./lib/access";
+import { requireActiveUser, requireRole } from "./lib/access";
 import { userInitials } from "./lib/initials";
 import { logMovement, logUndo } from "./lib/activity";
 import {
@@ -23,6 +23,7 @@ import {
   type MovementKind,
 } from "./lib/stock";
 import { movementKind } from "./schema/stock";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 const movementArgs = {
   packageId: v.id("drugPackages"),
@@ -198,7 +199,7 @@ export const recordOut = mutation({
 export const undoMovement = mutation({
   args: { movementId: v.id("stockMovements"), reason: v.string() },
   handler: async (ctx, { movementId, reason }) => {
-    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
+    const admin = await requireRole(ctx, KeycloakClientRole.inventory_manage);
     const cleaned = cleanReason(reason);
     const movement = await ctx.db.get("stockMovements", movementId);
     if (!movement)

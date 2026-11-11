@@ -1,12 +1,13 @@
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { getSignedInUser, requireActiveUser, requireRole, RoleCatelog } from "./lib/access";
+import { getSignedInUser, requireActiveUser, requireRole } from "./lib/access";
 import { actorOf, displayName, logActivity } from "./lib/activity";
 import {
   isValidInitials,
   MAX_INITIALS_LENGTH,
   normalizeInitials,
 } from "./lib/initials";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 export const updateCurrentUser = mutation({
   args: {},
@@ -56,7 +57,7 @@ export const getCurrentUser = query({
 export const listAll = query({
   args: {},
   handler: async (ctx) => {
-    await requireRole(ctx, RoleCatelog.users);
+    await requireRole(ctx, KeycloakClientRole.users);
     return await ctx.db
       .query("users")
       .take(200)
@@ -83,7 +84,7 @@ export const listPeople = query({
 export const setInitials = mutation({
   args: { userId: v.id("users"), initials: v.string() },
   handler: async (ctx, { userId, initials }) => {
-    const admin = await requireRole(ctx, RoleCatelog.users);
+    const admin = await requireRole(ctx, KeycloakClientRole.users);
     const target = await ctx.db.get("users", userId);
     if (!target) {
       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });
@@ -119,7 +120,7 @@ export const setInitials = mutation({
 export const setCanisterAccess = mutation({
   args: { userId: v.id("users"), enabled: v.boolean() },
   handler: async (ctx, { userId, enabled }) => {
-    const admin = await requireRole(ctx, RoleCatelog.users);
+    const admin = await requireRole(ctx, KeycloakClientRole.users);
     const target = await ctx.db.get("users", userId);
     if (!target) {
       throw new ConvexError({ code: "NOT_FOUND", message: "User not found" });

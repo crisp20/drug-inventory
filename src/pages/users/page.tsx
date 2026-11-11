@@ -16,9 +16,10 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Switch } from "@/components/ui/switch.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -121,7 +122,7 @@ export default function UsersPage() {
   const me = useCurrentUser();
   const { hasRole } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || !hasRole(RoleCatelog.users)) return <Navigate to="/" replace />;
+  if (!me || !hasRole(KeycloakClientRole.users)) return <Navigate to="/" replace />;
 
   return (
     <div className="mx-auto max-w-4xl p-4 md:p-8">

@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import { SignInButton } from "@/components/ui/signin.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { useUnsavedChangesApi } from "@/hooks/use-unsaved-changes.ts";
 import { cn } from "@/lib/utils.ts";
 import {
@@ -26,22 +26,23 @@ import {
 import BrandLogo from "./brand-logo.tsx";
 import RefreshReminder from "./refresh-reminder.tsx";
 import { RootErrorBoundary } from "./root-error-boundary.tsx";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 type NavItem = {
   label: string;
   icon: LucideIcon;
   to?: string;
-  requires?: string;
+  requires?: KeycloakClientRole;
 };
 
 const NAV: NavItem[] = [
   { label: "Inventory", icon: Boxes, to: "/" },
   { label: "Stock In", icon: ArrowDownToLine, to: "/stock-in" },
   { label: "Stock Out", icon: ArrowUpFromLine, to: "/stock-out" },
-  { label: "Users", icon: Users, to: "/users", requires: RoleCatelog.users },
-  { label: "Log", icon: ScrollText, to: "/log", requires: RoleCatelog.logs },
-  { label: "Settings", icon: Settings, to: "/settings", requires: RoleCatelog.settings },
-  { label: "Changes", icon: History, to: "/changes", requires: RoleCatelog.changes },
+  { label: "Users", icon: Users, to: "/users", requires: KeycloakClientRole.users },
+  { label: "Log", icon: ScrollText, to: "/log", requires: KeycloakClientRole.logs },
+  { label: "Settings", icon: Settings, to: "/settings", requires: KeycloakClientRole.settings },
+  { label: "Changes", icon: History, to: "/changes", requires: KeycloakClientRole.changes },
 ];
 
 function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
@@ -101,7 +102,7 @@ function NavEntry({ item, compact }: { item: NavItem; compact?: boolean }) {
 function Shell() {
   const user = useCurrentUser();
   const { roles, hasRole } = useKeycloakRoles();
-  if (!hasRole(RoleCatelog.access)) return <AccessRequiredScreen />;
+  if (!hasRole(KeycloakClientRole.access)) return <AccessRequiredScreen />;
   if (user === undefined) return <FullPageSkeleton />;
   if (!user) return <ProfileUnavailableScreen />;
   const items = NAV.filter(({ requires }) => !requires || hasRole(requires));
@@ -123,7 +124,7 @@ function Shell() {
             </div>
             <div className="mt-1 flex flex-wrap gap-1">
               {roles
-                .filter((role) => role !== RoleCatelog.access)
+                .filter((role) => role !== KeycloakClientRole.access)
                 .map((role) => (
                   <span
                     key={role}

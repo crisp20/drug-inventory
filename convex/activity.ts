@@ -2,10 +2,11 @@ import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { internalMutation, query } from "./_generated/server";
-import { requireRole, RoleCatelog } from "./lib/access";
+import { requireRole } from "./lib/access";
 import { logMovement, logUndo } from "./lib/activity";
 import { withinPeriod } from "./lib/period";
 import { activityCategory } from "./schema/activity";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 // Admin-only full activity log, newest first.
 // Medicine, then type, use an index; the rest is filtered before paginating.
@@ -22,7 +23,7 @@ export const list = query({
     ctx,
     { category, drugId, userId, since, until, paginationOpts },
   ) => {
-    await requireRole(ctx,RoleCatelog.logs);
+    await requireRole(ctx,KeycloakClientRole.logs);
     const table = ctx.db.query("activityLog");
     const scoped = drugId
       ? table.withIndex("by_drug_and_occurredAt", (q) =>

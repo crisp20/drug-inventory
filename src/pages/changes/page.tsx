@@ -7,9 +7,10 @@ import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import DiffDialog from "./_components/diff-dialog.tsx";
 import { CHANGE_ENTRIES, hasDiff } from "./_lib/changes.ts";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 // A database change is anything other than "None..." under the Database heading
 function changesDatabase(body: string): boolean {
@@ -32,7 +33,7 @@ export default function ChangesPage() {
   }, [search]);
 
   if (me === undefined) return null;
-  if (!me || !hasRole(RoleCatelog.changes)) return <Navigate to="/" replace />;
+  if (!me || !hasRole(KeycloakClientRole.changes)) return <Navigate to="/" replace />;
   const openTitle = CHANGE_ENTRIES.find((e) => e.version === open)?.title ?? "";
 
   return (

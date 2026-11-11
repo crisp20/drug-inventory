@@ -2,7 +2,7 @@ import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
-import { requireActiveUser, requireRole, RoleCatelog } from "./lib/access";
+import { requireActiveUser, requireRole } from "./lib/access";
 import { actorOf, logDrugDelete, logDrugSave } from "./lib/activity";
 import { normalizeBarcode, toStoredBarcode } from "./lib/barcode";
 import {
@@ -22,6 +22,7 @@ import {
 } from "./lib/drugs";
 import { baseUnit } from "./schema/drugs";
 import { getLookAlikes, setLookAlikes } from "./lib/lasa";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 const MAX_SEARCH_WORDS = 5;
 const SEARCH_POOL = 150;
@@ -69,7 +70,7 @@ function packageFields(p: PackageInput) {
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
-    await requireRole(ctx, RoleCatelog.inventory_manage);
+    await requireRole(ctx, KeycloakClientRole.inventory_manage);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -204,7 +205,7 @@ export const lasaCompare = query({
 export const create = mutation({
   args: drugArgs,
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
+    const admin = await requireRole(ctx, KeycloakClientRole.inventory_manage);
     const input = cleanDrugInput(args);
     await assertDrugIdFree(ctx, input.drugId);
     await assertBarcodesFree(ctx, input.packages);
@@ -242,7 +243,7 @@ export const create = mutation({
 export const update = mutation({
   args: { id: v.id("drugs"), ...drugArgs },
   handler: async (ctx, { id, lookAlikeIds, ...rest }) => {
-    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
+    const admin = await requireRole(ctx, KeycloakClientRole.inventory_manage);
     const drug = await ctx.db.get("drugs", id);
     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
     const input = cleanDrugInput(rest);
@@ -297,7 +298,7 @@ export const update = mutation({
 export const remove = mutation({
   args: { id: v.id("drugs") },
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
+    const admin = await requireRole(ctx, KeycloakClientRole.inventory_manage);
     const drug = await ctx.db.get("drugs", args.id);
     if (!drug) throw new ConvexError({ code: "NOT_FOUND", message: "Drug not found" });
     await logDrugDelete(ctx, actorOf(admin), drug, await getPackages(ctx, drug._id), "form");

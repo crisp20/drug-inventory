@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-import { requireActiveUser, requireRole, RoleCatelog } from "./lib/access";
+import { requireActiveUser, requireRole } from "./lib/access";
 import { actorOf, logActivity } from "./lib/activity";
 import {
   cleanExpiryWarningMonths,
@@ -12,6 +12,7 @@ import {
   DEFAULT_IDLE_TIMEOUT_MINUTES,
   DEFAULT_LARGE_QUANTITY_THRESHOLD,
 } from "./lib/settings";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 // Current settings, with defaults filled in. Any approved user can read them.
 export const get = query({
@@ -37,7 +38,7 @@ export const get = query({
 export const setCanisterRollout = mutation({
   args: { canisterForEveryone: v.boolean() },
   handler: async (ctx, { canisterForEveryone }) => {
-    const admin = await requireRole(ctx, RoleCatelog.settings);
+    const admin = await requireRole(ctx, KeycloakClientRole.settings);
     const row = await ctx.db.query("settings").first();
     const before = row?.canisterForEveryone ?? false;
     if (before === canisterForEveryone) return null;
@@ -75,7 +76,7 @@ export const setCanisterRollout = mutation({
 export const setExpiryWarning = mutation({
   args: { expiryWarningMonths: v.number() },
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.settings);
+    const admin = await requireRole(ctx, KeycloakClientRole.settings);
     const months = cleanExpiryWarningMonths(args.expiryWarningMonths);
     const row = await ctx.db.query("settings").first();
     const before = row?.expiryWarningMonths ?? DEFAULT_EXPIRY_WARNING_MONTHS;
@@ -114,7 +115,7 @@ export const setExpiryWarning = mutation({
 export const setIdleTimeout = mutation({
   args: { idleTimeoutMinutes: v.number() },
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.settings);
+    const admin = await requireRole(ctx, KeycloakClientRole.settings);
     const minutes = cleanIdleTimeoutMinutes(args.idleTimeoutMinutes);
     const row = await ctx.db.query("settings").first();
     const before = row?.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES;
@@ -146,7 +147,7 @@ export const setIdleTimeout = mutation({
 export const update = mutation({
   args: { largeQuantityThreshold: v.number() },
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.settings);
+    const admin = await requireRole(ctx, KeycloakClientRole.settings);
     const fields = {
       largeQuantityThreshold: cleanLargeQuantityThreshold(
         args.largeQuantityThreshold,

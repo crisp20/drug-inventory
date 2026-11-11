@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import PageHeader from "@/components/page-header.tsx";
 import { useCurrentUser } from "@/hooks/use-current-user.ts";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import ActivityEntry from "./_components/activity-entry.tsx";
 import LogFilterBar from "./_components/log-filter-bar.tsx";
@@ -26,6 +26,7 @@ import {
   MAX_EXPORT_ROWS,
 } from "./_lib/export-log.ts";
 import { useLogFilters, type LogQueryArgs } from "./_lib/log-filters.ts";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 const PAGE = 50;
 
@@ -33,7 +34,7 @@ export default function LogPage() {
   const me = useCurrentUser();
   const { hasRole } = useKeycloakRoles();
   if (me === undefined) return null;
-  if (!me || !hasRole(RoleCatelog.logs)) return <Navigate to="/" replace />;
+  if (!me || !hasRole(KeycloakClientRole.logs)) return <Navigate to="/" replace />;
   return <LogView />;
 }
 

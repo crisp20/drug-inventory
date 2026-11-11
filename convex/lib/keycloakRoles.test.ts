@@ -1,39 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { keycloakRolesFromClaims } from "./keycloakRoles";
+import { getKeycloakClientRoles, KeycloakClientRole } from "./keycloakRoles";
 
-describe("keycloakRolesFromClaims", () => {
+describe("getKeycloakClientRoles", () => {
   it("reads the configured custom claim", () => {
     expect(
-      keycloakRolesFromClaims({ drug_inventory_roles: ["access", "admin"] }),
-    ).toEqual(["access", "admin"]);
+      getKeycloakClientRoles({
+        resource_access: {
+          'drug-inventory': { roles: [KeycloakClientRole.access, KeycloakClientRole.admin] }
+        }
+      }),
+    ).toEqual([KeycloakClientRole.access, KeycloakClientRole.admin]);
   });
 
   it("reads client roles from the standard Keycloak claim", () => {
     expect(
-      keycloakRolesFromClaims({
+      getKeycloakClientRoles({
         resource_access: {
-          "drug-inventory": { roles: ["access", "admin"] },
+          "drug-inventory": { roles: [KeycloakClientRole.access, KeycloakClientRole.admin] },
         },
       }),
-    ).toEqual(["access", "admin"]);
+    ).toEqual([KeycloakClientRole.access, KeycloakClientRole.admin]);
   });
 
   it("combines, deduplicates, and filters malformed role values", () => {
     expect(
-      keycloakRolesFromClaims({
-        drug_inventory_roles: ["access", 1],
+      getKeycloakClientRoles({
         resource_access: {
-          "drug-inventory": { roles: ["access", "admin"] },
+          "drug-inventory": { roles: [KeycloakClientRole.access, KeycloakClientRole.admin, KeycloakClientRole.access, 1] },
         },
       }),
-    ).toEqual(["access", "admin"]);
+    ).toEqual([KeycloakClientRole.access, KeycloakClientRole.admin]);
   });
 
   it("returns no roles for malformed or unrelated claims", () => {
-    expect(keycloakRolesFromClaims(null)).toEqual([]);
-    expect(keycloakRolesFromClaims({ drug_inventory_roles: "admin" })).toEqual(
+    expect(getKeycloakClientRoles(null)).toEqual([]);
+    expect(
+      getKeycloakClientRoles({
+        resource_access: {
+          "drug-inventory": { roles: KeycloakClientRole.access },
+        },
+      })
+    ).toEqual(
       [],
     );
-    expect(keycloakRolesFromClaims({})).toEqual([]);
+    expect(getKeycloakClientRoles({})).toEqual([]);
   });
 });

@@ -25,7 +25,7 @@ import { Skeleton } from "@/components/ui/skeleton.tsx";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import DrugSearchInput from "@/components/drug-search-input.tsx";
 import PageHeader from "@/components/page-header.tsx";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { useDebounce } from "@/hooks/use-debounce.ts";
 import type { DrugWithDetails } from "@/lib/drug-types.ts";
 import { errorMessage } from "@/lib/errors.ts";
@@ -36,6 +36,7 @@ import DrugRow from "./_components/drug-row.tsx";
 import ImportDialog from "./_components/import-dialog.tsx";
 import PhotoImportDialog from "./_components/photo-import-dialog.tsx";
 import { downloadDrugsCsv } from "./_lib/export-drugs.ts";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 // Which marked drugs to show; one at a time so each list can use its own index
 type MarkFilter = "all" | "lasa" | "dda";
@@ -245,7 +246,7 @@ export default function InventoryPage() {
         title="Inventory"
         description="Every drug, barcode and package form with its stock on hand."
         actions={
-          hasRole(RoleCatelog.inventory_manage) && (
+          hasRole(KeycloakClientRole.inventory_manage) && (
             <>
               <Button variant="secondary" onClick={() => setImportOpen(true)}>
                 <Upload /> Import file
@@ -291,7 +292,7 @@ export default function InventoryPage() {
           <SearchResults term={term} filter={filter} onSelect={openDrug} />
         ) : (
           <AllDrugs
-            isAdmin={hasRole(RoleCatelog.inventory_manage)}
+            isAdmin={hasRole(KeycloakClientRole.inventory_manage)}
             filter={filter}
             onAdd={openAdd}
             onSelect={openDrug}
@@ -314,7 +315,7 @@ export default function InventoryPage() {
       />
       <DrugDetailSheet
         drug={shown}
-        isAdmin={hasRole(RoleCatelog.inventory_manage)}
+        isAdmin={hasRole(KeycloakClientRole.inventory_manage)}
         onClose={() => setSelected(null)}
         onEdit={(d) => {
           setEditing(d);
@@ -326,10 +327,10 @@ export default function InventoryPage() {
         onOpenChange={setFormOpen}
         drug={editing}
       />
-      {hasRole(RoleCatelog.inventory_manage) && (
+      {hasRole(KeycloakClientRole.inventory_manage) && (
         <ImportDialog open={importOpen} onOpenChange={setImportOpen} />
       )}
-      {hasRole(RoleCatelog.inventory_manage) && (
+      {hasRole(KeycloakClientRole.inventory_manage) && (
         <PhotoImportDialog open={photosOpen} onOpenChange={setPhotosOpen} />
       )}
     </div>

@@ -1,16 +1,7 @@
 import { ConvexError } from "convex/values";
 import type { QueryCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
-import { keycloakRolesFromClaims } from "./keycloakRoles";
-
-export const enum RoleCatelog {
-  access = 'access',
-  changes = 'changes',
-  logs = 'logs',
-  settings = 'settings',
-  users = 'users',
-  inventory_manage = 'inventory_manage',
-}
+import { getKeycloakClientRoles, KeycloakClientRole } from "./keycloakRoles";
 
 export async function getSignedInUser(ctx: QueryCtx): Promise<Doc<"users"> | null> {
   const identity = await ctx.auth.getUserIdentity();
@@ -29,7 +20,7 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
       message: "Please sign in"
     });
   }
-  if (!keycloakRolesFromClaims(identity).includes("access")) {
+  if (!getKeycloakClientRoles(identity).includes(KeycloakClientRole.access)) {
     throw new ConvexError({
       code: "FORBIDDEN",
       message: "Your account does not have access rights. Contact your administrator to be granted the required Keycloak role."
@@ -45,13 +36,13 @@ export async function requireActiveUser(ctx: QueryCtx): Promise<Doc<"users">> {
   return user;
 }
 
-export async function requireRole(ctx: QueryCtx, role: RoleCatelog): Promise<Doc<"users">> {
+export async function requireRole(ctx: QueryCtx, role: KeycloakClientRole): Promise<Doc<"users">> {
   const user = await requireActiveUser(ctx);
   const identity = await ctx.auth.getUserIdentity();
-  if (!identity || !keycloakRolesFromClaims(identity).includes(role)) {
+  if (!identity || !getKeycloakClientRoles(identity).includes(role)) {
     throw new ConvexError({
       code: "FORBIDDEN",
-      message: "Only admins can do this",
+      message: `The ${role} role is required for this action`,
     });
   }
   return user;

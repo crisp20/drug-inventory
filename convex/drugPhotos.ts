@@ -1,10 +1,11 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import { requireRole, RoleCatelog } from "./lib/access";
+import { requireRole } from "./lib/access";
 import { SYSTEM_ACTOR, actorOf, logActivity, type Actor } from "./lib/activity";
 import { deleteFiles } from "./lib/drugs";
 import { MAX_PHOTO_BATCH, MAX_PHOTO_CHECK } from "./lib/drugPhotos";
+import { KeycloakClientRole } from "./lib/keycloakRoles";
 
 const photoItem = v.object({ drugId: v.string(), storageId: v.id("_storage") });
 
@@ -49,7 +50,7 @@ async function applyPhotos(
 export const checkPhotos = query({
   args: { drugIds: v.array(v.string()) },
   handler: async (ctx, args) => {
-    await requireRole(ctx, RoleCatelog.inventory_manage);
+    await requireRole(ctx, KeycloakClientRole.inventory_manage);
     if (args.drugIds.length > MAX_PHOTO_CHECK) {
       throw new ConvexError({ code: "BAD_REQUEST", message: `Check at most ${MAX_PHOTO_CHECK} photos at a time` });
     }
@@ -77,7 +78,7 @@ export const checkPhotos = query({
 export const setPhotos = mutation({
   args: { items: v.array(photoItem) },
   handler: async (ctx, args) => {
-    const admin = await requireRole(ctx, RoleCatelog.inventory_manage);
+    const admin = await requireRole(ctx, KeycloakClientRole.inventory_manage);
     if (args.items.length > MAX_PHOTO_BATCH) {
       throw new ConvexError({ code: "BAD_REQUEST", message: `Send at most ${MAX_PHOTO_BATCH} photos at a time` });
     }

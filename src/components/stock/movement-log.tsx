@@ -16,11 +16,12 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty.tsx";
 import { Skeleton } from "@/components/ui/skeleton.tsx";
-import { RoleCatelog, useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
+import {  useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { cn } from "@/lib/utils.ts";
 import UndoMovementDialog from "./undo-movement-dialog.tsx";
 import { hasReprintableLabel } from "@/lib/label/stock-in-label.ts";
 import ReprintLabelDialog from "./reprint-label-dialog.tsx";
+import { KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
 
 const PAGE_SIZE = 25;
 
@@ -212,7 +213,7 @@ export default function MovementLog({
                   Reprint label
                 </Button>
               )}
-              {hasRole(RoleCatelog.logs) && !m.undo && (
+              {hasRole(KeycloakClientRole.logs) && !m.undo && (
                 <Button
                   variant="ghost"
                   size="sm"
