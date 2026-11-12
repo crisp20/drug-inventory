@@ -73,12 +73,14 @@ function RoleGroupMenu({
   user,
   roleGroups,
   isSelf,
-  selfAuthorityRank
+  selfAuthorityRank,
+  setUserGroupMembership,
 }: {
   user: Doc<"users">;
   roleGroups: RoleGroup[];
   isSelf: boolean;
   selfAuthorityRank: number;
+  setUserGroupMembership: (param: { userId: string, groupId: string, isMember: boolean }) => Promise<null>
 }) {
 
   const userAuthorityRank: number = roleGroups.filter(({ members }) => members.includes(user.keycloakUserId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
@@ -114,6 +116,13 @@ function RoleGroupMenu({
             }
             title={group.path}
             aria-label={`${group.path}: ${group.clientRoles.join(", ") || "no client roles"}`}
+            onClick={async () => {
+              await setUserGroupMembership({
+                userId: user.keycloakUserId,
+                groupId: group.id,
+                isMember: !group.members.includes(user.keycloakUserId)
+              })
+            }}
           >
             <span>{group.clientRoles.join(", ") || "No client roles"}</span>
           </DropdownMenuCheckboxItem>
@@ -128,11 +137,13 @@ function UserRow({
   isSelf,
   selfAuthorityRank,
   roleGroups,
+  setUserGroupMembership,
 }: {
   user: Doc<"users">;
   isSelf: boolean;
   selfAuthorityRank: number
   roleGroups: RoleGroup[];
+  setUserGroupMembership: (param: { userId: string, groupId: string, isMember: boolean }) => Promise<null>
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
@@ -149,10 +160,13 @@ function UserRow({
             {user.email ?? "No email"}
           </div>
         )}
+        <div className="text-sm break-all text-muted-foreground">
+          {user.keycloakUserId}
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <InitialsField user={user} />
-        <RoleGroupMenu user={user} roleGroups={roleGroups} isSelf={isSelf} selfAuthorityRank={selfAuthorityRank} />
+        <RoleGroupMenu user={user} roleGroups={roleGroups} isSelf={isSelf} selfAuthorityRank={selfAuthorityRank} setUserGroupMembership={setUserGroupMembership} />
         <CanisterAccessToggle user={user} />
       </div>
     </div>
@@ -161,9 +175,8 @@ function UserRow({
 
 function UserList({ userKeycloakId }: { userKeycloakId: string }) {
   const users = useQuery(api.users.listAll, {});
-  const getManagedGroupsAndMembers = useAction(
-    api.keycloak.getManagedGroupsAndMembers,
-  );
+  const getManagedGroupsAndMembers = useAction(api.keycloak.getManagedGroupsAndMembers);
+  const setUserGroupMembership = useAction(api.keycloak.setUserGroupMembership);
 
   const [roleGroups, setRoleGroups] = useState<RoleGroup[]>([]);
   const [roleLoadError, setRoleLoadError] = useState<string | null>(null);
@@ -226,6 +239,7 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
             isSelf={u.keycloakUserId == userKeycloakId}
             selfAuthorityRank={roleGroups.filter(({ members }) => members.includes(userKeycloakId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)}
             roleGroups={roleGroups}
+            setUserGroupMembership={setUserGroupMembership}
           />
         ))}
       </div>

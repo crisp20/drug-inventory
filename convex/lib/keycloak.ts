@@ -38,6 +38,10 @@ export async function getKeycloakServiceToken(): Promise<string> {
     },
   );
 
+  if (!response.ok) {
+    throw new ConvexError(`Requesting keycloak service token returned ${response.status} ${response.statusText}`);
+  }
+
   const body: unknown = await response.json();
   if (!isRecord(body) || typeof body.access_token !== "string") {
     throw new ConvexError("Keycloak service token response did not include a token");
@@ -49,7 +53,8 @@ export async function keycloakRequest(
   token: string,
   path: string,
   init: RequestInit = {},
-): Promise<unknown> {
+  expectedStatus: number = 200,
+): Promise<Response> {
   const config = keycloakConfig();
   const url = `${config.adminRealmUrl}${path}`;
   const response = await fetch(url, {
@@ -60,10 +65,11 @@ export async function keycloakRequest(
     },
   });
 
+  if (response.status != expectedStatus) {
+    throw new ConvexError(`${url} returned HTTP status ${response.status}, expected HTTP status ${expectedStatus}`);
+  }
 
-  const body = await response.json();
-  // console.log(url, body)
-  return body;
+  return response;
 }
 
 // business logic requests
@@ -83,6 +89,7 @@ export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]>
 
     const { id, path, subGroupCount, clientRoles } = await Promise.resolve()
       .then(() => keycloakRequest(token, `/group-by-path${fullPath}`))
+      .then((response) => response.json())
       .then((response) => {
         if (!isRecord(response)) {
           throw new ConvexError(`'/group-by-path${fullPath}' returned an invalid response`);
@@ -103,7 +110,8 @@ export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]>
 
     if (subGroupCount > 0) {
       await Promise.resolve()
-        .then(() => keycloakRequest(token, `/groups/${id}/children`))
+        .then(() => keycloakRequest(token, `/groups/${encodeURIComponent(id)}/children`))
+        .then((response) => response.json())
         .then((response) => {
           if (!Array.isArray(response) || !response.every(isRecord)) {
             throw new ConvexError(`'/groups/${id}/children' returned an invalid response`);
@@ -143,7 +151,8 @@ export async function getKeycloakGroupMembers(token: string, groupId: string): P
   const pageSize = 1000;
 
   for (let first = 0; ; first += pageSize) {
-    const response = await keycloakRequest(token, `/groups/${groupId}/members?first=${first}&max=${pageSize}`);
+    const response = await keycloakRequest(token, `/groups/${encodeURIComponent(groupId)}/members?first=${first}&max=${pageSize}`)
+      .then((response) => response.json());
     if (!Array.isArray(response)) {
       throw new ConvexError(`'/groups/${groupId}/members' returned an invalid response`);
     }
@@ -161,4 +170,15 @@ export async function getKeycloakGroupMembers(token: string, groupId: string): P
   }
 
   return members;
+}
+
+export async function setKeycloakUserGroupMembership(token: string, userId: string, groupId: string, isMember: boolean): Promise<void> {
+  await keycloakRequest(
+    token,
+    `/users/${encodeURIComponent(userId)}/groups/${encodeURIComponent(groupId)}`,
+    {
+      method: isMember ? 'PUT' : 'DELETE'
+    },
+    204
+  );
 }
