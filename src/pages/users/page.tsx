@@ -20,7 +20,7 @@ import { useKeycloakRoles } from "@/hooks/use-keycloak-roles.ts";
 import { errorMessage } from "@/lib/errors.ts";
 import InitialsField from "./_components/initials-field.tsx";
 import { authorityRank, KeycloakClientRole } from "@/convex/lib/keycloakRoles.ts";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { RoleGroup } from "@/convex/lib/keycloak.ts";
 import {
   DropdownMenu,
@@ -31,6 +31,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu.tsx";
 import { Button } from "@/components/ui/button.tsx";
+
+function membershipToast(success: boolean, message: string) {
+  toast[success ? 'success' : 'error'](
+    message,
+    {
+      position: 'top-center',
+      richColors: true,
+
+    }
+  )
+}
 
 function CanisterAccessToggle({ user }: { user: Doc<"users"> }) {
   const setAccess = useMutation(api.users.setCanisterAccess);
@@ -75,15 +86,44 @@ function RoleGroupMenu({
   isSelf,
   selfAuthorityRank,
   setUserGroupMembership,
+  refreshUserGroups,
 }: {
   user: Doc<"users">;
   roleGroups: RoleGroup[];
   isSelf: boolean;
   selfAuthorityRank: number;
-  setUserGroupMembership: (param: { userId: string, groupId: string, isMember: boolean }) => Promise<null>
+  setUserGroupMembership: (param: {
+    userId: string;
+    groupId: string;
+    isMember: boolean;
+  }) => Promise<unknown>;
+  refreshUserGroups: () => Promise<boolean>;
 }) {
-
   const userAuthorityRank: number = roleGroups.filter(({ members }) => members.includes(user.keycloakUserId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
+  const [updatingGroupIds, setUpdatingGroupIds] = useState<string[]>([]);
+
+  const updateMembership = async (groupId: string, isMember: boolean) => {
+    setUpdatingGroupIds((current) => [...current, groupId]);
+    try {
+      await setUserGroupMembership({
+        userId: user.keycloakUserId,
+        groupId: groupId,
+        isMember,
+      });
+    } catch (error) {
+      membershipToast(false, errorMessage(error, "Could not update Keycloak group membership"))
+      setUpdatingGroupIds((current) => current.filter((id) => id !== groupId));
+      return;
+    }
+
+    try {
+      const refreshed = await refreshUserGroups();
+      membershipToast(refreshed, refreshed ? "Keycloak group membership updated" : "Membership was updated, but the role group list could not be refreshed");
+    } finally {
+      setUpdatingGroupIds((current) => current.filter((id) => id !== groupId));
+    }
+  };
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -107,6 +147,7 @@ function RoleGroupMenu({
             key={group.id}
             checked={group.members.includes(user.keycloakUserId)}
             disabled={
+              updatingGroupIds.includes(group.id) ||
               // this user has more authority than self, not allowed to modify
               selfAuthorityRank <= userAuthorityRank ||
               // this user is self, not allowed to modify
@@ -116,13 +157,9 @@ function RoleGroupMenu({
             }
             title={group.path}
             aria-label={`${group.path}: ${group.clientRoles.join(", ") || "no client roles"}`}
-            onClick={async () => {
-              await setUserGroupMembership({
-                userId: user.keycloakUserId,
-                groupId: group.id,
-                isMember: !group.members.includes(user.keycloakUserId)
-              })
-            }}
+            onCheckedChange={(checked) =>
+              void updateMembership(group.id, checked === true)
+            }
           >
             <span>{group.clientRoles.join(", ") || "No client roles"}</span>
           </DropdownMenuCheckboxItem>
@@ -138,12 +175,18 @@ function UserRow({
   selfAuthorityRank,
   roleGroups,
   setUserGroupMembership,
+  refreshUserGroups,
 }: {
   user: Doc<"users">;
   isSelf: boolean;
-  selfAuthorityRank: number
+  selfAuthorityRank: number;
   roleGroups: RoleGroup[];
-  setUserGroupMembership: (param: { userId: string, groupId: string, isMember: boolean }) => Promise<null>
+  setUserGroupMembership: (param: {
+    userId: string;
+    groupId: string;
+    isMember: boolean;
+  }) => Promise<unknown>;
+  refreshUserGroups: () => Promise<boolean>;
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border bg-card p-4">
@@ -160,13 +203,17 @@ function UserRow({
             {user.email ?? "No email"}
           </div>
         )}
-        <div className="text-sm break-all text-muted-foreground">
-          {user.keycloakUserId}
-        </div>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <InitialsField user={user} />
-        <RoleGroupMenu user={user} roleGroups={roleGroups} isSelf={isSelf} selfAuthorityRank={selfAuthorityRank} setUserGroupMembership={setUserGroupMembership} />
+        <RoleGroupMenu
+          user={user}
+          roleGroups={roleGroups}
+          isSelf={isSelf}
+          selfAuthorityRank={selfAuthorityRank}
+          setUserGroupMembership={setUserGroupMembership}
+          refreshUserGroups={refreshUserGroups}
+        />
         <CanisterAccessToggle user={user} />
       </div>
     </div>
@@ -179,25 +226,21 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
   const setUserGroupMembership = useAction(api.keycloak.setUserGroupMembership);
 
   const [roleGroups, setRoleGroups] = useState<RoleGroup[]>([]);
-  const [roleLoadError, setRoleLoadError] = useState<string | null>(null);
+
+  const refreshUserGroups = useCallback(async (): Promise<boolean> => {
+    try {
+      const { roleGroups } = await getManagedGroupsAndMembers({});
+      setRoleGroups(roleGroups);
+      return true;
+    } catch (error) {
+      membershipToast(false, 'Could not load Keycloak role assignments')
+      return false;
+    }
+  }, [getManagedGroupsAndMembers]);
 
   useEffect(() => {
-    let active = true;
-    getManagedGroupsAndMembers()
-      .then(({ roleGroups }) => {
-        if (active) setRoleGroups(roleGroups);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setRoleLoadError(
-            errorMessage(error, "Could not load Keycloak role assignments"),
-          );
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [getManagedGroupsAndMembers]);
+    void refreshUserGroups();
+  }, [refreshUserGroups]);
 
   if (users === undefined) {
     return (
@@ -226,11 +269,6 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
 
   return (
     <>
-      {roleLoadError && (
-        <p role="alert" className="mb-3 text-sm text-destructive">
-          {roleLoadError}
-        </p>
-      )}
       <div className="space-y-3">
         {users.map((u) => (
           <UserRow
@@ -240,6 +278,7 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
             selfAuthorityRank={roleGroups.filter(({ members }) => members.includes(userKeycloakId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)}
             roleGroups={roleGroups}
             setUserGroupMembership={setUserGroupMembership}
+            refreshUserGroups={refreshUserGroups}
           />
         ))}
       </div>
