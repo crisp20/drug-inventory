@@ -99,7 +99,7 @@ function RoleGroupMenu({
   }) => Promise<unknown>;
   refreshUserGroups: () => Promise<boolean>;
 }) {
-  const userAuthorityRank: number = roleGroups.filter(({ members }) => members.includes(user.keycloakUserId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
+  const userAuthorityRank: number = roleGroups.filter(({ members }) => members.includes(user.keycloakUserId)).flatMap(({ clientRoles }) => clientRoles ?? []).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
   const [updatingGroupIds, setUpdatingGroupIds] = useState<string[]>([]);
 
   const updateMembership = async (groupId: string, isMember: boolean) => {
@@ -145,7 +145,7 @@ function RoleGroupMenu({
       <DropdownMenuContent align="end" className="w-72">
         <DropdownMenuLabel>Role Groups</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {roleGroups.map((group) => (
+        {roleGroups.filter(({ clientRoles }) => clientRoles != undefined && Array.isArray(clientRoles)).map((group) => (
           <DropdownMenuCheckboxItem
             key={group.id}
             checked={group.members.includes(user.keycloakUserId)}
@@ -156,17 +156,17 @@ function RoleGroupMenu({
               // still unable to elevate / revoke their authority rank due to 3rd check
               (!isSelf && selfAuthorityRank <= userAuthorityRank) ||
               // this role has more authority than self, not allowed to modify
-              selfAuthorityRank <= group.clientRoles.map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
+              selfAuthorityRank <= (group.clientRoles ?? []).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
             }
-            title={group.path}
-            aria-label={`${group.path}: ${group.clientRoles.join(", ") || "no client roles"}`}
+            title={group.name}
+            aria-label={`${group.name}: ${(group.clientRoles ?? []).join(", ") || "no client roles"}`}
             onClick={(event) => {
               event.preventDefault(); // prevent dropdown menu from immediately closing after selecting one item
               void updateMembership(group.id, !group.members.includes(user.keycloakUserId))
             }
             }
           >
-            <span>{group.clientRoles.join(", ") || "No client roles"}</span>
+            <span>{group.name}</span>
           </DropdownMenuCheckboxItem>
         ))}
       </DropdownMenuContent>
@@ -280,7 +280,7 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
             key={u._id}
             user={u}
             isSelf={u.keycloakUserId == userKeycloakId}
-            selfAuthorityRank={roleGroups.filter(({ members }) => members.includes(userKeycloakId)).flatMap(({ clientRoles }) => clientRoles).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)}
+            selfAuthorityRank={roleGroups.filter(({ members }) => members.includes(userKeycloakId)).flatMap(({ clientRoles }) => clientRoles ?? []).map(authorityRank).reduce((a, b) => Math.max(a, b), 0)}
             roleGroups={roleGroups}
             setUserGroupMembership={setUserGroupMembership}
             refreshUserGroups={refreshUserGroups}

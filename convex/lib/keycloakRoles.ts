@@ -23,11 +23,12 @@ export const enum KeycloakClientRole {
 }
 
 export function authorityRank(role: string): number {
-  if (role == `${KeycloakClientRole.admin}`) {
-    return 2;
+  switch (role) {
+    case `${KeycloakClientRole.admin}`:
+      return 2;
+    case `${KeycloakClientRole.users}`:
+      return 1;
+    default:
+      return 0;
   }
-  if (role == `${KeycloakClientRole.users}`) {
-    return 1;
-  }
-  return 0;
 }

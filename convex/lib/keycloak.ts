@@ -76,8 +76,9 @@ export async function keycloakRequest(
 
 export interface RoleGroup {
   id: string,
+  name: string,
   path: string,
-  clientRoles: string[],
+  clientRoles?: string[],
   members: string[],
 }
 
@@ -87,41 +88,35 @@ export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]>
   async function getClientRoles(fullPath: string): Promise<RoleGroup[]> {
     const result: RoleGroup[] = [];
 
-    const { id, path, subGroupCount, clientRoles } = await Promise.resolve()
+    const { id, path, name, subGroupCount, clientRoles } = await Promise.resolve()
       .then(() => keycloakRequest(token, `/group-by-path${fullPath}`))
       .then((response) => response.json())
       .then((response) => {
         if (!isRecord(response)) {
           throw new ConvexError(`'/group-by-path${fullPath}' returned an invalid response`);
         }
-        const { id, path, subGroupCount, clientRoles } = response;
-        if (!isString(id) || !isString(path) || !isNumber(subGroupCount)) {
+        const { id, path, name, subGroupCount, clientRoles } = response;
+        if (!isString(id) || !isString(path) || !isString(name) || !isNumber(subGroupCount)) {
           throw new ConvexError(`'/group-by-path${fullPath}' returned an invalid response`);
         }
 
-        if (!isRecord(clientRoles) || !Array.isArray(clientRoles[clientName]) || !clientRoles[clientName].every(isString)) {
+        if (!isRecord(clientRoles)) {
           throw new ConvexError(`'/group-by-path${fullPath}' returned an invalid response`);
         }
-        return { id, path, subGroupCount, clientRoles: clientRoles[clientName] };
+        if (!Array.isArray(clientRoles[clientName]) || !clientRoles[clientName].every(isString)) {
+          return { id, path, name, subGroupCount };
+        } else {
+          return { id, path, name, subGroupCount, clientRoles: clientRoles[clientName] };
+        }
       })
 
     const members = await getKeycloakGroupMembers(token, id);
-    const roleGroup: RoleGroup = { id, path, clientRoles, members };
+    const roleGroup: RoleGroup = { id, path, name, clientRoles, members };
+    result.push(roleGroup);
 
     if (subGroupCount > 0) {
       await Promise.resolve()
-        .then(() => keycloakRequest(token, `/groups/${encodeURIComponent(id)}/children`))
-        .then((response) => response.json())
-        .then((response) => {
-          if (!Array.isArray(response) || !response.every(isRecord)) {
-            throw new ConvexError(`'/groups/${id}/children' returned an invalid response`);
-          }
-          const children = response.map(({ path }) => path);
-          if (!children.every(isString)) {
-            throw new ConvexError(`'/groups/${id}/children' returned an invalid response`);
-          }
-          return children;
-        })
+        .then(() => getKeycloakGroupChildren(token, id, subGroupCount))
         .then((children) => Promise.allSettled(children.map(async path => await getClientRoles(path))))
         .then((children) => {
           const failures = children.filter((r): r is PromiseRejectedResult => r.status === "rejected");
@@ -137,13 +132,36 @@ export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]>
         })
     }
 
-    result.push(roleGroup);
-
     return result;
   }
 
-  const topLevelFullPath = '/drug-inventory-users';
+  const topLevelFullPath = '/drug-inventory';
   return getClientRoles(topLevelFullPath);
+}
+
+async function getKeycloakGroupChildren(token: string, groupId: string, expectedChildrenCount: number): Promise<string[]> {
+  const children: string[] = [];
+  const pageSize = 1000;
+
+  for (let first = 0; ; first += pageSize) {
+    const response = await keycloakRequest(token, `/groups/${encodeURIComponent(groupId)}/children?first=${first}&max=${pageSize}`)
+      .then((response) => response.json());
+    if (!Array.isArray(response)) {
+      throw new ConvexError(`'/groups/${groupId}/children' returned an invalid response`);
+    }
+    const page = response
+      .filter(isRecord)
+      .map(({ path }) => path)
+      .filter((path): path is string => isString(path));
+
+    children.push(...page);
+
+    if (page.length < pageSize || children.length >= expectedChildrenCount) {
+      break;
+    };
+  }
+
+  return children;
 }
 
 export async function getKeycloakGroupMembers(token: string, groupId: string): Promise<string[]> {
