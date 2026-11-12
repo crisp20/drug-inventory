@@ -32,8 +32,8 @@ import {
 } from "@/components/ui/dropdown-menu.tsx";
 import { Button } from "@/components/ui/button.tsx";
 
-function membershipToast(success: boolean, message: string) {
-  toast[success ? 'success' : 'error'](
+function membershipToast(type: 'success' | 'info' | 'error' | 'warning', message: string) {
+  toast[type](
     message,
     {
       position: 'top-center',
@@ -107,18 +107,21 @@ function RoleGroupMenu({
     try {
       await setUserGroupMembership({
         userId: user.keycloakUserId,
-        groupId: groupId,
+        groupId,
         isMember,
       });
     } catch (error) {
-      membershipToast(false, errorMessage(error, "Could not update Keycloak group membership"))
+      membershipToast('error', errorMessage(error, "Could not update Keycloak group membership"))
       setUpdatingGroupIds((current) => current.filter((id) => id !== groupId));
       return;
     }
 
     try {
       const refreshed = await refreshUserGroups();
-      membershipToast(refreshed, refreshed ? "Keycloak group membership updated" : "Membership was updated, but the role group list could not be refreshed");
+      membershipToast(
+        refreshed ? 'success' : 'error',
+        `Keycloak group membership ${isMember ? 'granted' : 'revoked'}${refreshed ? '' : ', but could not refresh group membership info'}`
+      );
     } finally {
       setUpdatingGroupIds((current) => current.filter((id) => id !== groupId));
     }
@@ -148,17 +151,19 @@ function RoleGroupMenu({
             checked={group.members.includes(user.keycloakUserId)}
             disabled={
               updatingGroupIds.includes(group.id) ||
-              // this user has more authority than self, not allowed to modify
-              selfAuthorityRank <= userAuthorityRank ||
-              // this user is self, not allowed to modify
-              isSelf ||
+              // this user has more / equal authority than self, not allowed to modify
+              // but if is self, allowed to modify
+              // still unable to elevate / revoke their authority rank due to 3rd check
+              (!isSelf && selfAuthorityRank <= userAuthorityRank) ||
               // this role has more authority than self, not allowed to modify
               selfAuthorityRank <= group.clientRoles.map(authorityRank).reduce((a, b) => Math.max(a, b), 0)
             }
             title={group.path}
             aria-label={`${group.path}: ${group.clientRoles.join(", ") || "no client roles"}`}
-            onCheckedChange={(checked) =>
-              void updateMembership(group.id, checked === true)
+            onClick={(event) => {
+              event.preventDefault(); // prevent dropdown menu from immediately closing after selecting one item
+              void updateMembership(group.id, !group.members.includes(user.keycloakUserId))
+            }
             }
           >
             <span>{group.clientRoles.join(", ") || "No client roles"}</span>
@@ -233,7 +238,7 @@ function UserList({ userKeycloakId }: { userKeycloakId: string }) {
       setRoleGroups(roleGroups);
       return true;
     } catch (error) {
-      membershipToast(false, 'Could not load Keycloak role assignments')
+      membershipToast('error', 'Could not load Keycloak role assignments')
       return false;
     }
   }, [getManagedGroupsAndMembers]);
