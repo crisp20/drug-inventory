@@ -84,6 +84,7 @@ export interface RoleGroup {
 
 export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]> {
   const clientName = 'drug-inventory';
+  const topLevelGroupFullPath = `/${clientName}`;
 
   async function getClientRoles(fullPath: string): Promise<RoleGroup[]> {
     const result: RoleGroup[] = [];
@@ -135,8 +136,7 @@ export async function getKeycloakRoleGroups(token: string): Promise<RoleGroup[]>
     return result;
   }
 
-  const topLevelFullPath = '/drug-inventory';
-  return getClientRoles(topLevelFullPath);
+  return getClientRoles(topLevelGroupFullPath);
 }
 
 async function getKeycloakGroupChildren(token: string, groupId: string, expectedChildrenCount: number): Promise<string[]> {
